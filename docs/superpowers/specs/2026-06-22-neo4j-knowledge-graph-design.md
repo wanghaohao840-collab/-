@@ -34,7 +34,7 @@ RAG 与图谱采用弱一致性：
 - 建图成功时返回 `graph_status=ready`；
 - 建图失败时 RAG 仍返回成功，并附带 `graph_status=failed` 和安全的错误摘要；
 - 失败任务可通过 API 显式重试，本期不引入 Celery、消息队列或后台 worker；`retry_document_graph` 只接受 `failed` 和 `cleanup_pending` 状态，其他状态返回“文档当前状态不支持重试”且不执行 LLM 或 Neo4j 操作；
-- 本地图谱状态清单记录 `document_id`、状态、错误类型、截断错误摘要、尝试次数和更新时间，不保存密码、密钥或完整 chunk 内容；
+- 本地图谱状态清单是服务读取图谱状态的权威来源，记录 `document_id`、`build_id`、状态、错误类型、截断错误摘要、整文档构建次数、LLM 调用次数和更新时间，不保存密码、密钥或完整 chunk 内容；Neo4j 中的构建状态只作为事务提交标记和崩溃恢复依据；
 - 文档重复导入时，Neo4j 在单个事务内删除该文档旧子图并写入完整新子图。事务失败时回滚，避免半成品覆盖旧图。
 
 文档删除同样采用弱一致性：RAG 删除优先完成；Neo4j 删除失败时状态记为 `cleanup_pending`，可重试。任何删除语句都必须限定目标 `document_id`。
@@ -45,7 +45,7 @@ RAG 与图谱采用弱一致性：
 
 ### 4.1 节点
 
-- `Document {document_id, name, source, graph_status, graph_error, updated_at}`
+- `Document {document_id, build_id, name, source, graph_status, graph_error, updated_at}`
 - `Chapter {chapter_id, document_id, title, level, order, heading_path}`
 - `Chunk {chunk_id, document_id, content, page_number, chunk_index}`
 - `Concept {concept_id, document_id, name, normalized_name, description}`
@@ -75,7 +75,7 @@ RAG 与图谱采用弱一致性：
 
 ### 5.2 LLM 结构化抽取
 
-chunks 按受控批次发送给项目现有 LLM 适配层，每批最多 5 个 chunk，以限制单次调用的 token 用量。提示词要求模型只输出符合 JSON Schema 的对象，其中包含：
+chunks 按受控批次发送给项目现有 LLM 适配层。每批同时满足“最多 5 个 chunk”和“chunk 内容估算合计不超过 4,000 token”；优先使用 LLM 适配器提供的 tokenizer，缺失 tokenizer 时按每个 Unicode 字符计 1 token 做保守估算。现有单个 chunk 若意外超过预算，则单独成批并在调用前由抽取器按窗口切分，所有窗口继续引用原始 `chunk_id`，不得截断或丢弃原文。提示词要求模型只输出符合 JSON Schema 的对象，其中包含：
 
 - concepts；
 - knowledge_points；
@@ -96,7 +96,7 @@ Python 校验层必须执行：
 - 检查关系两端实体是否都出现在本次整文档抽取形成的内存节点集合中；该检查不查询 Neo4j；
 - `document_id` 强制覆盖，禁止信任模型返回的租户或文档范围字段。
 
-每个批次最多尝试 3 次。网络超时、限流、服务端错误、非法 JSON 和 schema 校验失败允许重试；认证失败、配置错误和明确的内容策略拒绝不重试。重试非法输出时附加精简的校验错误，但不回传其他批次内容。若单批 3 次尝试仍失败，则本次整文档构建失败：此前成功批次的结果只存在于当前进程内存，不写入 Neo4j，也不建立持久化批次缓存。未知关系类型或悬空引用在整文档内存校验阶段被发现时同样导致整文档失败，不覆盖已有图谱。
+每个批次最多尝试 3 次。网络超时、限流、服务端错误、非法 JSON 和 schema 校验失败允许重试；认证失败、配置错误和明确的内容策略拒绝不重试。第二、第三次调用前分别等待 `1s + jitter` 和 `2s + jitter`，其中 `jitter` 均匀分布在 `0-250ms`；服务端提供 `Retry-After` 时优先采用该值，但单次等待最多 30 秒。重试非法输出时附加精简的校验错误，但不回传其他批次内容。若单批 3 次尝试仍失败，则本次整文档构建失败：此前成功批次的结果只存在于当前进程内存，不写入 Neo4j，也不建立持久化批次缓存。未知关系类型或悬空引用在整文档内存校验阶段被发现时同样导致整文档失败，不覆盖已有图谱。
 
 ## 6. Neo4j 写入与安全
 
@@ -104,11 +104,15 @@ Python 校验层必须执行：
 
 单文档替换流程在一个事务中执行：
 
-1. 删除目标 `document_id` 的旧节点与关系；
-2. `MERGE` 文档、章节、chunk 和知识节点；
-3. 创建或合并白名单关系；
-4. 更新 `Document.graph_status` 和时间戳；
-5. 提交事务。
+1. 服务生成本次唯一 `build_id`，把本地状态原子写为 `building`；
+2. 删除目标 `document_id` 的旧节点与关系；
+3. `MERGE` 文档、章节、chunk 和知识节点；
+4. 创建或合并白名单关系；
+5. 把 Neo4j `Document.build_id` 写为本次值，同时更新 `graph_status=ready` 和时间戳；
+6. 提交事务；
+7. 事务提交成功后，把本地相同 `build_id` 的状态原子写为 `ready`。
+
+若进程在第 6 步之后、第 7 步之前崩溃，启动恢复通过比对 Neo4j 与本地 `build_id` 确认事务是否已经提交。失败路径不得先把本地状态写为 `ready`。
 
 Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密码、认证 URI、完整 prompt 或完整 chunk 内容。
 
@@ -123,19 +127,26 @@ Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密�
 
 ## 7. 服务与 Tool API
 
+所有服务接口使用统一响应信封：
+
+`{success, document_id, status, data, error, page}`
+
+- `data` 为接口特定对象；无数据时返回对应的空对象或空列表，不返回 `null`；
+- `error` 无错误时为 `null`，否则为 `{type, message}`，其中 `message` 适用 500 字符及脱敏规则；
+- `page` 仅分页接口使用；单集合查询格式为 `{limit, next_cursor}`，完整图查询格式为 `{node_limit, relation_limit, next_node_cursor, next_relation_cursor}`，非分页接口为 `null`；
+- 非 `ready` 状态的查询返回 `success=false`、当前 `status` 和明确 `error`，不返回旧子图。
+
 服务层提供以下接口：
 
-- `build_document_graph(document_id, chunks, metadata) -> {document_id, status, node_count, relation_count, attempt_count, updated_at, error_summary}`
-- `get_document_graph(document_id) -> {document_id, status, nodes, relations}`；`nodes` 包含 `id`、`type` 和公开属性，`relations` 包含 `source_id`、`target_id`、`type` 和公开属性
-- `get_chapter_tree(document_id) -> {document_id, chapters}`；`chapters` 是按 `order` 排序的嵌套列表，每项包含 `chapter_id`、`title`、`level`、`order`、`heading_path`、`chunk_ids` 和 `children`
-- `get_concept_relations(document_id, concept=None) -> {document_id, concepts, relations}`；传入 `concept` 时只返回该概念及其一跳关系
-- `get_knowledge_dependencies(document_id, knowledge_point=None) -> {document_id, knowledge_points, dependencies}`；传入知识点时返回其直接前置和直接后继依赖
-- `get_person_relations(document_id, person=None) -> {document_id, persons, relations}`；传入人物时只返回该人物的一跳关系
-- `get_graph_status(document_id) -> {document_id, status, attempt_count, updated_at, error_type, error_summary}`
-- `retry_document_graph(document_id) ->` 与对应构建或清理操作相同的结果结构；`failed` 触发重建，`cleanup_pending` 只重试删除
-- `delete_document_graph(document_id) -> {document_id, status, nodes_removed, relations_removed, updated_at, error_summary}`
-
-查询只在状态为 `ready` 时返回图数据；其他状态返回当前状态和明确错误，不返回旧子图。所有列表在无结果时返回空列表，不返回 `null`。`error_summary` 无错误时为 `null`。
+- `build_document_graph(document_id, chunks, metadata)`；`data={build_id, node_count, relation_count, attempt_count, llm_attempt_count, updated_at}`
+- `get_document_graph(document_id, node_cursor=None, relation_cursor=None, node_limit=100, relation_limit=100, include_chunk_content=False)`；两个 limit 的范围均为 `1-500`，节点和关系按各自稳定顺序独立分页；`data={nodes, relations}`，`nodes` 包含 `id`、`type` 和公开属性，默认排除 `Chunk.content`，显式请求时才返回；每条关系包含 `source_id`、`target_id`、`type`、公开属性以及两端最小摘要 `{id, type, name}`，即使端点节点不在当前节点页中也可独立解释关系
+- `get_chapter_tree(document_id)`；`data={chapters}`，章节是按 `order` 排序的嵌套列表，每项包含 `chapter_id`、`title`、`level`、`order`、`heading_path`、`chunk_ids` 和 `children`；最多返回 2,000 个章节，超限时返回 `ChapterTreeTooLarge`，不得静默截断树
+- `get_concept_relations(document_id, concept=None, cursor=None, limit=100)`；`data={concepts, relations}`，传入 `concept` 时只返回该概念及其一跳关系，`limit` 最大 500；cursor 只分页关系，当前页关系的端点概念随页返回且不计入 limit
+- `get_knowledge_dependencies(document_id, knowledge_point=None, cursor=None, limit=100)`；`data={knowledge_points, dependencies}`，传入知识点时返回其直接前置和直接后继依赖，`limit` 最大 500；cursor 只分页依赖关系，当前页关系的端点知识点随页返回且不计入 limit
+- `get_person_relations(document_id, person=None, cursor=None, limit=100)`；`data={persons, relations}`，传入人物时只返回该人物的一跳关系，`limit` 最大 500；cursor 只分页人物关系，当前页关系的端点人物随页返回且不计入 limit
+- `get_graph_status(document_id)`；`data={build_id, attempt_count, llm_attempt_count, updated_at}`，错误详情通过统一 `error` 返回
+- `retry_document_graph(document_id)`；使用统一信封和对应构建或清理操作的 `data`；`failed` 触发重建，`cleanup_pending` 只重试删除
+- `delete_document_graph(document_id)`；`data={nodes_removed, relations_removed, updated_at}`
 
 `RAGTool` 增加对应 action，并在 `add_document` 与 `delete_document` 的返回信息中包含图谱状态。查询参数中的 `document_id` 为必填；概念、知识点或人物名称是可选过滤条件。
 
@@ -152,11 +163,15 @@ Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密�
 - `cleanup_pending`：RAG 已删除但图子图清理失败；
 - `deleted`：图子图已删除。
 
-每次状态变更记录 `attempt_count` 和 `updated_at`。错误摘要最多保留 500 个字符，超出部分截断为前 499 个字符加单字符省略号 `…`；摘要写入前必须移除已知连接凭据和完整 LLM 响应。
+每次状态变更记录 `attempt_count`、`llm_attempt_count` 和 `updated_at`。`attempt_count` 只统计整文档构建入口实际开始执行的次数；`llm_attempt_count` 统计当前构建内所有批次的实际 LLM 调用次数，包括批次重试，清理操作不增加这两个计数。错误摘要最多保留 500 个字符，超出部分截断为前 499 个字符加单字符省略号 `…`；摘要写入前必须移除已知连接凭据和完整 LLM 响应。
 
-状态存储初始化时必须扫描所有 `building` 记录，并原子地将其改为 `failed`，错误类型设为 `InterruptedBuild`，错误摘要设为“进程中断，请重试”，从而让崩溃中断的任务回到正常重试路径。该恢复既在服务启动时执行，也在状态存储首次惰性初始化时执行，且重复执行结果一致。
+状态存储只允许由服务实例初始化一次。初始化时扫描所有 `building` 记录：若 Neo4j 中同一文档的 `build_id` 与本地匹配且 `graph_status=ready`，则原子恢复为 `ready`；若标识不匹配，则改为 `failed`，错误类型设为 `InterruptedBuild`，错误摘要设为“进程中断，请重试”；若 Neo4j 暂时不可达，则改为 `failed`，错误类型设为 `RecoveryCheckFailed`，保留安全错误摘要并允许重试。恢复过程幂等，不能在已有构建线程运行期间再次执行。
 
-同一进程内使用以 `document_id` 为键的 `threading.Lock` 字典串行化构建、重试和删除；锁字典的创建和访问由一个独立的全局互斥锁保护，避免两个线程为同一文档创建不同锁。操作结束后可保留文档锁到服务实例销毁，避免锁回收竞态。本机制覆盖单进程内多线程调用，但不覆盖多个 uvicorn worker 或多个服务实例。当前实现只支持单进程/单 worker 部署；若部署层无法保证同一 `document_id` 不被跨进程并发触发，则不得启用自动建图。多 worker 支持需要后续引入分布式锁或唯一任务协调机制。
+同一进程内使用以 `document_id` 为键的 `threading.Lock` 串行化构建、重试和删除。只有公开服务入口获取文档锁；入口持锁后调用不再加锁的私有实现，如 `_build_document_graph_locked` 和 `_delete_document_graph_locked`，禁止私有实现反向调用公开入口，从结构上避免非重入锁死锁。
+
+锁注册表的创建和访问由独立全局互斥锁保护，并为每个文档锁维护包含持有者和等待者的引用计数：线程取得锁对象引用前增加计数，完成或取消等待后在 `finally` 中减少计数，只有计数归零时才能从注册表删除。这样既避免同一文档产生不同锁，也避免文档数量增长导致锁永久堆积。
+
+本机制覆盖单进程内多线程调用，但不覆盖多个 uvicorn worker 或多个服务实例。当前实现只支持单进程/单 worker 部署；若部署层无法保证同一 `document_id` 不被跨进程并发触发，则不得启用自动建图。多 worker 支持需要后续引入分布式锁或唯一任务协调机制。
 
 ## 9. 测试策略
 
@@ -169,10 +184,13 @@ Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密�
 - 稳定 ID 与名称规范化；
 - 章节树构建和 chunk 归属；
 - 实体与关系去重；
-- 每批最多 5 个 chunk、可重试与不可重试错误分类、最多 3 次尝试；
-- 状态转换、遗留 `building` 恢复、500 字符失败摘要截断及敏感信息隐藏；
+- chunk 数与 4,000 token 双重分批、超长 chunk 窗口切分及原始 `chunk_id` 保留；
+- 可重试与不可重试错误分类、最多 3 次尝试、退避抖动和 `Retry-After` 上限；
+- 状态转换、基于 `build_id` 的遗留 `building` 恢复、500 字符失败摘要截断及敏感信息隐藏；
+- `attempt_count` 与 `llm_attempt_count` 分别计数；
 - `failed`、`cleanup_pending` 和其他状态的重试准入规则；
-- 同进程内相同文档串行、不同文档可独立执行。
+- 同进程内相同文档串行、不同文档可独立执行；
+- 公开入口不重入加锁，异常和取消路径正确回收锁引用。
 
 ### 9.2 存储契约测试
 
@@ -185,7 +203,9 @@ Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密�
 - 所有查询和删除都限定 `document_id`；
 - 删除一个文档不会影响另一个文档；
 - 存储对象的字符串表示和可序列化属性不包含 Neo4j 凭据；
-- 查询接口返回第 7 节定义的稳定结构，空集合返回空列表。
+- 查询接口返回第 7 节定义的统一信封，空集合返回空列表；
+- 完整图的节点和关系使用独立游标与限制，关系页始终携带端点最小摘要，默认不返回 `Chunk.content`；
+- 章节树超限时明确失败，不返回被截断的无效树。
 
 ### 9.3 RAG 集成测试
 
@@ -197,6 +217,7 @@ Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密�
 - 删除图失败时 RAG 删除仍成功并产生 `cleanup_pending`；
 - 重试只读取目标 `document_id` 的 chunks。
 - `ready` 和 `building` 状态不会触发额外 LLM 调用。
+- Neo4j 事务提交后、本地 `ready` 写入前模拟崩溃时，启动恢复可通过匹配的 `build_id` 恢复为 `ready`；不匹配和恢复检查失败进入可重试的 `failed`。
 
 ### 9.4 可选真实 Neo4j 测试
 
@@ -209,6 +230,9 @@ Neo4j 连接或事务异常必须回滚。日志和对外错误不得包含密�
 - 所有读写、重试和删除操作都强制使用 `document_id`；
 - Neo4j 或 LLM 故障不影响现有 RAG 导入、检索和问答；
 - 重复导入采用文档级原子替换，不产生残留或重复子图；
+- Neo4j 已提交但本地状态写入中断时，可通过 `build_id` 恢复一致状态；
 - 删除只作用于目标文档，失败可追踪和重试；
+- 同一进程内相同文档操作不会并发或死锁，空闲文档锁不会永久累积；
+- 图查询使用统一响应信封并受分页或章节数量上限保护；
 - 默认自动化测试无需外部服务即可通过，真实 Neo4j 测试可按环境变量启用；
 - 本期不包含 GraphRAG 问答融合、图谱 UI、跨文档实体合并或后台任务队列。
