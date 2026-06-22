@@ -58,20 +58,29 @@ point_name = canonical_json([rag_namespace, document_id, chunk_index])
 point_id = uuid.uuid5(PROJECT_POINT_NAMESPACE_UUID, point_name)
 ```
 
-`PROJECT_POINT_NAMESPACE_UUID` 是项目内固定常量；`canonical_json` 使用固定分隔符和 UTF-8 字符语义序列化列表，避免字符串拼接歧义。该位置型 ID 在 namespace、文档和 chunk 位置不变时保持稳定，即使内容改变也会覆盖同一 point，适合现有“按 document_id 覆盖导入”的语义。覆盖导入仍先清理目标文档，确保缩短后的文档不会遗留孤儿 chunks。
+`PROJECT_POINT_NAMESPACE_UUID` 使用本项目专属固定值 `c273c00a-40ac-47a9-b475-164f135ada18`，该值首次设计时随机生成并硬编码到代码库，不从部署环境动态读取。`canonical_json` 使用固定分隔符和 UTF-8 字符语义序列化列表，避免字符串拼接歧义。该位置型 ID 在 namespace、文档和 chunk 位置不变时保持稳定，即使内容改变也会覆盖同一 point，适合现有“按 document_id 覆盖导入”的语义。
+
+多项目共享同一 Qdrant collection 时，每个项目必须使用不同的项目 namespace UUID；仅共享服务但使用不同 collection 时不受此限制。`rag_namespace` 只约束查询和删除过滤，不能防止同一 collection 内不同项目生成相同 point ID 后在写入时互相覆盖。
 
 ## 批量写入与失败语义
 
-Qdrant 写入每批最多 100 个 points，使用等待服务端确认的 upsert。单批网络或临时服务错误最多重试 3 次；确定性 point ID 使同一批重试保持幂等。
+Qdrant 写入每批最多 100 个 points，使用等待服务端确认的 upsert。确定性 point ID 使同一批重试保持幂等。
 
-Qdrant 不提供跨多个 upsert 批次的事务，因此覆盖导入不是原子操作：后端先删除目标文档旧 points，再逐批写入；任何批次在重试后仍失败，则立即抛出异常，不继续后续批次，也不尝试不可靠的客户端回滚。错误信息必须明确指出目标文档可能处于部分写入状态，可通过重新导入触发完整清理和幂等重建。
+覆盖导入按以下顺序执行：
+
+1. 逐批 upsert 新 chunks，所有批次确认成功后才进入清理步骤；
+2. 删除相同 `rag_namespace + document_id` 下 `chunk_index >= new_chunk_count` 的旧 points，即新文档缩短后遗留的孤儿 chunks。
+
+当前切块逻辑保证 `chunk_index` 从 0 连续递增，因此范围清理与“不在本次写入集合中”等价。此顺序消除了先删除造成的空数据窗口；但 Qdrant 不提供跨批事务，多批写入期间或最终失败后，检索仍可能短暂读到新旧 chunk 混合结果。任何批次在重试后仍失败，则立即抛出 `RAGOperationError`，不继续后续批次、不清理孤儿 chunks，也不尝试不可靠的客户端回滚。错误信息必须指出目标文档可能处于部分更新状态，可通过重新导入完成幂等覆盖和孤儿清理。
+
+重试只适用于网络超时、连接中断和 Qdrant 5xx 响应。Qdrant 4xx 响应（包括认证失败、collection 不存在和参数错误）直接失败，不进行重试。每个失败批次最多重试 3 次，采用指数退避，三次重试前分别等待 0.5 秒、1 秒和 2 秒；退避上限为 4 秒。
 
 ## 数据隔离与操作语义
 
 `rag_namespace` 是 collection 内所有操作的强制过滤条件。`document_id` 是文档范围操作的附加过滤条件。
 
 - 添加文档：沿用现有切块和嵌入流程，将向量和 payload 批量写入 Qdrant。
-- 覆盖导入：仅删除相同 `rag_namespace + document_id` 的旧 points，再写入新 chunks。
+- 覆盖导入：先幂等 upsert 新 chunks，全部成功后再删除相同 `rag_namespace + document_id` 下超出新 chunk 范围的孤儿 points。
 - 检索：始终过滤当前 `rag_namespace`；传入 `document_id` 时叠加文档过滤，随后沿用现有页码去重规则。
 - 全文总结：使用 page size 256，仅滚动读取目标 namespace 和文档的 payload（不返回向量），按 `chunk_index` 或页码形成稳定顺序，再沿用现有跨位置抽样策略。当前实现先分页读取后抽样，以保持现有总结行为；最多扫描 10,000 个 chunks，超过上限时明确报错，避免无界内存占用。后续若超大文档成为真实需求，再引入位置索引或服务端分段抽样。
 - 删除文档：仅删除当前 namespace 下指定 `document_id` 的 points。
@@ -85,6 +94,18 @@ Qdrant 不提供跨多个 upsert 批次的事务，因此覆盖导入不是原�
 RAG 后端层提供明确的配置错误和后端操作错误。Qdrant 客户端异常应保留操作上下文并转换为稳定的项目异常信息，不暴露 API key。异常和日志中的 URL 只保留脱敏后的 scheme、host、port 与 path，移除 userinfo，并隐藏 query string 中的凭据参数；不得记录原始请求 headers、Authorization、API key 或客户端异常中的 request 对象。现有 RAG Tool 继续负责将安全转换后的异常变成用户可读结果。
 
 选择 Qdrant 即代表要求使用 Qdrant。服务不可用时，初始化或首次操作必须失败，不得创建 JSON 缓存作为替代品。
+
+项目定义以下异常类型，全部继承自 `RAGBackendError`：
+
+| 异常类型 | 使用场景 |
+|---|---|
+| `RAGConfigError` | 后端名称错误、Qdrant URL 缺失等配置无效；在初始化阶段抛出。 |
+| `RAGConnectionError` | 服务不可达、连接中断或认证失败。 |
+| `RAGCollectionError` | collection 不存在，或已有 collection 的维度、距离配置不兼容。 |
+| `RAGDocumentTooLargeError` | 全文总结扫描超过 10,000 chunks；用户提示应建议拆分文档后分别导入。 |
+| `RAGOperationError` | 写入、删除、检索、统计等操作失败；附带安全的操作类型及目标 `document_id` 上下文。 |
+
+RAG Tool 捕获 `RAGBackendError` 基类并转换为用户可读结果；未预期的编程错误不伪装成普通后端错误。
 
 ## 兼容性
 
@@ -103,7 +124,9 @@ RAG 后端层提供明确的配置错误和后端操作错误。Qdrant 客户端
 - 进程重启后可正常复用维度与距离配置兼容的已有 collection，且不重复创建；
 - 写入 payload 保留内容、来源、页码、namespace 和 `document_id`；
 - UUID5 point ID 对同一 namespace、文档和 chunk 位置保持稳定，且不同位置不会碰撞；
-- 批次切分、幂等重试及最终失败时的部分写入错误提示；
+- 批次切分、先 upsert 后清理孤儿的覆盖顺序，以及缩短文档后不存在遗留 points；
+- 仅瞬时网络/5xx 错误按 0.5、1、2 秒退避重试，4xx 不重试；
+- 最终失败抛出 `RAGOperationError` 并提示可能存在新旧混合的部分更新；
 - 检索不会跨 namespace 或跨指定文档；
 - 覆盖导入只替换目标文档；
 - 删除文档只删除目标范围；
@@ -112,9 +135,10 @@ RAG 后端层提供明确的配置错误和后端操作错误。Qdrant 客户端
 - 全文总结分页且不读取向量，并在超过 10,000 chunks 时拒绝无界扫描；
 - stats 精确统计当前 namespace 的 chunk 数和去重文档数，不读取向量；
 - URL、query string、headers 和客户端异常 request 信息不会泄露凭据；
+- 10,000 chunks 上限抛出 `RAGDocumentTooLargeError`，其他异常按定义的层次映射；
 - JSON 持久化、检索、删除和重启恢复回归测试。
 
-提供连接独立 Qdrant 服务的集成验证说明，用于人工验证创建 collection、导入、检索、统计、定向删除和清空。自动化测试不依赖外部服务。
+自动化测试不依赖外部服务。连接独立 Qdrant 的人工集成验证步骤见文末附录。
 
 验收成功标准：同一套 RAG Tool 调用可以由配置选择 JSON 或 Qdrant；两种后端的核心行为一致；Qdrant 严格执行 namespace/document 隔离；服务不可用时明确失败；JSON 原有流程不回归。
 
@@ -125,3 +149,39 @@ RAG 后端层提供明确的配置错误和后端操作错误。Qdrant 客户端
 - Qdrant 本地嵌入模式；
 - 多后端运行时热切换；
 - Neo4j 或 GraphRAG 集成。
+
+## 附录：Qdrant 集成验证步骤（人工执行）
+
+### 前置条件
+
+启动本地独立 Qdrant 服务：
+
+```powershell
+docker run --rm --name qdrant-rag-test -p 6333:6333 qdrant/qdrant
+$env:RAG_BACKEND = "qdrant"
+$env:QDRANT_URL = "http://localhost:6333"
+$env:QDRANT_COLLECTION = "rag_knowledge_base"
+```
+
+Linux/macOS 使用：
+
+```bash
+docker run --rm --name qdrant-rag-test -p 6333:6333 qdrant/qdrant
+export RAG_BACKEND=qdrant
+export QDRANT_URL=http://localhost:6333
+export QDRANT_COLLECTION=rag_knowledge_base
+```
+
+Qdrant Dashboard 地址为 `http://localhost:6333/dashboard`。
+
+### 验证步骤
+
+1. 启动应用，确认日志显示选用 Qdrant 且 collection 创建成功；在 Dashboard 中确认存在 `rag_knowledge_base`。
+2. 导入一篇文档，确认 points 数量增加，payload 包含 `document_id`、`rag_namespace`、`chunk_index`、内容及来源 metadata。
+3. 执行检索，确认结果只来自目标 namespace/文档，且来源、页码等字段与导入文档一致。
+4. 执行 `stats`，确认精确文档数和 chunk 数与已导入内容匹配。
+5. 修改同一文档后覆盖导入：等长切块时 points 数量不增加，缩短时数量减少；检索不再返回被替换或已成为孤儿的旧内容。
+6. 删除该文档，确认对应 points 消失，其他文档和 namespace 的 points 不受影响。
+7. 执行 `clear`，确认当前 namespace 的 points 全部删除，预先放置的其他 namespace points 保持不变。
+8. 重新导入数据并重启应用，确认兼容的已有 collection 被直接复用，数据仍可检索。
+9. 停止 Qdrant 服务后重启应用，确认得到 `RAGConnectionError`，且未创建或写入 JSON 缓存。
