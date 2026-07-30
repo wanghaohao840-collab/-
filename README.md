@@ -104,6 +104,23 @@ http://127.0.0.1:7860
 
 ---
 
+## Docker 单节点部署
+
+目标是单台 Linux 云主机或内网服务器上的单副本 Compose 部署。默认启动
+Gradio 应用和 Qdrant，Neo4j 通过 `graph` Profile 按需启动；只有应用端口
+发布到宿主机，数据保存在 `deploy-data/`。
+
+```sh
+cp deploy/.env.example deploy/.env
+# 编辑 deploy/.env，设置 LLM_API_KEY、LLM_BASE_URL 和 LLM_MODEL_ID
+docker compose --env-file deploy/.env up -d --build
+python3 deploy/smoke_test.py --env-file deploy/.env
+```
+
+完整的内网防火墙、Neo4j Profile、冷备份/恢复和故障处理说明见
+[`deploy/README.md`](deploy/README.md)。该部署保持单副本、单 worker，直接
+HTTP 仅适用于受控内网；公网访问必须由外部 HTTPS 网关保护。
+
 ## 系统流程图
 
 ```mermaid
