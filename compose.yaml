@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     env_file:
       - ${DEPLOY_ENV_FILE:-deploy/.env}
     environment:

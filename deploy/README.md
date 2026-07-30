@@ -26,13 +26,19 @@ LLM_MODEL_ID=your-model
 ```
 
 `LLM_BASE_URL` 可以是公司内网的 OpenAI 兼容网关，也可以是服务器可访问的
-外部接口。不要提交 `deploy/.env`。
+外部接口。把 `APP_UID` 和 `APP_GID` 改为运行 Docker Compose 的部署账号：
 
-创建宿主机数据目录，并让非 root 应用用户 UID 10001 可以写入应用目录：
+```sh
+id -u
+id -g
+```
+
+不要提交 `deploy/.env`。
+
+使用同一个部署账号创建数据目录并启动：
 
 ```sh
 mkdir -p deploy-data/app deploy-data/qdrant
-sudo chown -R 10001:10001 deploy-data/app
 docker compose --env-file deploy/.env up -d --build
 docker compose --env-file deploy/.env ps
 python3 deploy/smoke_test.py --env-file deploy/.env
@@ -101,6 +107,8 @@ docker compose --env-file deploy/.env down
 
 备份会短暂停止当前运行的应用、Qdrant 和已启用的 Neo4j，以确保 SQLite、
 JSON 和数据库文件一致。脚本会在退出时重新启动原先运行的服务。
+备份与恢复都必须使用启动 Compose 的同一个部署账号执行，不要使用 `sudo`，
+从而让恢复后的应用文件继续归 `APP_UID`/`APP_GID` 所代表的账号所有。
 
 ```sh
 sh deploy/backup.sh --env-file deploy/.env

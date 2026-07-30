@@ -33,6 +33,15 @@ def test_only_app_publishes_a_host_port():
     assert "ports:" not in neo4j_block
 
 
+def test_app_runs_as_the_deployment_account():
+    source = COMPOSE.read_text(encoding="utf-8")
+    env_source = ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    assert 'user: "${APP_UID:-1000}:${APP_GID:-1000}"' in source
+    assert "APP_UID=1000" in env_source
+    assert "APP_GID=1000" in env_source
+
+
 def test_environment_template_contains_no_real_secret():
     source = ENV_EXAMPLE.read_text(encoding="utf-8")
 
