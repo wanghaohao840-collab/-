@@ -7,6 +7,7 @@ import gradio as gr
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from ui.launch_config import load_launch_config
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
@@ -551,8 +552,4 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="127.0.0.1",
-        server_port=7860,
-        share=False
-    )
+    demo.launch(**load_launch_config().as_gradio_kwargs())
