@@ -157,6 +157,56 @@ def test_qdrant_pipeline_forwards_progress_through_preparation_and_upsert():
     ]
 
 
+@pytest.mark.parametrize(
+    "pipeline_factory",
+    [
+        lambda tmp_path: SimpleRAGPipeline(
+            cache_path=str(tmp_path / "live-progress.json")
+        ),
+        lambda tmp_path: RAGPipeline(
+            collection_name="live_progress",
+            rag_namespace="user-a",
+            vector_store=InMemoryVectorStore(),
+        ),
+    ],
+)
+def test_replace_forwards_embedding_progress_while_preparation_is_running(
+    tmp_path, pipeline_factory
+):
+    updates = []
+    snapshots = []
+    pipeline = pipeline_factory(tmp_path)
+    pipeline._split_text = lambda text: text.split()
+
+    def embed(text):
+        snapshots.append(list(updates))
+        return [1.0] * pipeline.dimension
+
+    pipeline._to_vector = embed
+    result = pipeline.replace_document(
+        "doc-live",
+        [DocumentSegment("alpha beta", {})],
+        progress_callback=lambda *update: updates.append(update),
+    )
+
+    assert result["success"] is True
+    assert snapshots == [
+        [("chunking", 0, 1, "chunking")],
+        [
+            ("chunking", 0, 1, "chunking"),
+            ("chunking", 1, 1, "chunking"),
+            ("embedding", 1, 2, "embedding"),
+        ],
+    ]
+    assert [update[0] for update in updates[:4]] == [
+        "chunking",
+        "chunking",
+        "embedding",
+        "embedding",
+    ]
+    assert all(update[0] == "persisting" for update in updates[4:])
+
+
 def test_structured_authentication_error_is_not_retryable(monkeypatch):
     tool = RAGTool()
 
@@ -278,14 +328,15 @@ def test_safe_action_data_recursively_redacts_known_path_and_credentials(
 
 
 @pytest.mark.parametrize(
-    ("status_code", "message"),
+    ("status_code", "message", "retryable"),
     [
-        (503, "Service unavailable"),
-        (429, "Too Many Requests"),
+        (503, "provider alpha failure", True),
+        (429, "provider beta refusal", True),
+        (400, "Service unavailable", False),
     ],
 )
-def test_wrapped_qdrant_operation_errors_remain_retryable(
-    monkeypatch, status_code, message
+def test_wrapped_qdrant_operation_errors_preserve_retry_metadata(
+    monkeypatch, status_code, message, retryable
 ):
     store = QdrantVectorStore(client=object(), retry_delays=())
 
@@ -306,8 +357,19 @@ def test_wrapped_qdrant_operation_errors_remain_retryable(
     result = tool.execute_result("add_document", file_path="document.md")
 
     assert re.search(r"\b[45]\d{2}\b", str(captured.value)) is None
+    assert captured.value.status_code == status_code
+    assert captured.value.retryable is retryable
     assert result.error_code == "rag_operation"
-    assert result.retryable is True
+    assert result.retryable is retryable
+
+
+def test_operation_error_metadata_remains_optional():
+    error = RAGOperationError("legacy failure", operation="search")
+
+    assert str(error) == "legacy failure"
+    assert error.operation == "search"
+    assert error.status_code is None
+    assert error.retryable is None
 
 
 @pytest.mark.parametrize(

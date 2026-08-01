@@ -13,6 +13,7 @@ from hello_agents.memory.rag.errors import (
 )
 from hello_agents.memory.rag.prepare import (
     prepare_document_chunks,
+    progress_with_chunking_boundary,
     qdrant_point_id,
     report_progress,
     utc_now_iso,
@@ -115,7 +116,11 @@ class RAGPipeline:
 
         existing_count = self._max_chunk_index(document_id) + 1
         report_progress(progress_callback, "chunking", 0, 1, "chunking")
-        embedding_updates: list[tuple[str, int, int, str]] = []
+        prepare_progress, complete_chunking = progress_with_chunking_boundary(
+            progress_callback,
+            1,
+            1,
+        )
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=[DocumentSegment(text, metadata or {})],
@@ -123,17 +128,9 @@ class RAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=lambda ns, doc, index: qdrant_point_id(ns, doc, existing_count + index),
-            progress_callback=(
-                lambda stage, done, total, message: embedding_updates.append(
-                    (stage, done, total, message)
-                )
-            )
-            if progress_callback is not None
-            else None,
+            progress_callback=prepare_progress,
         )
-        report_progress(progress_callback, "chunking", 1, 1, "chunking")
-        for update in embedding_updates:
-            report_progress(progress_callback, *update)
+        complete_chunking()
         for chunk in prepared:
             chunk.metadata["chunk_index"] = existing_count + int(chunk.metadata["chunk_index"])
         self._upsert_chunks(prepared, progress_callback=progress_callback)
@@ -157,7 +154,11 @@ class RAGPipeline:
             return {"success": False, "message": "document_id cannot be empty", "chunks_added": 0, "chunks_removed": 0}
 
         report_progress(progress_callback, "chunking", 0, len(segments), "chunking")
-        embedding_updates: list[tuple[str, int, int, str]] = []
+        prepare_progress, complete_chunking = progress_with_chunking_boundary(
+            progress_callback,
+            len(segments),
+            len(segments),
+        )
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=segments,
@@ -165,19 +166,9 @@ class RAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=qdrant_point_id,
-            progress_callback=(
-                lambda stage, done, total, message: embedding_updates.append(
-                    (stage, done, total, message)
-                )
-            )
-            if progress_callback is not None
-            else None,
+            progress_callback=prepare_progress,
         )
-        report_progress(
-            progress_callback, "chunking", len(segments), len(segments), "chunking"
-        )
-        for update in embedding_updates:
-            report_progress(progress_callback, *update)
+        complete_chunking()
         existing_payloads = self._scroll_payloads(document_id=document_id)
         old_count = len(existing_payloads)
         if not prepared and not allow_empty:

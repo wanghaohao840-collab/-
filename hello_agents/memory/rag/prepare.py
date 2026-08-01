@@ -71,6 +71,30 @@ def report_progress(
         logger.warning("RAG progress callback failed", exc_info=True)
 
 
+def progress_with_chunking_boundary(
+    callback: ProgressCallback | None,
+    done: int,
+    total: int,
+) -> tuple[ProgressCallback | None, Callable[[], None]]:
+    """Forward progress live after reporting chunking completion exactly once."""
+
+    chunking_completed = False
+
+    def complete_chunking() -> None:
+        nonlocal chunking_completed
+        if chunking_completed:
+            return
+        chunking_completed = True
+        report_progress(callback, "chunking", done, total, "chunking")
+
+    def forward(stage: str, current: int, stage_total: int, message: str) -> None:
+        if stage == "embedding":
+            complete_chunking()
+        report_progress(callback, stage, current, stage_total, message)
+
+    return (forward if callback is not None else None), complete_chunking
+
+
 def prepare_document_chunks(
     document_id: str,
     segments: Sequence[DocumentSegment],

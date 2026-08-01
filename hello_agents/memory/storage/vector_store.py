@@ -631,6 +631,12 @@ class QdrantVectorStore:
         return RAGOperationError(
             f"Qdrant operation {operation} failed: {message}",
             operation=operation,
+            status_code=status,
+            retryable=(
+                None
+                if status is None
+                else status in {408, 425, 429} or status >= 500
+            ),
         )
 
     def _create_client(self):

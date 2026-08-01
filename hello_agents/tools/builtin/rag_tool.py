@@ -467,6 +467,9 @@ class RAGTool(Tool):
         explicit = getattr(error, "retryable", None)
         if explicit is not None:
             return bool(explicit)
+        status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code in {408, 425, 429} or status_code >= 500
         text = str(error).lower()
         status_match = re.search(r"\b([45]\d{2})\b", text)
         if status_match:

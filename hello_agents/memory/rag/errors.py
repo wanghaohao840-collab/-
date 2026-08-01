@@ -35,9 +35,19 @@ class RAGEmbeddingError(RAGBackendError):
 class RAGOperationError(RAGBackendError):
     """Backend operation failed."""
 
-    def __init__(self, message: str, *, operation: str = "", document_id: str = ""):
+    def __init__(
+        self,
+        message: str,
+        *,
+        operation: str = "",
+        document_id: str = "",
+        status_code: int | None = None,
+        retryable: bool | None = None,
+    ):
         self.operation = operation
         self.document_id = document_id
+        self.status_code = status_code
+        self.retryable = retryable
         super().__init__(message)
 
 

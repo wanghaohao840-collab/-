@@ -17,6 +17,7 @@ from hello_agents.memory.rag.errors import RAGConfigError
 from hello_agents.memory.rag.prepare import (
     default_chunk_id,
     prepare_document_chunks,
+    progress_with_chunking_boundary,
     report_progress,
     utc_now_iso,
 )
@@ -255,7 +256,11 @@ class SimpleRAGPipeline:
             }
 
         report_progress(progress_callback, "chunking", 0, len(segments), "chunking")
-        embedding_updates: list[tuple[str, int, int, str]] = []
+        prepare_progress, complete_chunking = progress_with_chunking_boundary(
+            progress_callback,
+            len(segments),
+            len(segments),
+        )
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=segments,
@@ -263,19 +268,9 @@ class SimpleRAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=default_chunk_id,
-            progress_callback=(
-                lambda stage, done, total, message: embedding_updates.append(
-                    (stage, done, total, message)
-                )
-            )
-            if progress_callback is not None
-            else None,
+            progress_callback=prepare_progress,
         )
-        report_progress(
-            progress_callback, "chunking", len(segments), len(segments), "chunking"
-        )
-        for update in embedding_updates:
-            report_progress(progress_callback, *update)
+        complete_chunking()
         if not prepared and not allow_empty:
             return {
                 "success": False,
