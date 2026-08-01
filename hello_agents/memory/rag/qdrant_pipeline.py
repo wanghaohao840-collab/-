@@ -115,6 +115,7 @@ class RAGPipeline:
 
         existing_count = self._max_chunk_index(document_id) + 1
         report_progress(progress_callback, "chunking", 0, 1, "chunking")
+        embedding_updates: list[tuple[str, int, int, str]] = []
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=[DocumentSegment(text, metadata or {})],
@@ -122,9 +123,17 @@ class RAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=lambda ns, doc, index: qdrant_point_id(ns, doc, existing_count + index),
-            progress_callback=progress_callback,
+            progress_callback=(
+                lambda stage, done, total, message: embedding_updates.append(
+                    (stage, done, total, message)
+                )
+            )
+            if progress_callback is not None
+            else None,
         )
         report_progress(progress_callback, "chunking", 1, 1, "chunking")
+        for update in embedding_updates:
+            report_progress(progress_callback, *update)
         for chunk in prepared:
             chunk.metadata["chunk_index"] = existing_count + int(chunk.metadata["chunk_index"])
         self._upsert_chunks(prepared, progress_callback=progress_callback)
@@ -148,6 +157,7 @@ class RAGPipeline:
             return {"success": False, "message": "document_id cannot be empty", "chunks_added": 0, "chunks_removed": 0}
 
         report_progress(progress_callback, "chunking", 0, len(segments), "chunking")
+        embedding_updates: list[tuple[str, int, int, str]] = []
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=segments,
@@ -155,11 +165,19 @@ class RAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=qdrant_point_id,
-            progress_callback=progress_callback,
+            progress_callback=(
+                lambda stage, done, total, message: embedding_updates.append(
+                    (stage, done, total, message)
+                )
+            )
+            if progress_callback is not None
+            else None,
         )
         report_progress(
             progress_callback, "chunking", len(segments), len(segments), "chunking"
         )
+        for update in embedding_updates:
+            report_progress(progress_callback, *update)
         existing_payloads = self._scroll_payloads(document_id=document_id)
         old_count = len(existing_payloads)
         if not prepared and not allow_empty:

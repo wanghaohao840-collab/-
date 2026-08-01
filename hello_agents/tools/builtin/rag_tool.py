@@ -404,8 +404,10 @@ class RAGTool(Tool):
         normalized_action = (action or kwargs.get("action") or "").lower().strip()
         self._last_action_data = {}
         message = self.execute(action, **kwargs)
+        file_path = kwargs.get("file_path")
         data = self._safe_action_data(
-            dict(getattr(self, "_last_action_data", {}) or {})
+            dict(getattr(self, "_last_action_data", {}) or {}),
+            file_path=file_path,
         )
         success = data.get("success")
         if success is None:
@@ -420,7 +422,7 @@ class RAGTool(Tool):
                 failure, normalized_action
             )
             error_summary = self._safe_action_error(
-                failure or message, kwargs.get("file_path")
+                failure or message, file_path
             )
             data["error_code"] = error_code
             data["retryable"] = retryable
@@ -477,6 +479,12 @@ class RAGTool(Tool):
                 "timed out",
                 "temporarily unavailable",
                 "temporary outage",
+                "service unavailable",
+                "too many requests",
+                "rate limit",
+                "rate-limit",
+                "gateway timeout",
+                "request timeout",
                 "connection reset",
             )
         )
@@ -498,20 +506,28 @@ class RAGTool(Tool):
         )
         return text[:500]
 
-    def _safe_action_data(self, value: Any) -> Any:
+    def _safe_action_data(
+        self, value: Any, file_path: object = None
+    ) -> Any:
         if isinstance(value, dict):
             return {
-                key: self._safe_action_data(item)
+                key: self._safe_action_data(item, file_path=file_path)
                 for key, item in value.items()
                 if str(key).lower()
                 not in {"file_path", "traceback", "stack", "stack_trace"}
             }
         if isinstance(value, list):
-            return [self._safe_action_data(item) for item in value]
+            return [
+                self._safe_action_data(item, file_path=file_path)
+                for item in value
+            ]
         if isinstance(value, tuple):
-            return tuple(self._safe_action_data(item) for item in value)
+            return tuple(
+                self._safe_action_data(item, file_path=file_path)
+                for item in value
+            )
         if isinstance(value, str):
-            return self._safe_action_error(value)
+            return self._safe_action_error(value, file_path)
         return value
 
     def _looks_like_failure(self, message: str) -> bool:

@@ -1,10 +1,11 @@
-from hello_agents.memory.rag.contracts import DocumentSegment, RAGActionResult
 import json
+import re
 import sys
 from types import SimpleNamespace
 
 import pytest
 
+from hello_agents.memory.rag.contracts import DocumentSegment, RAGActionResult
 from hello_agents.memory.rag.errors import (
     RAGAuthenticationError,
     RAGCollectionError,
@@ -17,7 +18,10 @@ from hello_agents.memory.rag.errors import (
 from hello_agents.memory.rag.pipeline import SimpleRAGPipeline
 from hello_agents.memory.rag.prepare import prepare_document_chunks
 from hello_agents.memory.rag.qdrant_pipeline import RAGPipeline
-from hello_agents.memory.storage.vector_store import InMemoryVectorStore
+from hello_agents.memory.storage.vector_store import (
+    InMemoryVectorStore,
+    QdrantVectorStore,
+)
 from hello_agents.tools.builtin.rag_tool import RAGTool
 
 
@@ -73,9 +77,9 @@ def test_json_add_text_reports_complete_stage_order(tmp_path):
     assert result["success"] is True
     assert updates == [
         ("chunking", 0, 1, "chunking"),
+        ("chunking", 1, 1, "chunking"),
         ("embedding", 1, 2, "embedding"),
         ("embedding", 2, 2, "embedding"),
-        ("chunking", 1, 1, "chunking"),
         ("persisting", 1, 2, "persisting"),
         ("persisting", 2, 2, "persisting"),
     ]
@@ -100,10 +104,10 @@ def test_json_replace_document_reports_vector_and_cache_persistence(tmp_path):
     assert result["success"] is True
     assert updates == [
         ("chunking", 0, 2, "chunking"),
+        ("chunking", 2, 2, "chunking"),
         ("embedding", 1, 3, "embedding"),
         ("embedding", 2, 3, "embedding"),
         ("embedding", 3, 3, "embedding"),
-        ("chunking", 2, 2, "chunking"),
         ("persisting", 1, 2, "persisting"),
         ("persisting", 2, 2, "persisting"),
     ]
@@ -146,9 +150,9 @@ def test_qdrant_pipeline_forwards_progress_through_preparation_and_upsert():
     assert result["success"] is True
     assert updates == [
         ("chunking", 0, 1, "chunking"),
+        ("chunking", 1, 1, "chunking"),
         ("embedding", 1, 2, "embedding"),
         ("embedding", 2, 2, "embedding"),
-        ("chunking", 1, 1, "chunking"),
         ("persisting", 1, 1, "persisting"),
     ]
 
@@ -237,10 +241,116 @@ def test_structured_error_omits_paths_credentials_urls_and_tracebacks(
     assert str(file_path) not in result.error
     assert credential not in result.error
     assert "password" not in result.error
+    assert str(file_path) not in result.data["nested"]["message"]
+    assert credential not in result.data["nested"]["message"]
+    assert "password" not in result.data["nested"]["message"]
     assert str(file_path) not in rendered_data
     assert credential not in rendered_data
     assert "password" not in rendered_data
     assert "traceback" not in result.data
+
+
+def test_safe_action_data_recursively_redacts_known_path_and_credentials(
+    tmp_path
+):
+    credential = "nested-secret"
+    file_path = tmp_path / "private" / "document.md"
+    tool = RAGTool(qdrant_api_key=credential)
+
+    sanitized = tool._safe_action_data(
+        {
+            "nested": [
+                {
+                    "message": (
+                        f"failed {file_path}; api_key={credential}; "
+                        f"https://user:password@example.com?token={credential}"
+                    )
+                }
+            ]
+        },
+        file_path=file_path,
+    )
+    message = sanitized["nested"][0]["message"]
+
+    assert str(file_path) not in message
+    assert credential not in message
+    assert "password" not in message
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (503, "Service unavailable"),
+        (429, "Too Many Requests"),
+    ],
+)
+def test_wrapped_qdrant_operation_errors_remain_retryable(
+    monkeypatch, status_code, message
+):
+    store = QdrantVectorStore(client=object(), retry_delays=())
+
+    def fail():
+        error = RuntimeError(message)
+        error.status_code = status_code
+        raise error
+
+    with pytest.raises(RAGOperationError) as captured:
+        store._call("upsert", fail)
+
+    tool = RAGTool()
+
+    def raise_wrapped(**kwargs):
+        raise captured.value
+
+    monkeypatch.setattr(tool, "_add_document", raise_wrapped)
+    result = tool.execute_result("add_document", file_path="document.md")
+
+    assert re.search(r"\b[45]\d{2}\b", str(captured.value)) is None
+    assert result.error_code == "rag_operation"
+    assert result.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("pipeline_factory", "expected_updates"),
+    [
+        (
+            lambda tmp_path: SimpleRAGPipeline(
+                cache_path=str(tmp_path / "empty.json")
+            ),
+            [
+                ("chunking", 0, 1, "chunking"),
+                ("chunking", 1, 1, "chunking"),
+                ("persisting", 1, 1, "persisting"),
+            ],
+        ),
+        (
+            lambda tmp_path: RAGPipeline(
+                collection_name="empty_progress",
+                rag_namespace="user-a",
+                vector_store=InMemoryVectorStore(),
+            ),
+            [
+                ("chunking", 0, 1, "chunking"),
+                ("chunking", 1, 1, "chunking"),
+            ],
+        ),
+    ],
+)
+def test_empty_replace_completes_chunking_without_embedding(
+    tmp_path, pipeline_factory, expected_updates
+):
+    updates = []
+    pipeline = pipeline_factory(tmp_path)
+
+    result = pipeline.replace_document(
+        "doc-empty",
+        [DocumentSegment(" ", {})],
+        allow_empty=True,
+        progress_callback=lambda *update: updates.append(update),
+    )
+
+    assert result["success"] is True
+    assert updates == expected_updates
 
 
 class _RecordingPipeline:
