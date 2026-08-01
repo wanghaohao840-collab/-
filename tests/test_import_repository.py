@@ -1,7 +1,11 @@
+import sqlite3
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import app.import_repository as import_repository
 from app.auth import AuthService
 from app.database import initialize_database
 from app.import_models import ImportTaskCreate
@@ -76,6 +80,80 @@ def test_claim_respects_blocked_user_and_claims_due_retry(tmp_path):
 
     assert repo.claim_next(set(), now="2026-07-30T00:00:01Z") is None
     assert repo.claim_next(set(), now="2026-07-30T00:00:02Z").task_id == task.task_id
+
+
+def test_competing_claims_preserve_one_running_task_per_user(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    batch_id = str(uuid.uuid4())
+    first = make_task(
+        user_id,
+        batch_id=batch_id,
+        task_id="00000000-0000-0000-0000-000000000010",
+    )
+    second = make_task(
+        user_id,
+        batch_id=batch_id,
+        task_id="00000000-0000-0000-0000-000000000011",
+    )
+    repo.create_batch(user_id, [first, second], now="2026-07-30T00:00:00Z")
+    start = threading.Barrier(2)
+
+    def claim():
+        start.wait()
+        return repo.claim_next(set(), now="2026-07-30T00:00:00Z")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: claim(), range(2)))
+
+    claimed = [task for task in results if task is not None]
+    assert len(claimed) == 1
+    assert claimed[0].task_id == first.task_id
+    summary = repo.get_batch(user_id, batch_id)
+    assert summary.running == 1
+    assert summary.queued == 1
+    assert [task.total_attempt_count for task in summary.tasks] == [1, 0]
+
+
+def test_claim_next_skips_candidate_when_running_user_index_conflicts(tmp_path, monkeypatch):
+    repo, user_id = make_repo(tmp_path)
+    other_user = AuthService(repo.db_path).register("fallback-user", "correct horse battery").id
+    first = make_task(
+        user_id,
+        task_id="00000000-0000-0000-0000-000000000020",
+    )
+    second = make_task(
+        other_user,
+        task_id="00000000-0000-0000-0000-000000000021",
+    )
+    repo.create_batch(user_id, [first], now="2026-07-30T00:00:00Z")
+    repo.create_batch(other_user, [second], now="2026-07-30T00:00:00Z")
+    original_connect = import_repository.connect
+
+    class FailingFirstClaimConnection:
+        fail_next_claim = True
+
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, sql, parameters=()):
+            if self.fail_next_claim and "set status = 'running'" in sql:
+                self.fail_next_claim = False
+                raise sqlite3.IntegrityError("uq_import_tasks_running_user")
+            return self._connection.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    def connect_with_failed_first_claim(db_path):
+        return FailingFirstClaimConnection(original_connect(db_path))
+
+    monkeypatch.setattr(import_repository, "connect", connect_with_failed_first_claim)
+
+    claimed = repo.claim_next(set(), now="2026-07-30T00:00:00Z")
+    monkeypatch.setattr(import_repository, "connect", original_connect)
+
+    assert claimed.task_id == second.task_id
+    assert repo.get_task(user_id, first.task_id).status == "queued"
 
 
 def test_user_scoped_reads_and_failed_retry_reset_retry_state(tmp_path):
