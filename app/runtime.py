@@ -26,6 +26,8 @@ class UserRuntime:
     history: HistoryRepository
     reports: ReportService
     recovery: RecoveryService
+    active_session_count: int = 0
+    active_background_count: int = 0
 
     def close(self) -> None:
         close = getattr(self.rag_tool, "close", None)
@@ -94,10 +96,51 @@ class UserRuntimeRegistry:
             self._runtimes[user_id] = runtime
             return runtime
 
-    def release_if_unused(self, user_id: str, active_session_count: int) -> None:
-        if active_session_count > 0:
-            return
+    def acquire_session(self, user_id: str) -> UserRuntime:
         with self._lock:
-            runtime = self._runtimes.pop(user_id, None)
-        if runtime is not None:
-            runtime.close()
+            runtime = self.get_or_create(user_id)
+            runtime.active_session_count += 1
+            return runtime
+
+    def release_session(self, user_id: str) -> None:
+        with self._lock:
+            runtime = self._runtimes.get(user_id)
+            if runtime is None:
+                return
+            runtime.active_session_count = max(0, runtime.active_session_count - 1)
+            self._release_if_unused_locked(user_id)
+
+    def acquire_background(self, user_id: str) -> UserRuntime:
+        with self._lock:
+            runtime = self.get_or_create(user_id)
+            runtime.active_background_count += 1
+            return runtime
+
+    def release_background(self, user_id: str) -> None:
+        with self._lock:
+            runtime = self._runtimes.get(user_id)
+            if runtime is None:
+                return
+            runtime.active_background_count = max(0, runtime.active_background_count - 1)
+            self._release_if_unused_locked(user_id)
+
+    def has_runtime(self, user_id: str) -> bool:
+        with self._lock:
+            return user_id in self._runtimes
+
+    def release_if_unused(
+        self, user_id: str, active_session_count: int | None = None
+    ) -> None:
+        """Compatibility wrapper for callers that do not own a lease."""
+
+        with self._lock:
+            self._release_if_unused_locked(user_id)
+
+    def _release_if_unused_locked(self, user_id: str) -> None:
+        runtime = self._runtimes.get(user_id)
+        if runtime is None:
+            return
+        if runtime.active_session_count or runtime.active_background_count:
+            return
+        self._runtimes.pop(user_id, None)
+        runtime.close()

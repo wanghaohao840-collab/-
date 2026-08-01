@@ -16,6 +16,8 @@ def test_user_runtime_registry_reuses_runtime_per_user(tmp_path):
     assert first is not other
     assert first.lock is second.lock
     assert first.paths.history == tmp_path / "data" / "users" / "user-1" / "history.json"
+    assert first.active_session_count == 0
+    assert first.active_background_count == 0
 
 
 def test_runtime_lock_guards_history_writes(tmp_path):

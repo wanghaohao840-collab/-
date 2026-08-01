@@ -57,7 +57,7 @@ class SessionRegistry:
             session = self._sessions.pop(token, None)
         if session is not None:
             session.assistant.close()
-            self._release_runtime_if_unused(session.user_id)
+            self.runtime_registry.release_session(session.user_id)
 
     def get_session(self, token: str | None) -> UserSession:
         if not token:
@@ -81,8 +81,14 @@ class SessionRegistry:
                 raise InvalidSessionError("Too many active sessions")
 
             token = secrets.token_urlsafe(32)
-            runtime = self.runtime_registry.get_or_create(user_id)
-            assistant = PDFLearningAssistant(user_id=user_id, runtime_dir=runtime.paths.root, runtime=runtime)
+            runtime = self.runtime_registry.acquire_session(user_id)
+            try:
+                assistant = PDFLearningAssistant(
+                    user_id=user_id, runtime_dir=runtime.paths.root, runtime=runtime
+                )
+            except Exception:
+                self.runtime_registry.release_session(user_id)
+                raise
             self._sessions[token] = UserSession(
                 token=token,
                 user_id=user_id,
@@ -103,11 +109,7 @@ class SessionRegistry:
         for token in expired:
             session = self._sessions.pop(token)
             session.assistant.close()
-            self._release_runtime_if_unused(session.user_id)
-
-    def _release_runtime_if_unused(self, user_id: str) -> None:
-        active = sum(1 for session in self._sessions.values() if session.user_id == user_id)
-        self.runtime_registry.release_if_unused(user_id, active)
+            self.runtime_registry.release_session(session.user_id)
 
     @staticmethod
     def _now() -> datetime:

@@ -71,6 +71,16 @@ def test_same_user_sessions_share_one_runtime_but_keep_separate_assistants(tmp_p
     assert first.runtime is second.runtime
     assert first.assistant.runtime is first.runtime
     assert second.assistant.runtime is first.runtime
+    assert first.runtime.active_session_count == 2
+
+    registry.logout(first_token)
+
+    assert first.runtime.active_session_count == 1
+    assert registry.runtime_registry.has_runtime(first.user_id)
+
+    registry.logout(second_token)
+
+    assert registry.runtime_registry.has_runtime(first.user_id) is False
 
 
 def test_session_expiration_and_unknown_token_are_rejected(tmp_path):
@@ -88,6 +98,8 @@ def test_session_expiration_and_unknown_token_are_rejected(tmp_path):
 
     with pytest.raises(InvalidSessionError):
         registry.get_session("forged-token")
+
+    assert registry.runtime_registry.has_runtime(registry.auth.authenticate("alice", "correct horse battery").id) is False
 
 
 def test_session_limit_rejects_new_login_without_evicting_active_sessions(tmp_path):
