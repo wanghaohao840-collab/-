@@ -6,11 +6,12 @@
 
 **Architecture:** 使用 SQLite 持久化批次与单文件任务，`ImportWorkerPool` 在单进程内最多运行 4 个任务并通过数据库部分唯一索引保证同一用户串行。任务通过 `UserRuntimeRegistry` 的后台租约调用现有 `PDFLearningAssistant` 导入边界；Gradio 只负责安全提交、轮询和重试操作，不在浏览器会话中持有任务执行状态。
 
-**Tech Stack:** Python 3.10+、SQLite、`ThreadPoolExecutor`、Gradio 4.44.1、现有 JSON/Qdrant RAG、现有多用户 Runtime/History/Memory、pytest 8.4.1。
+**Tech Stack:** Python 3.10+、SQLite、`ThreadPoolExecutor`、Gradio 6.19.0、现有 JSON/Qdrant RAG、现有多用户 Runtime/History/Memory、pytest 8.4.1。
 
 ## Global Constraints
 
-- Gradio 依赖固定为 `gradio==4.44.1`，使用 `gr.File(file_count="multiple")` 和 `gr.Timer.tick`。
+- Gradio 依赖固定为 `gradio==6.19.0`，使用 `gr.File(file_count="multiple")` 和 `gr.Timer.tick`。
+- 所有 Python、pytest、compileall 和应用导入验证都使用仓库解释器 `.\venv\Scripts\python.exe`；pytest 临时目录由仓库 `pytest.ini` 固定在工作区内。
 - 每批最多 20 个文件；单文件最多 100 MiB；批次总大小最多 500 MiB。
 - 进程级最多 4 个后台任务；同一 `user_id` 同时最多 1 个 `running` 任务；不同用户可以并行。
 - 自动重试包含初次执行之外最多 3 次，退避等待严格为 2、10、30 秒；永久错误不自动重试。
@@ -54,7 +55,7 @@
 - `hello_agents/memory/types/episodic.py`：相同显式 ID 更新事件时清理旧 session 索引，避免重复 session 引用。
 - `assistants/pdf_learning_assistant.py`：`load_document()` 支持 `import_task_id`、进度回调和 History upsert。
 - `ui/gradio_app.py`：批量上传、任务面板、Timer 轮询、单项/批次失败重试、登录退出刷新。
-- `requirements.txt`：固定 `gradio==4.44.1`。
+- `requirements.txt`：固定 `gradio==6.19.0`。
 - `tests/test_user_runtime.py`、`tests/test_session_registry.py`、`tests/assistants/test_pdf_learning_assistant_multi_document.py`：新增后台租约和导入幂等回归。
 
 ---
@@ -109,7 +110,7 @@ def test_validate_batch_sizes_rejects_21_files():
 
 - [ ] **Step 2: 运行模型测试确认失败**
 
-Run: `pytest tests/test_import_models.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_import_models.py -q`
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'app.import_models'`.
 
@@ -208,7 +209,7 @@ def test_invalid_succeeded_to_queued_transition_is_rejected(tmp_path):
 
 - [ ] **Step 5: 运行仓储测试确认失败**
 
-Run: `pytest tests/test_import_repository.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_import_repository.py -q`
 
 Expected: FAIL because the schema and repository methods do not exist.
 
@@ -267,9 +268,9 @@ on import_tasks(user_id, created_at);
 
 - [ ] **Step 7: 运行模型与仓储测试确认通过**
 
-Run: `pytest tests/test_import_models.py tests/test_import_repository.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_import_models.py tests/test_import_repository.py -q`
 
-Expected: PASS；同时运行 `pytest tests/test_auth_service.py tests/test_user_storage.py -q`，确认既有 schema 与路径测试继续 PASS。
+Expected: PASS；同时运行 `.\venv\Scripts\python.exe -m pytest tests/test_auth_service.py tests/test_user_storage.py -q`，确认既有 schema 与路径测试继续 PASS。
 
 - [ ] **Step 8: 提交**
 
@@ -343,7 +344,7 @@ def test_logout_does_not_close_runtime_used_by_import_worker(tmp_path):
 
 - [ ] **Step 2: 运行测试确认当前行为失败**
 
-Run: `pytest tests/test_runtime_import_leases.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_runtime_import_leases.py -q`
 
 Expected: FAIL because `acquire_background`, `release_background` and `has_runtime` do not exist.
 
@@ -370,7 +371,7 @@ def _release_if_unused_locked(self, user_id: str) -> None:
 
 - [ ] **Step 5: 运行回归测试**
 
-Run: `pytest tests/test_runtime_import_leases.py tests/test_user_runtime.py tests/test_session_registry.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_runtime_import_leases.py tests/test_user_runtime.py tests/test_session_registry.py -q`
 
 Expected: PASS；退出登录后有后台租约时 Runtime 仍存在，无会话且无后台租约时才关闭。
 
@@ -450,7 +451,7 @@ def test_structured_authentication_error_is_not_retryable():
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `pytest tests/memory/rag/test_import_progress.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/memory/rag/test_import_progress.py -q`
 
 Expected: FAIL because `prepare_document_chunks()` has no `progress_callback` and `RAGActionResult` has no structured error fields.
 
@@ -510,7 +511,7 @@ ValueError/FileNotFoundError -> ("document_invalid", False)
 
 - [ ] **Step 6: 运行 RAG 回归测试**
 
-Run: `pytest tests/memory/rag tests/tools/test_rag_tool_backend_contract.py tests/memory/storage/test_vector_store_contract.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/memory/rag tests/tools/test_rag_tool_backend_contract.py tests/memory/storage/test_vector_store_contract.py -q`
 
 Expected: PASS；新增进度测试 PASS，既有 JSON/Qdrant 结果契约不变。
 
@@ -590,7 +591,7 @@ def test_retry_reuses_one_import_memory_event(tmp_path):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `pytest tests/assistants/test_import_idempotency.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/assistants/test_import_idempotency.py -q`
 
 Expected: FAIL because `upsert_document`, `import_task_id` and `ensure_import_event` do not exist.
 
@@ -622,7 +623,7 @@ def upsert_document(self, item: dict[str, Any]) -> dict[str, Any]:
 
 - [ ] **Step 6: 运行 Assistant 和 Memory 回归**
 
-Run: `pytest tests/assistants tests/test_memory_repository.py tests/memory/test_episodic_vector_cleanup.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/assistants tests/test_memory_repository.py tests/memory/test_episodic_vector_cleanup.py -q`
 
 Expected: PASS；原有 `current_document_id`、统计和失败不更新状态测试继续通过。
 
@@ -701,7 +702,7 @@ def test_three_auto_retries_then_failed(worker, fake_clock):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `pytest tests/test_import_service.py tests/test_import_worker.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_import_service.py tests/test_import_worker.py -q`
 
 Expected: FAIL because the Service and WorkerPool modules do not exist.
 
@@ -750,7 +751,7 @@ assistant.load_document(
 
 - [ ] **Step 6: 运行 Service/Worker/Runtime 联合测试**
 
-Run: `pytest tests/test_import_service.py tests/test_import_worker.py tests/test_runtime_import_leases.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/test_import_service.py tests/test_import_worker.py tests/test_runtime_import_leases.py -q`
 
 Expected: PASS；另运行 `pytest tests/test_user_mutation_coordination.py tests/test_assistant_user_isolation.py -q`，确认用户级锁和跨用户隔离不回归。
 
@@ -774,7 +775,7 @@ git commit -m "feat: run durable imports in background workers"
 
 **Interfaces:**
 
-- Consumes: `ImportTaskService.submit_batch/list_batches/get_batch/retry_task/retry_failed_in_batch`、Gradio 4.44.1 `File`、`Timer`、`Progress`。
+- Consumes: `ImportTaskService.submit_batch/list_batches/get_batch/retry_task/retry_failed_in_batch`、Gradio 6.19.0 `File`、`Timer`、`Progress`。
 - Produces:
   - `submit_import_batch(session_token, files, progress=gr.Progress())`
   - `refresh_import_batches(session_token)`
@@ -811,7 +812,7 @@ def test_retry_handler_passes_only_current_session_token(monkeypatch):
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `pytest tests/ui/test_import_handlers.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/ui/test_import_handlers.py -q`
 
 Expected: FAIL because the new handlers and formatters are not defined.
 
@@ -862,12 +863,12 @@ import_timer = gr.Timer(value=1, active=True)
 将 `requirements.txt` 的第一行改为：
 
 ```text
-gradio==4.44.1
+gradio==6.19.0
 ```
 
-Run: `pytest tests/ui/test_import_handlers.py tests/ui/test_authenticated_handlers.py tests/ui/test_document_selection.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/ui/test_import_handlers.py tests/ui/test_authenticated_handlers.py tests/ui/test_document_selection.py -q`
 
-Expected: PASS；若环境尚未安装依赖，先运行 `python -m pip install -r requirements.txt`，再重复测试。
+Expected: PASS；若环境尚未安装依赖，先运行 `.\venv\Scripts\python.exe -m pip install -r requirements.txt`，再重复测试。
 
 - [ ] **Step 8: 提交**
 
@@ -920,7 +921,7 @@ def test_clear_documents_is_rejected_while_task_is_active(tmp_path):
 
 - [ ] **Step 2: 运行集成测试确认失败**
 
-Run: `pytest tests/integration/test_batch_import_acceptance.py -q`
+Run: `.\venv\Scripts\python.exe -m pytest tests/integration/test_batch_import_acceptance.py -q`
 
 Expected: FAIL until the application fixture and clear protection are wired.
 
@@ -943,14 +944,14 @@ Expected: FAIL until the application fixture and clear protection are wired.
 - 瞬时失败自动按 2/10/30 秒重试，最终失败可单项或整批失败项重试。
 - 应用重启会恢复中断任务；失败源文件保留，成功后删除暂存副本。
 
-同时说明第一版不支持取消、优先级和分布式 Worker，并更新安装命令反映 `gradio==4.44.1`。
+同时说明第一版不支持取消、优先级和分布式 Worker，并更新安装命令反映 `gradio==6.19.0`。
 
 - [ ] **Step 6: 运行完整回归**
 
 Run:
 
 ```powershell
-pytest -q
+.\venv\Scripts\python.exe -m pytest -q
 ```
 
 Expected: 全部测试 PASS；不得访问真实 Qdrant、Neo4j、LLM 或工作区上传数据。若集成测试显式标记为 live，则只执行默认离线路径并单独记录 live 测试未运行。
@@ -960,8 +961,8 @@ Expected: 全部测试 PASS；不得访问真实 Qdrant、Neo4j、LLM 或工作�
 Run:
 
 ```powershell
-python -m compileall app assistants hello_agents ui
-python -c "import ui.gradio_app as app; print(type(app.demo).__name__)"
+.\venv\Scripts\python.exe -m compileall app assistants hello_agents ui
+.\venv\Scripts\python.exe -c "import ui.gradio_app as app; print(type(app.demo).__name__)"
 git diff --check
 ```
 
