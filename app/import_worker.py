@@ -33,10 +33,14 @@ _SAFE_STRUCTURED_ERROR_CODES = {
     "rag_connection",
     "rag_authentication",
     "rag_config",
+    "rag_collection",
+    "rag_document_too_large",
+    "rag_embedding",
     "rag_collectionerror",
     "rag_documenttoolargeerror",
     "rag_embeddingerror",
     "rag_operation",
+    "memory_import_event",
     "database_busy",
     "staged_cleanup_failed",
     "staged_file_missing",
@@ -387,6 +391,7 @@ class ImportWorkerPool:
                     with self._condition:
                         self._blocked_user_ids.discard(task.user_id)
                         self._active_count = max(0, self._active_count - 1)
+                        self._notify_generation += 1
                         self._condition.notify_all()
             finally:
                 self._task_queue.task_done()

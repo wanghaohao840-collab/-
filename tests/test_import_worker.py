@@ -286,17 +286,44 @@ def test_classify_import_failure(error, expected):
     assert classify_import_failure(error) == expected
 
 
-def test_classify_structured_error_code_is_whitelisted_and_sanitized():
+def test_structured_error_code_is_whitelisted_before_persistence(tmp_path):
     error = RuntimeError("backend rejected token=secret")
     error.error_code = "token=secret"
     error.retryable = False
 
-    error_code, retryable, summary = classify_import_failure(error)
+    runner, repository, _, _, clock, user_id, task_id = make_runner(
+        tmp_path, failures=[error]
+    )
+    runner.run(claim(repository, clock))
+    task = repository.get_task(user_id, task_id)
 
-    assert error_code == "unexpected_error"
-    assert retryable is False
-    assert "secret" not in error_code
-    assert "secret" not in summary
+    assert task.error_code == "unexpected_error"
+    assert task.error_summary is not None
+    assert "secret" not in task.error_code
+    assert "secret" not in task.error_summary
+
+
+@pytest.mark.parametrize(
+    ("error_code", "retryable"),
+    [
+        ("rag_collection", False),
+        ("rag_document_too_large", False),
+        ("rag_embedding", True),
+        ("memory_import_event", True),
+    ],
+)
+def test_classify_import_failure_preserves_known_structured_codes(
+    error_code, retryable
+):
+    error = RuntimeError("structured backend failure")
+    error.error_code = error_code
+    error.retryable = retryable
+
+    assert classify_import_failure(error) == (
+        error_code,
+        retryable,
+        "structured backend failure",
+    )
 
 
 class BlockingRunner:
