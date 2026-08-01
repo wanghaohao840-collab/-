@@ -1,6 +1,8 @@
 import json
+import subprocess
 from pathlib import Path
 
+from deploy import smoke_test
 from deploy.smoke_test import parse_compose_status, parse_env_file
 
 
@@ -53,3 +55,24 @@ def test_parse_compose_status_exposes_unhealthy_required_service():
 
     status = parse_compose_status(raw)
     assert status["qdrant"] == ("running", "unhealthy")
+
+
+def test_run_command_decodes_output_as_utf8(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="容器 healthy",
+            stderr="",
+        )
+
+    monkeypatch.setattr(smoke_test.subprocess, "run", fake_run)
+
+    result = smoke_test._run_command(["docker", "version"], "docker")
+
+    assert result.stdout == "容器 healthy"
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"

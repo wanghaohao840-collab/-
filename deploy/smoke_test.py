@@ -79,7 +79,8 @@ def _run_command(command: list[str], label: str) -> subprocess.CompletedProcess[
             cwd=PROJECT_ROOT,
             capture_output=True,
             check=False,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError as exc:
         raise SmokeFailure("docker executable not found") from exc
