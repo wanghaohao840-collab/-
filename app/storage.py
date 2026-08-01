@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ class UserPaths:
     history: Path
     memory_snapshot: Path
     reports: Path
+    imports: Path
 
 
 class UserStorage:
@@ -39,6 +41,7 @@ class UserStorage:
             history=root / "history.json",
             memory_snapshot=root / "memory" / "memories.json",
             reports=root / "reports",
+            imports=root / "imports",
         )
 
     def ensure_user_dirs(self, user_id: str) -> UserPaths:
@@ -47,6 +50,7 @@ class UserStorage:
         paths.rag_cache.parent.mkdir(parents=True, exist_ok=True)
         paths.memory_snapshot.parent.mkdir(parents=True, exist_ok=True)
         paths.reports.mkdir(parents=True, exist_ok=True)
+        paths.imports.mkdir(parents=True, exist_ok=True)
         return paths
 
     def validate_suffix(self, suffix: str) -> str:
@@ -71,12 +75,37 @@ class UserStorage:
         target = paths.reports / f"{report_id}{suffix}"
         return self.assert_within_user(user_id, target)
 
+    def import_batch_dir(self, user_id: str, batch_id: str) -> Path:
+        normalized_user_id = _uuid_string(user_id, "user_id")
+        normalized_batch_id = _uuid_string(batch_id, "batch_id")
+        paths = self.ensure_user_dirs(normalized_user_id)
+        target = paths.imports / normalized_batch_id
+        target.mkdir(parents=True, exist_ok=True)
+        return self.assert_within_user(normalized_user_id, target)
+
+    def staged_import_path(
+        self, user_id: str, batch_id: str, task_id: str, suffix: str
+    ) -> Path:
+        normalized_user_id = _uuid_string(user_id, "user_id")
+        normalized_task_id = _uuid_string(task_id, "task_id")
+        target = self.import_batch_dir(normalized_user_id, batch_id) / (
+            f"{normalized_task_id}{self.validate_suffix(suffix)}"
+        )
+        return self.assert_within_user(normalized_user_id, target)
+
     def assert_within_user(self, user_id: str, path: Path | str) -> Path:
         root = self.user_paths(user_id).root.resolve()
         resolved = Path(path).resolve()
         if resolved != root and root not in resolved.parents:
             raise UnsafePathError(f"Path escapes user data root: {resolved}")
         return resolved
+
+
+def _uuid_string(value: str, field_name: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a UUID string") from exc
 
 
 def read_json(path: Path, default: Any) -> Any:

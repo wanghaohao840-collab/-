@@ -25,6 +25,49 @@ create table if not exists report_records (
     created_at text not null
 );
 
+create table if not exists import_batches (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    created_at text not null,
+    updated_at text not null,
+    unique(id, user_id)
+);
+
+create table if not exists import_tasks (
+    id text primary key,
+    batch_id text not null,
+    user_id text not null,
+    document_id text not null,
+    original_name text not null,
+    file_suffix text not null,
+    size_bytes integer not null,
+    staged_relative_path text not null,
+    status text not null check(status in ('queued','running','retry_wait','succeeded','failed')),
+    stage text not null,
+    progress integer not null check(progress between 0 and 100),
+    total_attempt_count integer not null default 0,
+    auto_retry_count integer not null default 0,
+    manual_retry_count integer not null default 0,
+    max_auto_retries integer not null default 3,
+    next_attempt_at text,
+    error_code text,
+    error_summary text,
+    created_at text not null,
+    started_at text,
+    finished_at text,
+    updated_at text not null,
+    foreign key(batch_id, user_id) references import_batches(id, user_id)
+        on delete cascade,
+    unique(user_id, document_id)
+);
+
+create unique index if not exists uq_import_tasks_running_user
+on import_tasks(user_id) where status = 'running';
+create index if not exists ix_import_tasks_scheduler
+on import_tasks(status, next_attempt_at, created_at);
+create index if not exists ix_import_tasks_user_created
+on import_tasks(user_id, created_at);
+
 create table if not exists data_migrations (
     id integer primary key autoincrement,
     migration_key text not null unique,
