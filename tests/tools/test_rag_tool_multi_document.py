@@ -250,6 +250,60 @@ class RAGToolMultiDocumentTests(unittest.TestCase):
         self.assertEqual(tool._last_action_data["summary_cache_hits"], 1)
         self.assertEqual(tool._last_action_data["summary_cache_misses"], 1)
 
+    def test_summary_cache_invalidates_deleted_then_reimported_document(self):
+        tool = self.make_tool()
+        tool.execute(
+            "ask",
+            query="deletion cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+        self.assertEqual(len(tool.llm.prompts), 3)
+
+        pipeline = tool._pipelines["test"]
+        pipeline.delete_document("doc-1")
+        pipeline.add_text(
+            "alpha reimported one",
+            document_id="doc-1",
+            metadata={"file_name": "one.md"},
+        )
+        tool.execute(
+            "ask",
+            query="deletion cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+
+        self.assertEqual(len(tool.llm.prompts), 5)
+        self.assertEqual(tool._last_action_data["summary_cache_hits"], 1)
+        self.assertEqual(tool._last_action_data["summary_cache_misses"], 1)
+
+    def test_summary_cache_invalidates_when_prompt_version_changes(self):
+        tool = self.make_tool()
+        tool.execute(
+            "ask",
+            query="prompt cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+        self.assertEqual(len(tool.llm.prompts), 3)
+
+        tool.SUMMARY_CACHE_PROMPT_VERSION = "document-summary-v2"
+        tool.execute(
+            "ask",
+            query="prompt cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+
+        self.assertEqual(len(tool.llm.prompts), 6)
+        self.assertEqual(tool._last_action_data["summary_cache_hits"], 0)
+        self.assertEqual(tool._last_action_data["summary_cache_misses"], 2)
+
     def test_summary_reports_mapping_and_reduce_progress(self):
         tool = self.make_tool()
         progress_events = []
@@ -533,6 +587,7 @@ class RAGToolMultiDocumentTests(unittest.TestCase):
         cache_path = Path(tmpdir.name) / "rag-cache.json"
 
         tool = RAGTool(rag_namespace="scoped", cache_path=str(cache_path))
+        self.addCleanup(tool.close)
 
         self.assertEqual(tool._pipelines["scoped"].cache_path, cache_path)
 

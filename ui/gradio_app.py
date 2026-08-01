@@ -388,6 +388,28 @@ def cancel_summary_pdf(session_token, task_id):
         return f"取消总结任务失败: {error}"
 
 
+def start_summary_pdf_auto(session_token, question, selected_pdf=None):
+    task_id, output = start_summary_pdf(session_token, question, selected_pdf)
+    return task_id, output, gr.update(active=bool(task_id))
+
+
+def poll_summary_pdf_auto(session_token, task_id):
+    assistant = _require_assistant(session_token)
+    if not task_id:
+        return "当前没有后台总结任务", gr.update(active=False)
+    try:
+        task = assistant.get_summary_task(task_id)
+        active = task.get("status") not in {"completed", "failed", "cancelled"}
+        return _format_summary_task(task), gr.update(active=active)
+    except Exception as error:
+        return f"查询总结任务失败: {error}", gr.update(active=False)
+
+
+def cancel_summary_pdf_auto(session_token, task_id):
+    output = cancel_summary_pdf(session_token, task_id)
+    return output, gr.update(active=False)
+
+
 def search_pdf(session_token, query, selected_pdf=None):
     """Document search for one or more selected documents."""
 
@@ -696,6 +718,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             lines=10,
         )
         summary_task_id = gr.State("")
+        summary_poll_timer = gr.Timer(1.0, active=False)
         with gr.Row():
             start_summary_btn = gr.Button("后台联合总结")
             poll_summary_btn = gr.Button("刷新总结进度")
@@ -724,9 +747,9 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         )
 
         start_summary_btn.click(
-            fn=start_summary_pdf,
+            fn=start_summary_pdf_auto,
             inputs=[session_token, question_input, doc_dropdown_ask],
-            outputs=[summary_task_id, summary_task_output],
+            outputs=[summary_task_id, summary_task_output, summary_poll_timer],
         )
 
         poll_summary_btn.click(
@@ -736,9 +759,16 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         )
 
         cancel_summary_btn.click(
-            fn=cancel_summary_pdf,
+            fn=cancel_summary_pdf_auto,
             inputs=[session_token, summary_task_id],
-            outputs=summary_task_output,
+            outputs=[summary_task_output, summary_poll_timer],
+        )
+
+        summary_poll_timer.tick(
+            fn=poll_summary_pdf_auto,
+            inputs=[session_token, summary_task_id],
+            outputs=[summary_task_output, summary_poll_timer],
+            show_progress="hidden",
         )
 
     # =========================
