@@ -72,6 +72,20 @@ def _compose_command(env_file: Path, *args: str) -> list[str]:
     ]
 
 
+def _deep_command(env_file: Path) -> list[str]:
+    return _compose_command(
+        env_file,
+        "exec",
+        "-T",
+        "-e",
+        "PYTHONPATH=/app",
+        "app",
+        "python",
+        "/app/deploy/smoke_test.py",
+        "--inside-deep",
+    )
+
+
 def _run_command(command: list[str], label: str) -> subprocess.CompletedProcess[str]:
     try:
         result = subprocess.run(
@@ -172,6 +186,11 @@ print(source)
         raise SmokeFailure("container imported hello_agents from an unexpected path")
 
 
+def _require_search_marker(search: str, marker: str) -> None:
+    if marker not in search:
+        raise SmokeFailure(f"marker missing from search: {search}")
+
+
 def run_deep_inside() -> int:
     from app.database import initialize_database
     from app.session import SessionRegistry
@@ -198,8 +217,9 @@ def run_deep_inside() -> int:
             document_id,
             ".txt",
         )
+        marker = f"Deployment smoke marker {uuid.uuid4().hex}"
         document_path.write_text(
-            "Deployment smoke marker: qdrant persistence and source citations work.",
+            f"{marker}: qdrant persistence and source citations work.",
             encoding="utf-8",
         )
         loaded = assistant.load_document(
@@ -209,10 +229,11 @@ def run_deep_inside() -> int:
         )
         if loaded.startswith("❌"):
             raise SmokeFailure(loaded)
-        search = assistant.search("qdrant persistence", limit=5)
-        if "deployment-smoke.txt" not in search:
-            raise SmokeFailure(f"smoke source missing from search: {search}")
-        answer = assistant.ask("What is the deployment smoke marker?")
+        search = assistant.search(marker, limit=5)
+        _require_search_marker(search, marker)
+        answer = assistant.ask(
+            f"Repeat this exact deployment smoke marker: {marker}"
+        )
         if answer.startswith("❌"):
             raise SmokeFailure(answer)
     except Exception as exc:
@@ -292,15 +313,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.deep:
             _run_command(
-                _compose_command(
-                    env_file,
-                    "exec",
-                    "-T",
-                    "app",
-                    "python",
-                    "/app/deploy/smoke_test.py",
-                    "--inside-deep",
-                ),
+                _deep_command(env_file),
                 "deep smoke",
             )
             print("PASS: temporary document import, retrieval, and LLM answer")
