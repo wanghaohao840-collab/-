@@ -13,7 +13,8 @@ class MemoryTool(Tool):
         self,
         user_id: str = "default_user",
         memory_config: Optional[MemoryConfig] = None,
-        memory_types: Optional[List[str]] = None
+        memory_types: Optional[List[str]] = None,
+        memory_repository: Any = None
     ):
         super().__init__(
             name="memory",
@@ -33,8 +34,20 @@ class MemoryTool(Tool):
             enable_working="working" in self.memory_types,
             enable_episodic="episodic" in self.memory_types,
             enable_semantic="semantic" in self.memory_types,
-            enable_perceptual="perceptual" in self.memory_types
+            enable_perceptual="perceptual" in self.memory_types,
+            snapshot_repository=memory_repository
         )
+
+    def close(self) -> None:
+        close = getattr(self.memory_manager, "close", None)
+        if callable(close):
+            close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def get_parameters(self) -> dict:
         """返回工具参数定义
@@ -141,6 +154,13 @@ class MemoryTool(Tool):
         return self.execute(action, **kwargs)
 
     def execute(self, action: str, **kwargs) -> str:
+        lock = getattr(self, "coordination_lock", None)
+        if lock is None:
+            return self._execute_unlocked(action, **kwargs)
+        with lock:
+            return self._execute_unlocked(action, **kwargs)
+
+    def _execute_unlocked(self, action: str, **kwargs) -> str:
         """执行记忆操作
 
         支持的操作：

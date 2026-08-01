@@ -42,3 +42,14 @@ class SQLiteDocumentStore:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
         self.conn.commit()
+
+    def close(self) -> None:
+        if getattr(self, "conn", None) is not None:
+            self.conn.close()
+            self.conn = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

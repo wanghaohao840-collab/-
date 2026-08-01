@@ -25,10 +25,12 @@ class MemoryManager:
         enable_working: bool = True,
         enable_episodic: bool = True,
         enable_semantic: bool = True,
-        enable_perceptual: bool = False
+        enable_perceptual: bool = False,
+        snapshot_repository: Any = None
     ):
         self.config = config or MemoryConfig()
         self.user_id = user_id
+        self.snapshot_repository = snapshot_repository
 
         # 当前阶段先不使用独立 MemoryStore / MemoryRetriever
         # 因为 working / episodic / semantic 各自已经有自己的存储和检索逻辑
@@ -79,6 +81,15 @@ class MemoryManager:
             list(self.memory_types.keys())
         )
 
+        if self.snapshot_repository is not None:
+            self.snapshot_repository.restore_to_manager(self)
+
+    def close(self) -> None:
+        for memory in self.memory_types.values():
+            close = getattr(memory, "close", None)
+            if callable(close):
+                close()
+
     def add_memory(
         self,
         content: str,
@@ -107,7 +118,9 @@ class MemoryManager:
 
         memory_item.metadata.setdefault("user_id", self.user_id)
 
-        return self.memory_types[memory_type].add(memory_item)
+        memory_id = self.memory_types[memory_type].add(memory_item)
+        self._save_snapshot()
+        return memory_id
 
     def retrieve_memories(
         self,
@@ -175,6 +188,7 @@ class MemoryManager:
                 except Exception as e:
                     logger.warning("遗忘 %s 记忆失败: %s", memory_type, e)
 
+        self._save_snapshot()
         return total_count
 
     def consolidate_memories(
@@ -223,6 +237,7 @@ class MemoryManager:
 
         source_memory.memories = kept_memories
 
+        self._save_snapshot()
         return count
 
     def get_summary(self) -> str:
@@ -284,7 +299,12 @@ class MemoryManager:
                 except Exception as e:
                     logger.warning("清空 %s 记忆失败: %s", memory_type, e)
 
+        self._save_snapshot()
         return "所有记忆已清空"
+
+    def _save_snapshot(self) -> None:
+        if self.snapshot_repository is not None:
+            self.snapshot_repository.save_from_manager(self)
 
     def _classify_memory_type(
         self,

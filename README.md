@@ -1,108 +1,304 @@
 # 智能文档学习助手
 
-这是一个基于 Memory + RAG 的智能文档学习助手，支持 PDF、TXT、Markdown、Word 文档导入，并提供文档问答、文档检索、学习笔记、记忆回忆、学习统计、学习报告导出等功能。
+一个基于 **Memory + RAG** 的多用户文档学习系统。它围绕“导入文档 → 检索与问答 → 保存学习过程 → 生成报告”形成完整闭环，并通过 Gradio 提供可直接操作的 Web 界面。
 
----
+当前版本已经实现：
 
-## 功能特性
+- 用户注册、登录、退出和会话过期管理；
+- 用户级文档、RAG、Memory、历史和报告数据隔离；
+- PDF、TXT、Markdown（`.md`）和 Word（`.docx`）导入；
+- 单文档及多文档联合问答、对比分析和联合总结；
+- JSON 本地 RAG 与 Qdrant RAG 后端切换；
+- 文档检索、PDF 页码来源、相关度和可复制引用；
+- 学习笔记、记忆回忆、学习统计和报告快照；
+- Markdown、Word 报告导出；
+- 文档删除、全部文档清空和笔记清空；
+- 旧版单用户数据迁移；
+- History/Memory 损坏检测、隔离、备份和恢复；
+- 同一用户多会话写入协调及失败补偿。
 
-* PDF / TXT / Markdown / Word 文档上传与解析
-* 多文档下拉选择
-* 当前文档隔离问答
-* 文档检索与来源显示
-* PDF 页码级引用来源
-* 文档检索结果按页去重
-* 可复制引用格式生成
-* 学习笔记保存
-* 清空全部学习笔记
-* 记忆回忆
-* 学习统计
-* 学习报告生成
-* Markdown 报告导出
-* Word 报告导出
-* 删除当前文档
-* 清空全部文档
-* RAG JSON 本地持久化
-* 学习历史 JSON 本地持久化
-* 总结类问题自动启用全文抽样摘要模式
-* 按段落 + overlap 的 chunk 切分优化
+## 功能概览
 
----
+### 多用户与数据隔离
 
-## 支持的文档格式
+- 用户名使用 NFKC 规范化并执行不区分大小写的唯一性检查；
+- 密码使用带随机盐的 `scrypt` 哈希保存，不落盘明文密码；
+- 默认会话空闲有效期为 12 小时；
+- 每个用户拥有独立的文档、RAG、Memory、历史和报告目录；
+- 文件路径必须位于当前用户的数据根目录内；
+- 同一用户的并发写入通过共享可重入锁串行化，History 写入前重新加载最新快照；
+- RAG 通过用户 namespace 和 `document_id` 双重约束检索与删除范围。
 
-当前支持以下文档格式：
+### 文档导入与管理
 
-```text
-.pdf
-.txt
-.md
-.markdown
-.docx
+| 格式 | 扩展名 | 处理方式 |
+|---|---|---|
+| PDF | `.pdf` | 按页提取文本并保存 `page_number` |
+| 文本 | `.txt` | 按文本内容导入 |
+| Markdown | `.md` | 按 Markdown 文本导入 |
+| Word | `.docx` | 提取非空段落后导入 |
+
+导入流程会生成独立的 `document_id`，保存用户原始文件，切分 Chunk、生成嵌入并写入当前 RAG 后端。支持刷新列表、切换文档、删除所选文档和清空当前用户的全部文档。
+
+> 存储层已预留 `.markdown` 扩展名，但当前 Gradio 上传控件和 RAG 解析入口尚未完整贯通该扩展名，因此端到端支持列表以表格为准。
+
+### 多文档问答
+
+问答页最多选择 10 篇文档，支持四种模式：
+
+| 模式 | 行为 |
+|---|---|
+| 自动 | 根据问题自动识别联合问答、对比或总结意图 |
+| 联合问答 | 从所有选中文档检索证据后统一回答 |
+| 对比分析 | 分文档检索并生成差异、共同点和对应来源 |
+| 联合总结 | 分文档抽样总结，再进行汇总归纳 |
+
+总结类问题不会只依赖普通 top-k 结果，而是从文档不同位置抽样；多文档总结采用受控并发的 map-reduce 流程。上下文超出预算时会返回明确的容量提示。
+
+### 检索与引用
+
+- 按所选 `document_id` 范围执行向量检索；
+- 展示来源文件、PDF 页码、相关度和内容摘要；
+- 对相同来源结果去重；
+- 生成可复制的引用格式；
+- JSON 和 Qdrant 后端保持一致的检索、统计、删除和清空契约。
+
+### Memory 与学习过程
+
+Memory 系统包含：
+
+- Working Memory：短期工作记忆、容量和过期策略；
+- Episodic Memory：事件、会话及学习经历；
+- Semantic Memory：事实、概念、实体和关系；
+- Perceptual Memory：感知记忆的基础接口。
+
+用户可以添加学习笔记、按关键词回忆历史、查看 Memory/RAG 状态和学习统计。清空笔记只删除 notes，不会误删文档、问答记录或底层全部 Memory。
+
+### 报告、迁移与恢复
+
+- 生成包含文档、问答、笔记、Memory 和 RAG 状态的学习报告；
+- 创建不可变 Markdown 报告快照，并按用户保存索引；
+- 浏览、查看和下载历史报告；
+- 从指定快照导出 Word 报告；
+- 扫描并认领旧版 `user123` 单用户数据；
+- 迁移通过 staging、校验、发布和失败回滚执行；
+- 损坏的 History/Memory 默认阻止继续写入；
+- 用户可显式隔离损坏文件、列出自己的备份并执行校验恢复。
+
+## 系统架构
+
+```mermaid
+flowchart TD
+    UI["Gradio UI"] --> SESSION["认证与 Session"]
+    SESSION --> ASSISTANT["PDFLearningAssistant"]
+    ASSISTANT --> RAGTOOL["RAGTool"]
+    ASSISTANT --> MEMORYTOOL["MemoryTool"]
+    ASSISTANT --> SERVICES["History / Reports / Recovery"]
+
+    RAGTOOL --> FACTORY{"RAG 后端"}
+    FACTORY --> JSON["JSON / 本地向量存储"]
+    FACTORY --> QDRANT["Qdrant"]
+
+    MEMORYTOOL --> MANAGER["MemoryManager"]
+    MANAGER --> WORKING["Working"]
+    MANAGER --> EPISODIC["Episodic"]
+    MANAGER --> SEMANTIC["Semantic"]
+
+    SERVICES --> USERDATA["用户隔离数据目录"]
+    JSON --> USERDATA
+    MANAGER --> USERDATA
 ```
 
-不同格式的处理方式：
+依赖方向保持为：
 
 ```text
-PDF：按页读取，并保留页码来源
-TXT：按文本内容直接导入
-Markdown：按 Markdown 文本导入
-Word：读取 docx 段落文本后导入
+UI → Session/Runtime → Assistant → Tool → Memory/RAG/Storage
 ```
 
----
+底层 Memory、RAG 和 Storage 不应反向依赖 UI 或 Assistant。
 
-## 安装依赖
+## 核心实现目录
 
-建议先进入项目目录：
+```text
+python_self_agent/
+├── app/                              # 应用服务层
+│   ├── auth.py                       # 注册、认证、密码哈希
+│   ├── database.py                   # SQLite schema 与事务
+│   ├── session.py                    # Session 生命周期
+│   ├── runtime.py                    # 用户级共享运行时
+│   ├── storage.py                    # 用户目录与路径安全
+│   ├── coordination.py               # 同用户写入协调与补偿
+│   ├── history.py                    # 学习历史持久化
+│   ├── memory_repository.py          # Memory 快照持久化
+│   ├── reports.py                    # 报告快照与索引
+│   ├── migration.py                  # 旧数据迁移
+│   └── recovery.py                   # 损坏数据恢复
+├── assistants/
+│   ├── pdf_learning_assistant.py     # 学习助手业务用例
+│   └── document_selection.py         # 多文档选择范围
+├── hello_agents/
+│   ├── core/                         # LLM、消息、配置、Agent 抽象
+│   ├── agents/                       # Simple/ReAct 等 Agent 示例
+│   ├── memory/
+│   │   ├── manager.py                # Memory 统一协调
+│   │   ├── types/                    # Working/Episodic/Semantic
+│   │   ├── rag/
+│   │   │   ├── pipeline.py           # JSON RAG 与后端工厂
+│   │   │   ├── qdrant_pipeline.py    # Qdrant RAG
+│   │   │   ├── prepare.py            # Chunk 与稳定 ID
+│   │   │   └── result_utils.py       # 范围、去重、摘要抽样
+│   │   ├── graph/
+│   │   │   ├── extractor.py          # LLM 图数据抽取、校验与稳定 ID
+│   │   │   ├── state.py              # 图谱状态清单与错误脱敏
+│   │   │   └── service.py            # 构建、恢复、查询、重试与删除
+│   │   └── storage/
+│   │       ├── vector_store.py       # 向量库协议及实现
+│   │       └── neo4j_store.py        # Neo4j 事务、约束与参数化查询
+│   └── tools/builtin/
+│       ├── rag_tool.py               # RAG 工具与多文档问答
+│       └── memory_tool.py            # Memory 工具
+├── ui/
+│   └── gradio_app.py                 # Web 页面与事件绑定
+├── examples/                         # Memory/RAG/Assistant 示例
+├── tests/                            # 单元、契约、集成和验收测试
+└── docs/                             # 设计、计划和 Agent 工作流
+```
+
+Neo4j 模块已经支持文档图谱构建、状态、恢复、查询、重试和删除。普通
+`ask` 问答支持向量结果与文档内图谱上下文的混合检索；跨文档实体合并、
+对比/摘要模式图增强和图谱 UI 仍是后续阶段。
+
+## 安装
+
+建议使用 Python 3.10 或更高版本。
 
 ```powershell
 cd D:\python_self_agent
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-然后安装依赖：
+后续启动和测试均使用 `venv\Scripts\python.exe`，避免系统 Python、Anaconda
+或其他环境缺少项目已声明依赖。
+
+主要依赖：
+
+- Gradio
+- OpenAI Python SDK
+- pypdf
+- python-docx
+- python-dotenv
+- qdrant-client
+- neo4j Python Driver
+- pytest
+
+## 配置
+
+在项目根目录创建 `.env`。该文件已被 Git 忽略，不要提交真实密钥。
+
+### LLM
+
+```env
+LLM_API_KEY=your-api-key
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_MODEL_ID=deepseek-chat
+
+LLM_MAX_RETRIES=2
+LLM_RETRY_BACKOFF=0.5
+LLM_CONTEXT_WINDOW_TOKENS=8192
+LLM_OUTPUT_RESERVED_TOKENS=1024
+LLM_CONTEXT_SAFETY_MARGIN_TOKENS=512
+```
+
+`HelloAgentsLLM` 同时兼容 `OPENAI_API_KEY`、`OPENAI_BASE_URL` 和 `OPENAI_MODEL`。
+
+### RAG 后端
+
+默认使用本地 JSON：
+
+```env
+RAG_BACKEND=json
+```
+
+使用 Qdrant：
+
+```env
+RAG_BACKEND=qdrant
+QDRANT_URL=http://localhost:6333
+QDRANT_API_KEY=
+QDRANT_COLLECTION=doc_learning_vectors
+```
+
+注意：
+
+- `RAG_BACKEND` 只接受 `json` 或 `qdrant`；
+- `qdrant` 模式必须配置 `QDRANT_URL`；
+- collection 名称仅允许字母、数字、下划线和连字符，最长 255 个字符；
+- JSON 和 Qdrant 不会双写，也不会自动迁移彼此已有数据；
+- Qdrant 的 collection、向量维度和距离配置不兼容时会显式失败；
+- Qdrant 错误消息会清理 URL 凭据和 API Key。
+
+### Neo4j 文档图谱
+
+配置完整时，文档成功进入 RAG 后会同步尝试构建 Neo4j 图谱：
+
+```env
+NEO4J_URI=neo4j://127.0.0.1:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=your-password
+NEO4J_DATABASE=neo4j
+```
+
+图谱写入采用弱一致性：LLM 抽取或 Neo4j 写入失败不会撤销已经成功的文档导入；状态会记录为 `failed` 并允许显式重试。删除时先删除 RAG 数据，再清理目标图；清理失败记录为 `cleanup_pending`。所有 Neo4j 读写同时按 `rag_namespace` 和 `document_id` 隔离。
+
+`RAGTool` 提供以下图谱 action：
+
+- `graph_status`
+- `get_document_graph`
+- `get_chapter_tree`
+- `get_concept_relations`
+- `get_knowledge_dependencies`
+- `get_person_relations`
+- `retry_document_graph`
+- `delete_document_graph`
+
+所有 action 都要求 `document_id`。完整图查询默认不返回 `Chunk.content`，只有显式设置 `include_chunk_content=true` 才返回正文。当前并发保护仅覆盖单进程/单 worker；多 worker 部署需要分布式锁后才能启用自动建图。
+
+普通 `ask` 支持 `graph_mode`：
+
+- `auto`（默认）：图谱 ready 时追加受限的一跳实体/关系上下文；图谱不可用
+  时自动回退到原有向量 RAG。
+- `off`：不查询 Neo4j。
+- `required`：必须取得图谱上下文，否则在调用回答 LLM 前明确失败。
+
+图谱上下文使用稳定的 `G-*` 引用 ID，向量 Chunk 继续使用 `S-*`。可以通过
+`graph_node_limit` 和 `graph_relation_limit` 调整上限；图查询不会返回
+Chunk 正文。该融合目前只用于普通/联合问答，不改写 `compare` 和
+`summary` 模式。
+
+### 数据目录
+
+默认运行数据根目录为项目下的 `data/`，可以覆盖：
+
+```env
+PDF_ASSISTANT_DATA_DIR=D:\document-assistant-data
+```
+
+## 运行
+
+启动 Gradio 应用：
 
 ```powershell
-D:\Anaconda\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe .\ui\gradio_app.py
 ```
 
-推荐的精简版 `requirements.txt`：
-
-```txt
-gradio>=4.0.0
-pypdf>=4.0.0
-python-docx>=1.1.0
-python-dotenv>=1.0.0
-openai>=1.0.0
-```
-
----
-
-## 运行方式
-
-进入项目目录后，运行 Gradio 应用：
-
-```powershell
-D:\Anaconda\python.exe D:\python_self_agent\ui\gradio_app.py
-```
-
-运行成功后，终端会出现类似：
-
-```text
-Running on local URL: http://127.0.0.1:7860
-```
-
----
-
-## 浏览器访问
-
-运行 Gradio 应用后，浏览器打开：
+默认地址：
 
 ```text
 http://127.0.0.1:7860
 ```
 
----
+`main.py` 是早期单 Agent 演示入口，不是当前多用户 Web 应用入口。
 
 ## Docker 单节点部署
 
@@ -121,509 +317,125 @@ python3 deploy/smoke_test.py --env-file deploy/.env
 [`deploy/README.md`](deploy/README.md)。该部署保持单副本、单 worker，直接
 HTTP 仅适用于受控内网；公网访问必须由外部 HTTPS 网关保护。
 
-## 系统流程图
-
-```mermaid
-flowchart TD
-    A[用户上传文档] --> B{文档类型判断}
-
-    B --> B1[PDF]
-    B --> B2[TXT]
-    B --> B3[Markdown]
-    B --> B4[Word / DOCX]
-
-    B1 --> C[文本解析]
-    B2 --> C
-    B3 --> C
-    B4 --> C
-
-    C --> D[按段落切分 Chunk]
-    D --> E[文本向量化]
-    E --> F[RAG 本地 JSON 知识库]
-
-    F --> G[文档检索]
-    F --> H[文档问答]
-    F --> I[生成引用格式]
-
-    H --> J[大模型生成回答]
-    G --> K[返回相关片段与来源]
-    I --> L[生成可复制引用]
-
-    M[学习笔记] --> N[学习历史 JSON]
-    O[问答记录] --> N
-    P[文档记录] --> N
-
-    N --> Q[记忆回忆]
-    N --> R[学习统计]
-    N --> S[学习报告生成]
-
-    S --> T[导出 Markdown 报告]
-    S --> U[导出 Word 报告]
-```
-
----
-
-## 项目结构
-
-```text
-D:\python_self_agent
-├── assistants
-│   └── pdf_learning_assistant.py
-├── hello_agents
-│   ├── memory
-│   │   ├── rag
-│   │   │   └── pipeline.py
-│   │   └── ...
-│   └── tools
-│       └── builtin
-│           ├── memory_tool.py
-│           └── rag_tool.py
-├── ui
-│   └── gradio_app.py
-├── knowledge_base
-│   └── rag_cache
-├── memory_data
-├── reports
-├── requirements.txt
-├── PROJECT_DEMO.md
-└── README.md
-```
-
----
-
-## 核心文件说明
-
-### `assistants/pdf_learning_assistant.py`
-
-负责整合 MemoryTool 和 RAGTool，提供智能文档学习助手的核心能力，包括：
-
-* 加载文档
-* 基于当前文档问答
-* 文档检索
-* 学习笔记
-* 清空学习笔记
-* 记忆回忆
-* 学习统计
-* 学习报告生成
-* Markdown / Word 报告导出
-* 删除当前文档
-* 清空全部文档
-
-### `hello_agents/tools/builtin/rag_tool.py`
-
-负责 RAG 工具入口，支持：
-
-* 添加文本知识
-* 添加本地文档
-* 搜索知识库
-* 基于检索结果问答
-* 生成可复制引用格式
-* 删除指定文档
-* 清空知识库
-* 显示参考来源和页码
-
-### `hello_agents/memory/rag/pipeline.py`
-
-负责 RAG 管道，包括：
-
-* 文本切分
-* 向量化
-* 本地 JSON 持久化
-* 检索
-* 按页去重
-* 删除指定文档 chunks
-* 清空全部 chunks
-* 总结类问题的全文抽样上下文获取
-
-### `ui/gradio_app.py`
-
-负责 Web 页面交互，包括：
-
-* 文档上传
-* 多文档下拉选择
-* 文档问答
-* 文档检索
-* 引用格式生成
-* 学习笔记
-* 清空学习笔记
-* 记忆回忆
-* 学习统计
-* 学习报告
-* Markdown / Word 报告下载
-* 删除当前文档
-* 清空全部文档
-
----
-
-## 环境变量
-
-需要在项目根目录下创建 `.env` 文件，并配置大模型 API：
-
-```env
-LLM_API_KEY=你的API Key
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL_ID=deepseek-chat
-```
-
-如果你使用的是 DeepSeek Reasoner，也可以写成：
-
-```env
-LLM_API_KEY=你的API Key
-LLM_BASE_URL=https://api.deepseek.com/v1
-LLM_MODEL_ID=deepseek-reasoner
-```
-
----
-
 ## 使用流程
 
-启动项目后，可以按照下面流程使用：
+1. 注册或登录。用户名长度为 3–32，密码长度为 8–128。
+2. 上传 PDF、TXT、MD 或 DOCX 文档。
+3. 在问答页选择一篇或多篇文档。
+4. 选择自动、联合问答、对比分析或联合总结模式。
+5. 在检索页查看命中片段、来源、页码和引用格式。
+6. 添加学习笔记并按关键词回忆。
+7. 查看学习统计和生成报告。
+8. 保存 Markdown 快照或导出 Word。
+9. 按需删除文档、清空文档或只清空学习笔记。
+10. 如果旧版数据或损坏快照存在，在报告页展开迁移/恢复面板处理。
+
+## 数据布局
+
+默认布局：
 
 ```text
-1. 上传文档
-2. 选择当前文档
-3. 文档问答
-4. 文档检索
-5. 生成引用格式
-6. 添加学习笔记
-7. 记忆回忆
-8. 查看学习统计
-9. 生成学习报告
-10. 导出 Markdown 报告
-11. 导出 Word 报告
-12. 删除当前文档
-13. 清空全部文档
-14. 清空全部学习笔记
+data/
+├── app.db
+├── uploads/
+└── users/
+    └── <user_id>/
+        ├── documents/
+        │   └── <document_id>.<suffix>
+        ├── rag/
+        │   ├── rag_cache.json
+        │   └── .graph/
+        │       └── <rag_namespace>.json
+        ├── history.json
+        ├── memory/
+        │   └── memories.json
+        └── reports/
+            ├── <report_id>.md
+            └── <report_id>.docx
 ```
 
----
+JSON 与文本写入采用临时文件加原子替换。History 和 Memory 恢复会验证 schema 与用户所有权，跨用户备份不能恢复。
 
-## 功能说明
+## 测试
 
-### 1. 上传文档
-
-在“上传文档”页面选择本地文档文件，点击“导入文档”。
-
-系统会自动完成：
-
-```text
-文档读取
-文本提取
-文本切分
-向量化
-写入本地 RAG 缓存
-刷新文档下拉框
-```
-
-当前支持：
-
-```text
-PDF
-TXT
-Markdown
-Word / DOCX
-```
-
----
-
-### 2. 文档问答
-
-在“文档问答”页面选择当前文档，然后输入问题。
-
-示例问题：
-
-```text
-这个文档主要讲了什么？
-请总结这个文档的核心内容
-某个概念是什么意思？
-某个人物是谁？
-RAG 的核心流程是什么？
-```
-
-对于总结类问题，系统会自动启用全文抽样摘要模式。
-
----
-
-### 3. 文档检索
-
-在“文档检索”页面选择当前文档，然后输入关键词。
-
-示例关键词：
-
-```text
-RAG
-LLM
-SFT
-Poirot
-自由
-亲子沟通
-向量化
-相似度检索
-```
-
-检索结果会显示：
-
-```text
-当前检索文档
-document_id
-相似度分数
-来源文件
-页码信息
-内容摘要
-```
-
-PDF 文档会显示页码来源；TXT、Markdown、Word 文档没有页码时会显示文档来源。
-
----
-
-### 4. 生成引用格式
-
-在“文档检索”页面输入关键词后，点击“生成引用格式”。
-
-系统会生成可复制的引用内容，例如：
-
-```text
-1. 《test_word.docx》，未知页码。
-相关度：0.1616
-引用内容：RAG 是检索增强生成技术。它的核心流程包括：文档切分、向量化、相似度检索、基于上下文生成答案。
-```
-
-该功能适合用于学习笔记、报告整理和资料引用。
-
----
-
-### 5. 学习笔记
-
-可以为某个概念添加学习笔记。
-
-示例：
-
-```text
-概念：RAG
-笔记：RAG 的核心是先检索相关资料，再让大模型基于资料生成答案。
-```
-
-学习笔记会保存到学习历史中，并可在“记忆回忆”和“学习报告”中查看。
-
----
-
-### 6. 清空全部学习笔记
-
-在“学习笔记”页面点击“清空全部学习笔记”。
-
-系统会清空本地学习历史中的 notes，但不会删除：
-
-```text
-当前文档
-RAG 知识库
-历史问答记录
-文档导入记录
-```
-
----
-
-### 7. 记忆回忆
-
-可以根据关键词回忆历史学习内容。
-
-系统会同时查询：
-
-```text
-当前记忆系统
-本地学习历史 JSON
-历史问答记录
-历史学习笔记
-历史文档记录
-```
-
----
-
-### 8. 学习统计
-
-可以查看当前系统状态，包括：
-
-```text
-当前用户
-当前 session
-当前文档
-当前 document_id
-已导入文档数
-提问次数
-学习笔记数
-Memory 状态
-RAG 知识库状态
-```
-
----
-
-### 9. 学习报告
-
-可以生成完整学习报告，内容包括：
-
-```text
-学习基本信息
-最近导入文档
-记忆系统状态
-RAG 知识库状态
-最近问答记录
-最近学习笔记
-推荐复习方向
-```
-
-报告支持导出为：
-
-```text
-Markdown 文件
-Word 文件
-```
-
----
-
-## 数据持久化说明
-
-项目使用本地 JSON 文件进行持久化。
-
-### RAG 知识库缓存
-
-默认保存位置：
-
-```text
-D:\python_self_agent\knowledge_base\rag_cache
-```
-
-用于保存文档切分后的 chunk 和向量数据。
-
-### 学习历史
-
-默认保存位置：
-
-```text
-D:\python_self_agent\memory_data
-```
-
-用于保存：
-
-```text
-历史导入文档
-历史问答
-学习笔记
-session 信息
-```
-
-### 学习报告
-
-默认保存位置：
-
-```text
-D:\python_self_agent\reports
-```
-
-用于保存导出的：
-
-```text
-Markdown 学习报告
-Word 学习报告
-```
-
----
-
-## 重新测试启动
-
-修改依赖或代码后，可以重新启动项目：
+运行完整测试：
 
 ```powershell
-D:\Anaconda\python.exe D:\python_self_agent\ui\gradio_app.py
+New-Item -ItemType Directory -Force .runtime\pytest-tmp | Out-Null
+$env:TEMP=(Resolve-Path '.runtime\pytest-tmp').Path
+$env:TMP=$env:TEMP
+.\venv\Scripts\python.exe -m pytest -q
 ```
 
-如果浏览器可以正常打开：
+测试覆盖：
 
-```text
-http://127.0.0.1:7860
+- 注册、认证、Session 过期和会话上限；
+- 用户目录、路径穿越防护和跨用户隔离；
+- 多会话 History 合并与写入协调；
+- 文档导入、选择、删除和原始文件清理；
+- 单文档/多文档 RAG 范围；
+- JSON/Qdrant 后端契约；
+- Neo4j 参数化查询、原子替换、图谱状态恢复、GraphRAG 混合上下文与租户隔离；
+- Qdrant 重试、错误映射、密钥清理和批量写入；
+- Memory 向量存储与降级；
+- 报告快照、跨用户访问防护；
+- 旧数据迁移、回滚和恢复；
+- History/Memory 损坏隔离与恢复；
+- Gradio 已认证处理器。
+
+真实 Qdrant 集成测试需要配置可访问的 Qdrant 服务；未配置时相关测试会跳过。
+
+Windows 开发环境可以使用仓库提供的临时测试服务脚本：
+
+```powershell
+.\venv\Scripts\python.exe -m pip install qdrant-client==1.18.0
+powershell -ExecutionPolicy Bypass -File scripts\run_qdrant_integration.ps1
 ```
 
-并且页面正常显示，说明项目启动成功。
+脚本下载官方 Qdrant v1.18.2 Windows x86-64 二进制，在
+`127.0.0.1:6333` 临时启动服务并运行真实集成测试，最后停止它启动的
+进程。下载、数据和日志位于已忽略的 `.runtime/`，不会进入版本控制。
 
----
+真实 Neo4j 集成测试需要设置 `NEO4J_TEST_URI`、`NEO4J_TEST_PASSWORD`，并可选设置 `NEO4J_TEST_USERNAME` 与 `NEO4J_TEST_DATABASE`；未配置 URI 时测试会明确跳过。
 
-## 最终测试流程
+## 关键数据规则
 
-整理项目文档前，建议完整测试一遍以下流程：
+1. 所有文档操作必须携带并过滤 `document_id`。
+2. 所有用户数据必须位于对应 `user_id` 根目录或 namespace 内。
+3. PDF Chunk 必须保留来源文件和页码。
+4. 总结类问题必须跨文档位置抽样，不能只依赖局部 top-k。
+5. 删除当前文档只删除目标文档及关联问答。
+6. 清空文档默认保留学习笔记。
+7. 清空笔记不得删除文档、问答或整个 Memory。
+8. 数据损坏时默认 fail closed，必须显式恢复后才能继续写入。
+9. 外部服务错误不得向 UI 泄露 API Key 或带凭据 URL。
+10. 图谱读写必须同时按 `rag_namespace` 和 `document_id` 过滤。
 
-```text
-1. 上传 PDF
-2. 上传 TXT
-3. 上传 Markdown
-4. 上传 Word / DOCX
-5. 切换当前文档
-6. 文档问答
-7. 文档检索
-8. 生成引用格式
-9. 添加学习笔记
-10. 记忆回忆
-11. 查看学习统计
-12. 生成学习报告
-13. 导出 Markdown
-14. 导出 Word
-15. 删除当前文档
-16. 清空全部文档
-17. 清空全部学习笔记
-```
+## 当前状态与后续方向
 
-如果以上流程都能正常执行，说明项目已经具备完整的智能文档学习助手功能闭环。
+已完成的工程升级：
 
----
+- JSON/Qdrant RAG 后端切换；
+- Qdrant payload 范围过滤和 collection 管理；
+- 多用户认证、会话与数据隔离；
+- 多文档联合问答、对比和总结；
+- 用户级并发写协调；
+- Neo4j 文档图谱构建、查询、恢复、重试、定向删除和普通问答混合检索；
+- 旧数据迁移和损坏数据恢复；
+- 较完整的单元、契约、集成和验收测试。
 
-## 当前已完成的质量优化
+后续可继续推进：
 
-* PDF 按页读取
-* TXT 文本导入
-* Markdown 文本导入
-* Word / DOCX 段落文本导入
-* chunk 按段落切分
-* chunk overlap 重叠窗口
-* 总结类问题自动扩大检索范围
-* 总结类问题启用全文抽样模式
-* 文档检索结果按页去重
-* 检索结果显示来源
-* PDF 检索结果显示页码
-* 多文档 document_id 隔离检索
-* 可复制引用格式生成
-* RAG JSON 本地持久化
-* 学习历史 JSON 本地持久化
-* Markdown 学习报告导出
-* Word 学习报告导出
+- GraphRAG 对比/摘要融合、跨文档实体合并与图谱 UI；
+- 批量导入、异步任务、上传进度和失败重试队列；
+- 文档命中高亮与引用一键复制；
+- 学习计划、间隔复习和知识掌握度；
+- 自动生成知识卡片与练习题；
+- Docker、云端或内网部署；
+- 将 `.markdown` 扩展名贯通 UI 和 RAG 解析链路。
 
----
+## 仓库工作约定
 
-## 后续优化方向
+开始修改前请阅读 `PROJECT_KNOWLEDGE.md`。当历史说明与当前仓库冲突时，以当前代码、测试、配置和运行结果为准。
 
-后续可以继续优化：
-
-```text
-1. 接入真正的 Qdrant 向量数据库
-2. 接入 Neo4j 知识图谱
-3. 增加多用户登录和用户隔离
-4. 增加学习计划和复习提醒
-5. 美化 Word 报告格式
-6. 增加引用复制按钮
-7. 增加检索相似度阈值调节
-8. 支持多文档联合问答
-9. 支持学习报告自动生成目录
-10. 优化系统流程图与项目展示材料
-```
-
----
-
-## 项目定位
-
-本项目可以作为：
-
-```text
-AI Agent 项目实践
-RAG 检索增强生成项目
-Memory + RAG 综合实验
-智能文档问答助手
-AI 学习助手
-课程设计 / 毕业设计 / 简历项目
-面试展示项目
-```
+涉及 Superpowers 实施计划评审时，遵循 `docs/agent-workflow/README.md`。

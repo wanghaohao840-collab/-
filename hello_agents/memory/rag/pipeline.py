@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 import json
-import math
+import os
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from hello_agents.memory.embedding import get_text_embedder, get_dimension, embed_query
+from hello_agents.memory.embedding import get_text_embedder, get_dimension
+from hello_agents.memory.rag.contracts import DocumentSegment
+from hello_agents.memory.rag.errors import RAGConfigError
+from hello_agents.memory.rag.prepare import default_chunk_id, prepare_document_chunks, utc_now_iso
+from hello_agents.memory.storage.vector_store import InMemoryVectorStore, VectorPoint
+
+
+QdrantRAGPipeline = None
+_QDRANT_COLLECTION_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_QDRANT_COLLECTION_MAX_LENGTH = 255
+from hello_agents.memory.rag.result_utils import (
+    dedupe_results_by_source,
+    hybrid_rank_results,
+    mmr_select,
+    normalize_document_scope,
+    RETRIEVAL_MODES,
+    sample_evenly,
+)
 
 
 class SimpleRAGPipeline:
@@ -31,6 +49,7 @@ class SimpleRAGPipeline:
         qdrant_api_key: Optional[str] = None,
         cache_path: Optional[str] = None,
     ):
+        rag_namespace = _validate_rag_namespace(rag_namespace)
         self.collection_name = collection_name
         self.rag_namespace = rag_namespace
         self.qdrant_url = qdrant_url
@@ -39,7 +58,12 @@ class SimpleRAGPipeline:
         self.embedder = get_text_embedder()
         self.dimension = get_dimension(384)
 
-        self.chunks: List[Dict[str, Any]] = []
+        # Internal vector store key scoped to collection + namespace.
+        self._collection = f"{collection_name}__{rag_namespace}"
+
+        # Unified in-memory backend via the VectorStore protocol.
+        self._vector_store = InMemoryVectorStore()
+        self._store_ready = False
 
         # 每一个 collection + namespace 使用一个独立 JSON 缓存文件
         self.cache_path = Path(cache_path) if cache_path else self._default_cache_path()
@@ -47,6 +71,60 @@ class SimpleRAGPipeline:
 
         # 启动时自动加载历史 chunks
         self._load_cache()
+
+    # ── backward-compatible chunks property ────────────────────────────
+
+    @property
+    def chunks(self) -> List[Dict[str, Any]]:
+        """Return all chunks as dicts (backward-compatible with tests)."""
+        points = self._vector_store.scroll(
+            self._collection, with_vectors=True)
+        return [self._point_to_chunk(p) for p in points]
+
+    @chunks.setter
+    def chunks(self, value: List[Dict[str, Any]]) -> None:
+        """Replace all chunks (used by replace_document for bulk replace)."""
+        self._vector_store.delete_by_filter(self._collection)
+        if value:
+            points = [self._chunk_to_vector_point(c) for c in value]
+            self._ensure_store_ready()
+            self._vector_store.upsert(self._collection, points)
+
+    # ── conversion helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _point_to_chunk(point: VectorPoint) -> Dict[str, Any]:
+        """Convert a VectorPoint back to the legacy chunk dict format."""
+        return {
+            "id": point.id,
+            "document_id": point.payload.get("document_id", ""),
+            "content": point.payload.get("content", ""),
+            "vector": point.vector,
+            "metadata": point.payload,
+        }
+
+    @staticmethod
+    def _chunk_to_vector_point(chunk: Dict[str, Any]) -> VectorPoint:
+        """Convert a legacy chunk dict to a VectorPoint."""
+        payload = dict(chunk.get("metadata", {}) or {})
+        payload.setdefault("document_id", chunk.get("document_id", ""))
+        payload.setdefault("content", chunk.get("content", ""))
+        return VectorPoint(
+            id=str(chunk.get("id", "")),
+            vector=chunk.get("vector", []),
+            payload=payload,
+        )
+
+    def _ensure_store_ready(self) -> None:
+        """Lazily register the collection dimension on first write.
+
+        Tests that patch ``self.dimension`` after construction rely on this
+        deferred initialisation.
+        """
+        if not self._store_ready:
+            self._vector_store.ensure_collection(
+                self._collection, self.dimension, "Cosine")
+            self._store_ready = True
 
     def add_text(
             self,
@@ -76,37 +154,36 @@ class SimpleRAGPipeline:
 
         added = 0
 
-        existing_count = sum(
-            1 for chunk in self.chunks
-            if chunk.get("document_id") == document_id
+        existing_count = self._vector_store.count(
+            self._collection,
+            filters={"document_id": document_id},
         )
 
+        points: list[VectorPoint] = []
         for index, chunk_text in enumerate(chunk_texts):
             chunk_id = f"{document_id}_{existing_count + index}"
 
             vector = self._to_vector(chunk_text)
 
-            chunk = {
-                "id": chunk_id,
+            payload = {
+                "memory_id": chunk_id,
                 "document_id": document_id,
+                "chunk_index": existing_count + index,
                 "content": chunk_text,
-                "vector": vector,
-                "metadata": {
-                    "memory_id": chunk_id,
-                    "document_id": document_id,
-                    "chunk_index": existing_count + index,
-                    "content": chunk_text,
-                    "memory_type": "rag_chunk",
-                    "is_rag_data": True,
-                    "data_source": "rag_pipeline",
-                    "rag_namespace": self.rag_namespace,
-                    "created_at": datetime.now().isoformat(),
-                    **metadata,
-                }
+                "memory_type": "rag_chunk",
+                "is_rag_data": True,
+                "data_source": "rag_pipeline",
+                "rag_namespace": self.rag_namespace,
+                "created_at": datetime.now().isoformat(),
+                **metadata,
             }
 
-            self.chunks.append(chunk)
+            points.append(VectorPoint(id=chunk_id, vector=vector, payload=payload))
             added += 1
+
+        if points:
+            self._ensure_store_ready()
+            self._vector_store.upsert(self._collection, points)
 
         # 关键：只有 save_cache=True 时才保存
         if save_cache:
@@ -125,61 +202,183 @@ class SimpleRAGPipeline:
             "message": message,
         }
 
+    def replace_document(
+        self,
+        document_id: str,
+        segments: List[DocumentSegment],
+        save_cache: bool = True,
+        allow_empty: bool = False,
+    ) -> Dict[str, Any]:
+        """Replace all chunks for one document using shared preparation logic."""
+
+        if not document_id:
+            return {
+                "success": False,
+                "message": "document_id cannot be empty",
+                "chunks_added": 0,
+                "chunks_removed": 0,
+            }
+
+        prepared = prepare_document_chunks(
+            document_id=document_id,
+            segments=segments,
+            rag_namespace=self.rag_namespace,
+            split_text=self._split_text,
+            embed_text=self._to_vector,
+            id_for_chunk=default_chunk_id,
+        )
+        if not prepared and not allow_empty:
+            return {
+                "success": False,
+                "document_id": document_id,
+                "message": "document contains no non-empty chunks; existing data was preserved",
+                "chunks_added": 0,
+                "chunks_removed": 0,
+            }
+
+        # Collect existing metadata for version tracking.
+        existing_points = self._vector_store.scroll(
+            self._collection,
+            filters={"document_id": document_id},
+            with_vectors=True,
+        )
+        existing_metadata = existing_points[0].payload if existing_points else {}
+        created_at = existing_metadata.get("created_at") or utc_now_iso()
+        version = int(existing_metadata.get("document_version", 0)) + 1 if existing_points else 1
+        updated_at = utc_now_iso()
+
+        # Count before removal.
+        before = self._vector_store.count(self._collection)
+        removed = self._remove_document_chunks(document_id)
+
+        # Upsert new chunks.
+        new_points: list[VectorPoint] = []
+        for chunk in prepared:
+            chunk.metadata.update(
+                created_at=created_at,
+                updated_at=updated_at,
+                document_version=version,
+            )
+            new_points.append(VectorPoint(
+                id=chunk.id,
+                vector=chunk.vector,
+                payload=chunk.metadata,
+            ))
+        if new_points:
+            self._vector_store.upsert(self._collection, new_points)
+
+        if save_cache:
+            self._save_cache()
+
+        return {
+            "success": True,
+            "document_id": document_id,
+            "chunks_added": len(prepared),
+            "chunks_removed": removed,
+            "cache_path": str(self.cache_path),
+            "message": f"Replaced document {document_id} with {len(prepared)} chunks",
+        }
+
     def search(
             self,
             query: str,
             limit: int = 5,
             min_score: float = 0.0,
             document_id: Optional[str] = None,
-            **kwargs
+            document_ids: Optional[List[str]] = None,
+            **kwargs: Any
     ) -> List[Dict[str, Any]]:
         """检索 RAG 知识库，可按 document_id 过滤"""
 
         if not query:
             return []
 
+        scope = normalize_document_scope(
+            document_id=document_id,
+            document_ids=document_ids,
+        )
+        if scope == []:
+            raise ValueError("document_ids cannot be empty")
+
+        retrieval_mode = str(kwargs.pop("retrieval_mode", "vector") or "vector").strip().lower()
+        if retrieval_mode not in RETRIEVAL_MODES:
+            raise ValueError(f"unsupported retrieval_mode: {retrieval_mode}")
+        use_mmr = kwargs.pop("use_mmr", retrieval_mode == "hybrid")
+        mmr_lambda = float(kwargs.pop("mmr_lambda", 0.75))
+        vector_weight = float(kwargs.pop("vector_weight", 0.7))
+
         query_vector = self._to_vector(query)
 
-        results = []
+        filters: dict[str, Any] = {}
+        if scope is not None:
+            filters["document_id"] = list(scope)
 
-        for chunk in self.chunks:
-            # 关键：只检索指定 document_id 的 chunk
-            if document_id and chunk.get("document_id") != document_id:
-                continue
-
-            score = self._cosine_similarity(query_vector, chunk["vector"])
-
-            if score >= min_score:
-                results.append({
-                    "id": chunk["id"],
-                    "score": score,
-                    "content": chunk["content"],
-                    "metadata": chunk["metadata"],
-                })
-
-        results.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
-
-        results = self._dedupe_results_by_page(
-            results=results,
-            max_per_page=1,
-            limit=limit
+        hits = self._vector_store.search(
+            self._collection,
+            query_vector,
+            filters=filters if filters else None,
+            limit=max(limit * 3, limit),  # oversample for dedup/diversity
+            score_threshold=min_score if min_score > 0 else None,
         )
 
-        return results
+        vector_results = [
+            {
+                "id": hit.id,
+                "score": hit.score,
+                "_vector_score": hit.score,
+                "content": hit.payload.get("content", ""),
+                "metadata": hit.payload,
+            }
+            for hit in hits
+        ]
+
+        if retrieval_mode == "hybrid":
+            lexical_points = self._vector_store.scroll(
+                self._collection,
+                filters=filters if filters else None,
+                with_vectors=False,
+            )
+            lexical_results = [
+                {
+                    "id": point.id,
+                    "score": 0.0,
+                    "content": point.payload.get("content", ""),
+                    "metadata": point.payload,
+                }
+                for point in lexical_points
+            ]
+            results = hybrid_rank_results(
+                query=query,
+                vector_results=vector_results,
+                lexical_results=lexical_results,
+                limit=max(limit * 3, limit),
+                vector_weight=vector_weight,
+            )
+        else:
+            results = vector_results
+
+        results = dedupe_results_by_source(results, max(limit * 3, limit))
+        if use_mmr:
+            results = mmr_select(results, limit=limit, lambda_mult=mmr_lambda)
+        for result in results:
+            result.pop("_vector_score", None)
+        return results[:limit]
 
     def stats(self) -> Dict[str, Any]:
         """知识库统计"""
 
-        document_ids = set()
-
-        for chunk in self.chunks:
-            document_ids.add(chunk["document_id"])
+        points = self._vector_store.scroll(
+            self._collection, with_vectors=False,
+            payload_fields=["document_id"],
+        )
+        document_ids = {p.payload.get("document_id", "") for p in points}
+        chunk_count = self._vector_store.count(self._collection)
 
         return {
             "collection_name": self.collection_name,
             "rag_namespace": self.rag_namespace,
             "document_count": len(document_ids),
-            "chunk_count": len(self.chunks),
+            "chunk_count": chunk_count,
             "dimension": self.dimension,
             "cache_path": str(self.cache_path),
             "cache_exists": self.cache_path.exists(),
@@ -188,8 +387,8 @@ class SimpleRAGPipeline:
     def clear(self) -> Dict[str, Any]:
         """清空知识库，并同步清空 JSON 缓存"""
 
-        count = len(self.chunks)
-        self.chunks.clear()
+        count = self._vector_store.count(self._collection)
+        self._vector_store.delete_by_filter(self._collection)
 
         self._save_cache()
 
@@ -209,15 +408,7 @@ class SimpleRAGPipeline:
                 "chunks_removed": 0,
             }
 
-        before = len(self.chunks)
-
-        self.chunks = [
-            chunk
-            for chunk in self.chunks
-            if chunk.get("document_id") != document_id
-        ]
-
-        removed = before - len(self.chunks)
+        removed = self._remove_document_chunks(document_id)
 
         self._save_cache()
 
@@ -315,25 +506,6 @@ class SimpleRAGPipeline:
 
         return vector
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        """余弦相似度"""
-
-        if not a or not b:
-            return 0.0
-
-        length = min(len(a), len(b))
-        a = a[:length]
-        b = b[:length]
-
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
-
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-
-        return dot / (norm_a * norm_b)
-
     def _default_cache_path(self) -> Path:
         """生成默认缓存路径"""
 
@@ -361,7 +533,6 @@ class SimpleRAGPipeline:
         """从 JSON 加载历史 chunks"""
 
         if not self.cache_path.exists():
-            self.chunks = []
             return
 
         try:
@@ -369,25 +540,26 @@ class SimpleRAGPipeline:
             data = json.loads(text)
 
             if not isinstance(data, dict):
-                self.chunks = []
                 return
 
-            chunks = data.get("chunks", [])
+            raw_chunks = data.get("chunks", [])
 
-            if not isinstance(chunks, list):
-                self.chunks = []
+            if not isinstance(raw_chunks, list):
                 return
 
-            self.chunks = self._normalize_loaded_chunks(chunks)
+            chunks = self._normalize_loaded_chunks(raw_chunks)
+            if chunks:
+                points = [self._chunk_to_vector_point(c) for c in chunks]
+                self._ensure_store_ready()
+            self._vector_store.upsert(self._collection, points)
 
             print(
                 f"[RAG] 已加载本地缓存: {self.cache_path}, "
-                f"chunks={len(self.chunks)}"
+                f"chunks={len(chunks)}"
             )
 
         except Exception as e:
             print(f"[WARNING] RAG 缓存加载失败: {self.cache_path}, error={e}")
-            self.chunks = []
 
     def _save_cache(self) -> None:
         """保存 chunks 到 JSON"""
@@ -395,13 +567,14 @@ class SimpleRAGPipeline:
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
 
+            serializable = self._serializable_chunks()
             data = {
                 "collection_name": self.collection_name,
                 "rag_namespace": self.rag_namespace,
                 "dimension": self.dimension,
                 "updated_at": datetime.now().isoformat(),
-                "chunk_count": len(self.chunks),
-                "chunks": self._serializable_chunks(),
+                "chunk_count": len(serializable),
+                "chunks": serializable,
             }
 
             temp_path = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
@@ -419,22 +592,20 @@ class SimpleRAGPipeline:
     def _serializable_chunks(self) -> List[Dict[str, Any]]:
         """把 chunks 转成 JSON 可保存格式"""
 
+        points = self._vector_store.scroll(
+            self._collection, with_vectors=True)
         serializable = []
 
-        for chunk in self.chunks:
-            vector = chunk.get("vector", [])
-
-            if hasattr(vector, "tolist"):
-                vector = vector.tolist()
-
+        for point in points:
+            vector = point.vector
             vector = [float(x) for x in vector]
 
             serializable.append({
-                "id": str(chunk.get("id", "")),
-                "document_id": str(chunk.get("document_id", "")),
-                "content": str(chunk.get("content", "")),
+                "id": str(point.id),
+                "document_id": str(point.payload.get("document_id", "")),
+                "content": str(point.payload.get("content", "")),
                 "vector": vector,
-                "metadata": self._json_safe_dict(chunk.get("metadata", {}) or {}),
+                "metadata": self._json_safe_dict(point.payload),
             })
 
         return serializable
@@ -517,15 +688,10 @@ class SimpleRAGPipeline:
     def _remove_document_chunks(self, document_id: str) -> int:
         """删除指定 document_id 的旧 chunks"""
 
-        before = len(self.chunks)
-
-        self.chunks = [
-            chunk
-            for chunk in self.chunks
-            if chunk.get("document_id") != document_id
-        ]
-
-        return before - len(self.chunks)
+        return self._vector_store.delete_by_filter(
+            self._collection,
+            filters={"document_id": document_id},
+        )
 
     def _split_long_text_with_overlap(
             self,
@@ -573,11 +739,12 @@ class SimpleRAGPipeline:
         if not document_id:
             return []
 
-        doc_chunks = [
-            chunk
-            for chunk in self.chunks
-            if chunk.get("document_id") == document_id
-        ]
+        points = self._vector_store.scroll(
+            self._collection,
+            filters={"document_id": document_id},
+            with_vectors=False,
+        )
+        doc_chunks = [self._point_to_chunk(p) for p in points]
 
         if not doc_chunks:
             return []
@@ -604,25 +771,8 @@ class SimpleRAGPipeline:
 
         pages = sorted(page_map.keys())
 
-        selected = []
+        selected = sample_evenly([page_map[page] for page in pages], limit)
 
-        # 1. 优先取前 3 页
-        for page in pages[:3]:
-            selected.append(page_map[page])
-
-        # 2. 再做间隔抽样
-        remaining_pages = pages[3:]
-
-        if remaining_pages:
-            step = max(1, len(remaining_pages) // max(1, limit - len(selected)))
-
-            for page in remaining_pages[::step]:
-                if len(selected) >= limit:
-                    break
-
-                selected.append(page_map[page])
-
-        # 3. 转成和 search 返回一致的格式
         results = []
 
         for chunk in selected[:limit]:
@@ -635,64 +785,43 @@ class SimpleRAGPipeline:
 
         return results
 
-    def _dedupe_results_by_page(
+    def get_document_chunks(
             self,
-            results: List[Dict[str, Any]],
-            max_per_page: int = 1,
-            limit: int = 5
+            document_id: str
     ) -> List[Dict[str, Any]]:
-        """按 document_id + page_number 去重，避免同一页重复出现太多 chunk"""
+        """Return every chunk for exactly one document in stable order."""
 
-        page_counter = {}
-        deduped = []
+        document_id = str(document_id or "").strip()
+        if not document_id:
+            raise ValueError("document_id is required")
 
-        for item in results:
-            metadata = item.get("metadata", {}) or {}
+        points = self._vector_store.scroll(
+            self._collection,
+            filters={"document_id": document_id},
+            with_vectors=False,
+        )
+        chunks = [self._point_to_chunk(point) for point in points]
+        chunks.sort(
+            key=lambda chunk: (
+                int((chunk.get("metadata") or {}).get("chunk_index", 0)),
+                str(chunk.get("id") or ""),
+            )
+        )
+        return chunks
 
-            document_id = metadata.get("document_id") or ""
-            page_number = metadata.get("page_number")
+    def list_document_ids(self) -> List[str]:
+        """Return document IDs in this RAG namespace."""
 
-            # 没有页码的内容不强制去重
-            if page_number in [None, ""]:
-                deduped.append(item)
-                if len(deduped) >= limit:
-                    break
-                continue
-
-            key = f"{document_id}__page_{page_number}"
-
-            count = page_counter.get(key, 0)
-
-            if count >= max_per_page:
-                continue
-
-            page_counter[key] = count + 1
-            deduped.append(item)
-
-            if len(deduped) >= limit:
-                break
-
-        return deduped
-
-
-def create_rag_pipeline(
-    qdrant_url: Optional[str] = None,
-    qdrant_api_key: Optional[str] = None,
-    collection_name: str = "rag_knowledge_base",
-    rag_namespace: str = "default",
-    cache_path: Optional[str] = None,
-    **kwargs
-) -> SimpleRAGPipeline:
-    """创建 RAG 管道"""
-
-    return SimpleRAGPipeline(
-        collection_name=collection_name,
-        rag_namespace=rag_namespace,
-        qdrant_url=qdrant_url,
-        qdrant_api_key=qdrant_api_key,
-        cache_path=cache_path,
-    )
-
+        points = self._vector_store.scroll(
+            self._collection,
+            with_vectors=False,
+            payload_fields=["document_id"],
+        )
+        return sorted({
+            str(point.payload.get("document_id"))
+            for point in points
+            if point.payload.get("document_id")
+        })
 
 def index_chunks(
     store=None,
@@ -766,3 +895,74 @@ def search_vectors_expanded(
         )
 
     return []
+
+
+def resolve_rag_backend(backend: Optional[str] = None) -> str:
+    value = (backend or os.getenv("RAG_BACKEND") or "json").strip().lower()
+    if value not in {"json", "qdrant"}:
+        raise RAGConfigError(f"Unsupported RAG_BACKEND: {value}")
+    return value
+
+
+def resolve_qdrant_collection(collection_name: Optional[str] = None) -> str:
+    value = (os.getenv("QDRANT_COLLECTION") or collection_name or "rag_knowledge_base").strip()
+    if not value:
+        raise RAGConfigError("Qdrant collection name cannot be empty")
+    if len(value) > _QDRANT_COLLECTION_MAX_LENGTH:
+        raise RAGConfigError(
+            f"Qdrant collection name cannot exceed {_QDRANT_COLLECTION_MAX_LENGTH} characters"
+        )
+    if not _QDRANT_COLLECTION_RE.fullmatch(value):
+        raise RAGConfigError(
+            "Qdrant collection name may contain only letters, numbers, underscores, and hyphens"
+        )
+    return value
+
+
+def _validate_rag_namespace(rag_namespace: str) -> str:
+    value = str(rag_namespace or "").strip()
+    if not value:
+        raise RAGConfigError("rag_namespace cannot be empty")
+    return value
+
+
+def create_rag_pipeline(
+    qdrant_url: Optional[str] = None,
+    qdrant_api_key: Optional[str] = None,
+    collection_name: str = "rag_knowledge_base",
+    rag_namespace: str = "default",
+    cache_path: Optional[str] = None,
+    backend: Optional[str] = None,
+    qdrant_client: Any = None,
+    **kwargs
+) -> Any:
+    selected_backend = resolve_rag_backend(backend)
+    rag_namespace = _validate_rag_namespace(rag_namespace)
+
+    if selected_backend == "qdrant":
+        resolved_url = qdrant_url or os.getenv("QDRANT_URL")
+        if qdrant_client is None and kwargs.get("vector_store") is None and not resolved_url:
+            raise RAGConfigError("QDRANT_URL is required when RAG_BACKEND=qdrant")
+
+        global QdrantRAGPipeline
+        if QdrantRAGPipeline is None:
+            from hello_agents.memory.rag.qdrant_pipeline import QdrantRAGPipeline as ImportedQdrantRAGPipeline
+
+            QdrantRAGPipeline = ImportedQdrantRAGPipeline
+
+        return QdrantRAGPipeline(
+            collection_name=resolve_qdrant_collection(collection_name),
+            rag_namespace=rag_namespace,
+            qdrant_url=resolved_url,
+            qdrant_api_key=qdrant_api_key or os.getenv("QDRANT_API_KEY") or None,
+            qdrant_client=qdrant_client,
+            **kwargs,
+        )
+
+    return SimpleRAGPipeline(
+        collection_name=collection_name,
+        rag_namespace=rag_namespace,
+        qdrant_url=qdrant_url,
+        qdrant_api_key=qdrant_api_key,
+        cache_path=cache_path,
+    )

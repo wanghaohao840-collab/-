@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+import logging
 from typing import Dict, List, Any, Optional
 
 from hello_agents.memory.base import (
@@ -13,7 +14,11 @@ from hello_agents.memory.base import (
 )
 from hello_agents.memory.embedding import get_text_embedder
 from hello_agents.memory.storage.qdrant_store import QdrantConnectionManager
-from hello_agents.memory.storage.neo4j_store import Neo4jGraphStore
+from hello_agents.memory.storage.vector_store import VectorPoint, VectorStore
+from hello_agents.memory.rag.errors import RAGConnectionError
+
+
+logger = logging.getLogger(__name__)
 
 
 class SemanticMemory(BaseMemory):
@@ -22,7 +27,7 @@ class SemanticMemory(BaseMemory):
     当前版本是可运行兜底版：
     - 使用 embedding.py 中的兜底嵌入器
     - 使用 qdrant_store.py 中的向量存储
-    - 使用 neo4j_store.py 中的图存储兜底实现
+    - 文档图谱由独立 KnowledgeGraphService 管理
     - 支持 add / retrieve / forget / clear / count
     """
 
@@ -36,19 +41,29 @@ class SemanticMemory(BaseMemory):
         self.embedding_model = get_text_embedder()
 
         # 向量存储
-        self.vector_store = QdrantConnectionManager.get_instance(
+        self.vector_collection = getattr(
+            config, "qdrant_collection", "hello_agents_vectors"
+        )
+        self.vector_store: VectorStore = storage_backend or QdrantConnectionManager.get_instance(
             qdrant_url=getattr(config, "qdrant_url", None),
             qdrant_api_key=getattr(config, "qdrant_api_key", None),
-            collection_name=getattr(config, "qdrant_collection", "hello_agents_vectors"),
+            collection_name=self.vector_collection,
+            vector_size=getattr(config, "qdrant_vector_size", 384),
+            tenant_id=getattr(config, "tenant_id", None),
+            rag_namespace=getattr(config, "rag_namespace", None),
+        )
+        self.vector_store.ensure_collection(
+            self.vector_collection,
+            getattr(config, "qdrant_vector_size", 384),
+        )
+        self.vector_store.ensure_payload_indexes(
+            self.vector_collection,
+            {"memory_type": "keyword", "user_id": "keyword"},
         )
 
-        # 图存储
-        self.graph_store = Neo4jGraphStore(
-            uri=getattr(config, "neo4j_uri", None),
-            username=getattr(config, "neo4j_username", "neo4j"),
-            password=getattr(config, "neo4j_password", None),
-            database=getattr(config, "neo4j_database", "neo4j"),
-        )
+        # 文档知识图谱由 KnowledgeGraphService 管理，避免 SemanticMemory
+        # 建立一个无法参与文档事务与 document_id 隔离的第二套图写入链路。
+        self.graph_store = None
 
         # 内存缓存
         self.entities: Dict[str, Entity] = {}
@@ -97,10 +112,9 @@ class SemanticMemory(BaseMemory):
             **(memory_item.metadata or {}),
         }
 
-        self.vector_store.add_vectors(
-            vectors=[embedding],
-            metadata=[metadata],
-            ids=[memory_item.id],
+        self.vector_store.upsert(
+            self.vector_collection,
+            [VectorPoint(memory_item.id, embedding, metadata)],
         )
 
         return memory_item.id
@@ -146,6 +160,7 @@ class SemanticMemory(BaseMemory):
         """遗忘语义记忆"""
 
         before = len(self.memories)
+        previous_ids = set(self.memories)
 
         if strategy == "importance_based":
             self.memories = {
@@ -155,6 +170,12 @@ class SemanticMemory(BaseMemory):
             }
 
         # 当前兜底版暂时只实现 importance_based
+        removed_ids = list(previous_ids - set(self.memories))
+        if removed_ids:
+            self.vector_store.delete_by_filter(
+                self.vector_collection,
+                {"_id": removed_ids},
+            )
         return before - len(self.memories)
 
     def clear(self) -> None:
@@ -163,6 +184,10 @@ class SemanticMemory(BaseMemory):
         self.memories.clear()
         self.entities.clear()
         self.relations.clear()
+        self.vector_store.delete_by_filter(
+            self.vector_collection,
+            {"memory_type": "semantic"},
+        )
 
     def count(self) -> int:
         """返回语义记忆数量"""
@@ -194,24 +219,34 @@ class SemanticMemory(BaseMemory):
             where["user_id"] = user_id
 
         try:
-            hits = self.vector_store.search_similar(
-                query_vector=query_vector,
+            hits = self.vector_store.search(
+                self.vector_collection,
+                query_vector,
+                filters=where,
                 limit=limit,
-                where=where,
             )
 
             filtered = []
             for hit in hits:
-                metadata = hit.get("metadata", {}) or {}
+                metadata = hit.payload
                 importance = float(metadata.get("importance", 0.5))
                 if importance >= min_importance:
-                    filtered.append(hit)
+                    filtered.append(
+                        {
+                            "id": hit.id,
+                            "score": hit.score,
+                            "metadata": metadata,
+                        }
+                    )
 
             if filtered:
                 return filtered
 
-        except Exception:
-            pass
+        except (RAGConnectionError, ConnectionError, TimeoutError, OSError) as error:
+            logger.warning(
+                "Vector retrieval unavailable; using keyword fallback (%s)",
+                type(error).__name__,
+            )
 
         return self._fallback_keyword_search(
             query=query,
@@ -367,6 +402,7 @@ class SemanticMemory(BaseMemory):
                         "importance": item.importance,
                         "timestamp": item.timestamp,
                         **(item.metadata or {}),
+                        "retrieval_backend": "fallback_keyword",
                     }
                 })
 
@@ -418,7 +454,7 @@ class SemanticMemory(BaseMemory):
     def _add_entity_to_graph(self, entity: Entity, memory_item: MemoryItem) -> None:
         """添加实体到图存储"""
 
-        if hasattr(self.graph_store, "add_entity"):
+        if self.graph_store is not None and hasattr(self.graph_store, "add_entity"):
             self.graph_store.add_entity(
                 entity_id=entity.entity_id,
                 properties={
@@ -432,7 +468,7 @@ class SemanticMemory(BaseMemory):
     def _add_relation_to_graph(self, relation: Relation, memory_item: MemoryItem) -> None:
         """添加关系到图存储"""
 
-        if hasattr(self.graph_store, "add_relation"):
+        if self.graph_store is not None and hasattr(self.graph_store, "add_relation"):
             self.graph_store.add_relation(
                 source_id=relation.source_id,
                 target_id=relation.target_id,

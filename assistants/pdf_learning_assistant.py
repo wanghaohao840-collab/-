@@ -5,10 +5,19 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from threading import RLock
+from typing import Optional, Dict, Any, Sequence
 
+from app.history import HistoryRepository
+from app.summary_tasks import SummaryTaskManager
+from hello_agents.memory.base import MemoryConfig
+from hello_agents.memory.rag.result_utils import (
+    MAX_SELECTED_DOCUMENTS,
+    resolve_qa_mode,
+)
 from hello_agents.tools.builtin.memory_tool import MemoryTool
 from hello_agents.tools.builtin.rag_tool import RAGTool
+from assistants.document_selection import build_document_scope
 
 
 class PDFLearningAssistant:
@@ -23,25 +32,55 @@ class PDFLearningAssistant:
     6. 查看学习统计
     """
 
-    def __init__(self, user_id: str = "user123"):
+    def __init__(
+        self,
+        user_id: str = "user123",
+        runtime_dir: Optional[str | Path] = None,
+        runtime: Any = None,
+    ):
         self.user_id = user_id
         self.session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+        self.runtime = runtime
+        self.runtime_dir = Path(runtime_dir or getattr(getattr(runtime, "paths", None), "root", None) or "./.runtime").resolve()
+        self.memory_dir = self.runtime_dir / "memory"
+        self.rag_dir = self.runtime_dir / "rag"
+        self.report_dir = self.runtime_dir / "reports"
+        self._lock = getattr(runtime, "lock", RLock())
 
-        self.memory_tool = MemoryTool(
-            user_id=user_id,
-            memory_types=["working", "episodic", "semantic"]
-        )
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.rag_dir.mkdir(parents=True, exist_ok=True)
+        self.report_dir.mkdir(parents=True, exist_ok=True)
 
-        self.rag_tool = RAGTool(
-            knowledge_base_path="./knowledge_base",
-            collection_name="pdf_learning_collection",
-            rag_namespace=f"pdf_{user_id}"
-        )
+        if runtime is not None:
+            self.memory_tool = runtime.memory_tool
+        else:
+            self.memory_tool = MemoryTool(
+                user_id=user_id,
+                memory_config=MemoryConfig(
+                    database_path=str(self.memory_dir / f"memory_{user_id}.db")
+                ),
+                memory_types=["working", "episodic", "semantic"]
+            )
+
+        if runtime is not None:
+            self.rag_tool = runtime.rag_tool
+        else:
+            self.rag_tool = RAGTool(
+                knowledge_base_path=str(self.rag_dir),
+                collection_name="pdf_learning_collection",
+                rag_namespace=f"pdf_{user_id}",
+                cache_path=str(self.rag_dir / "rag_cache.json"),
+            )
 
         self.current_document: Optional[str] = None
         self.current_document_id: Optional[str] = None
 
-        self.history_path = Path("./memory_data") / f"learning_history_{user_id}.json"
+        self.history_repository = getattr(runtime, "history", None)
+        self.report_service = getattr(runtime, "reports", None)
+        self.coordinator = getattr(runtime, "coordinator", None)
+        self.history_path = Path(getattr(self.history_repository, "path", self._resolve_history_path(user_id)))
+        if self.history_repository is None:
+            self.history_repository = HistoryRepository(self.history_path)
         self.history_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.history = self._load_history()
@@ -52,8 +91,52 @@ class PDFLearningAssistant:
             "questions_asked": 0,
             "notes_added": 0,
         }
+        self._summary_task_manager = SummaryTaskManager(max_workers=2)
 
-    def load_document(self, pdf_path: str) -> str:
+    def close(self) -> None:
+        """Release runtime resources such as SQLite connections."""
+
+        manager = getattr(self, "_summary_task_manager", None)
+        if manager is not None:
+            manager.close()
+        if self.runtime is not None:
+            return
+
+        rag_close = getattr(getattr(self, "rag_tool", None), "close", None)
+        if callable(rag_close):
+            rag_close()
+
+        manager = getattr(getattr(self, "memory_tool", None), "memory_manager", None)
+        memory_types = getattr(manager, "memory_types", {}) or {}
+        for memory in memory_types.values():
+            doc_store = getattr(memory, "doc_store", None)
+            if doc_store is not None and hasattr(doc_store, "close"):
+                doc_store.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _resolve_history_path(self, user_id: str) -> Path:
+        if self.runtime_dir.name == str(user_id):
+            return self.runtime_dir / "history.json"
+        return self.memory_dir / f"learning_history_{user_id}.json"
+
+    @property
+    def _write_lock(self):
+        # Some lightweight tests construct the assistant without __init__.
+        if not hasattr(self, "_lock"):
+            self._lock = RLock()
+        return self._lock
+
+    def load_document(
+        self,
+        pdf_path: str,
+        document_id: Optional[str] = None,
+        original_name: Optional[str] = None,
+    ) -> str:
         """导入文档，支持 PDF / TXT / Markdown"""
 
         path = Path(pdf_path)
@@ -68,45 +151,73 @@ class PDFLearningAssistant:
         if suffix not in supported_suffixes:
             return f"❌ 当前只支持 PDF / TXT / Markdown / Word 文件: {suffix}"
 
-        document_id = path.stem
+        document_id = document_id or path.stem
+        document_name = original_name or path.name
 
-        result = self.rag_tool.execute(
-            "add_document",
-            file_path=str(path),
-            document_id=document_id,
-            metadata={
+        add_kwargs = {
+            "file_path": str(path),
+            "document_id": document_id,
+            "metadata": {
                 "user_id": self.user_id,
                 "session_id": self.session_id,
                 "document_id": document_id,
-                "document_name": path.name,
+                "document_name": document_name,
                 "document_path": str(path),
                 "file_suffix": suffix,
                 "source_type": "document",
-            }
-        )
+            },
+        }
 
-        # 更新当前文档状态
-        self.current_document = str(path)
-        self.current_document_id = document_id
-
-        # 更新统计
-        self.stats["documents_loaded"] += 1
-
-        # 记录到学习历史
-        self.history.setdefault("documents", [])
-
-        self.history["documents"].append({
+        history_item = {
             "document_id": document_id,
-            "document_name": path.name,
+            "document_name": document_name,
             "document_path": str(path),
             "file_suffix": suffix,
             "session_id": self.session_id,
-            "loaded_at": datetime.now().isoformat()
-        })
+            "loaded_at": datetime.now().isoformat(),
+        }
 
-        self._save_history()
+        # ── critical section: RAG mutation + History commit ─────────
+        with self._write_lock:
+            if hasattr(self.rag_tool, "execute_result"):
+                action_result = self.rag_tool.execute_result("add_document", **add_kwargs)
+                result = action_result.message
+                if not action_result.success:
+                    return result  # History untouched; no compensation needed
+            else:
+                result = self.rag_tool.execute("add_document", **add_kwargs)
 
-        # 记录到记忆系统
+            # Commit History inside the same lock — fresh merge against
+            # the latest persisted snapshot.
+            try:
+                if self.coordinator is not None:
+                    self.history = self.coordinator.update_history(
+                        lambda h: h["documents"].append(history_item)
+                    )
+                else:
+                    self.history = self.history_repository.update(
+                        lambda h: h["documents"].append(history_item)
+                    )
+            except Exception:
+                # Best-effort compensation: remove the RAG document we
+                # just staged so the two stores stay consistent.
+                if self.coordinator is not None:
+                    self.coordinator.compensate_rag_add(
+                        self.rag_tool, document_id, reason="history update failed"
+                    )
+                else:
+                    try:
+                        self.rag_tool.execute("delete_document", document_id=document_id)
+                    except Exception:
+                        pass
+                raise
+
+        # ── outside lock: session-local state ────────────────────────
+        self.current_document = str(path)
+        self.current_document_id = document_id
+        self.stats["documents_loaded"] += 1
+
+        # ── episodic memory (uses coordination_lock → reentrant) ────
         self.memory_tool.execute(
             "add",
             content=f"用户导入了文档：{path.name}",
@@ -116,19 +227,55 @@ class PDFLearningAssistant:
             session_id=self.session_id,
             metadata={
                 "document_id": document_id,
-                "document_name": path.name,
+                "document_name": document_name,
                 "document_path": str(path),
                 "file_suffix": suffix,
-            }
+            },
         )
 
         return result
 
-    def ask(self, question: str, limit: int = 5) -> str:
-        """基于当前 PDF 问答"""
+    def ask(
+        self,
+        question: str,
+        limit: int = 5,
+        selected_documents: Optional[Sequence[str] | str] = None,
+        mode: str = "auto",
+        progress_callback: Any = None,
+        cancel_event: Any = None,
+        structured_output: bool = False,
+    ) -> str:
+        """Answer questions against the current document or an explicit set."""
 
         if not question.strip():
             return "❌ 问题不能为空"
+
+        try:
+            scope = build_document_scope(selected_documents)
+        except ValueError as error:
+            return f"❌ 文档选择无效: {error}"
+        explicit_scope = selected_documents is not None
+
+        if explicit_scope and not scope.document_ids:
+            return "❌ 请选择至少 1 篇文档"
+        if explicit_scope and len(scope.document_ids) > MAX_SELECTED_DOCUMENTS:
+            return f"❌ 最多选择 {MAX_SELECTED_DOCUMENTS} 篇文档"
+
+        if not explicit_scope and not self.current_document_id:
+            return "❌ 当前没有选择文档。请先上传文档或在下拉框中选择一个文档。"
+
+        try:
+            selected_mode = resolve_qa_mode(question, mode)
+        except ValueError as error:
+            return f"❌ {error}"
+
+        selected_ids = (
+            scope.document_ids
+            if explicit_scope
+            else [self.current_document_id]
+        )
+        if selected_mode == "compare" and len(selected_ids) < 2:
+            return "❌ 对比分析至少需要选择 2 篇文档"
 
         self.stats["questions_asked"] += 1
 
@@ -137,65 +284,161 @@ class PDFLearningAssistant:
             content=f"用户提出问题：{question}",
             memory_type="working",
             importance=0.6,
-            session_id=self.session_id
+            session_id=self.session_id,
         )
 
-        if not self.current_document_id:
-            return "❌ 当前没有选择 PDF。请先上传 PDF 或在下拉框中选择一个 PDF。"
+        rag_kwargs = {
+            "query": question,
+            "limit": limit,
+            "min_score": 0.12,
+            "mode": selected_mode,
+        }
+        if progress_callback is not None:
+            rag_kwargs["progress_callback"] = progress_callback
+        if cancel_event is not None:
+            rag_kwargs["cancel_event"] = cancel_event
+        if structured_output:
+            rag_kwargs["structured_output"] = True
 
-        summary_keywords = ["总结", "主要讲了什么", "核心内容", "概括", "主要内容", "全文"]
+        if explicit_scope:
+            rag_kwargs["document_ids"] = scope.document_ids
+        else:
+            rag_kwargs["document_id"] = self.current_document_id
 
-        summary_mode = any(keyword in question for keyword in summary_keywords)
+        answer = self.rag_tool.execute("ask", **rag_kwargs)
+        is_cancelled = getattr(cancel_event, "is_set", None)
+        if callable(is_cancelled) and is_cancelled():
+            self.stats["questions_asked"] = max(
+                0, self.stats["questions_asked"] - 1
+            )
+            return answer
 
-        if summary_mode:
-            limit = max(limit, 12)
-
-        answer = self.rag_tool.execute(
-            "ask",
-            query=question,
-            limit=limit,
-            min_score=0.12,
-            document_id=self.current_document_id,
-            summary_mode=summary_mode
+        document_label = (
+            "; ".join(scope.labels or [])
+            if explicit_scope
+            else self.current_document
         )
-
-        self.history["questions"].append({
+        history_item = {
             "question": question,
             "answer": answer,
-            "document": self.current_document,
+            "document": document_label,
             "session_id": self.session_id,
-            "asked_at": datetime.now().isoformat()
-        })
+            "asked_at": datetime.now().isoformat(),
+        }
 
-        self._save_history()
+        if explicit_scope:
+            history_item["document_ids"] = scope.document_ids
+            history_item["document_names"] = scope.document_names
+            history_item["mode"] = selected_mode
+
+        if explicit_scope:
+            document_ids = scope.document_ids
+            document_names = scope.document_names
+        else:
+            latest = self._load_latest_history()
+            document_ids = [self.current_document_id]
+            document_names = [
+                item.get("document_name", self.current_document_id)
+                for item in latest["documents"]
+                if item.get("document_id") == self.current_document_id
+            ] or [Path(self.current_document or "").name]
+        history_item["document_ids"] = document_ids
+        history_item["document_names"] = document_names
+        history_item["mode"] = selected_mode
+        self._update_history(lambda history: history["questions"].append(history_item))
 
         self.memory_tool.execute(
             "add",
-            content=f"用户针对 PDF 提问：{question}\n系统回答：{answer[:300]}",
+            content=f"用户针对文档提问：{question}\n系统回答：{answer[:300]}",
             memory_type="episodic",
             importance=0.7,
             event_type="pdf_qa",
-            session_id=self.session_id
+            session_id=self.session_id,
         )
 
         return answer
 
-    def search(self, query: str, limit: int = 5) -> str:
-        """只检索当前 PDF 内容，不生成回答"""
+    def start_summary_task(
+        self,
+        question: str,
+        selected_documents: Sequence[str] | str,
+        limit: int = 5,
+    ) -> Dict[str, Any]:
+        if not question or not question.strip():
+            raise ValueError("question cannot be empty")
+        scope = build_document_scope(selected_documents)
+        if not scope.document_ids:
+            raise ValueError("select at least one document")
+        if len(scope.document_ids) > MAX_SELECTED_DOCUMENTS:
+            raise ValueError(
+                f"select at most {MAX_SELECTED_DOCUMENTS} documents"
+            )
+        manager = self._get_summary_task_manager()
+
+        def run(progress_callback, cancel_event):
+            return self.ask(
+                question,
+                limit=limit,
+                selected_documents=list(selected_documents)
+                if not isinstance(selected_documents, str)
+                else selected_documents,
+                mode="summary",
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+            )
+
+        return manager.start(run, total=len(scope.document_ids))
+
+    def get_summary_task(self, task_id: str) -> Dict[str, Any]:
+        return self._get_summary_task_manager().get(task_id)
+
+    def cancel_summary_task(self, task_id: str) -> Dict[str, Any]:
+        return self._get_summary_task_manager().cancel(task_id)
+
+    def _get_summary_task_manager(self) -> SummaryTaskManager:
+        manager = getattr(self, "_summary_task_manager", None)
+        if manager is None:
+            manager = SummaryTaskManager(max_workers=2)
+            self._summary_task_manager = manager
+        return manager
+
+    def search(
+        self,
+        query: str,
+        limit: int = 5,
+        selected_documents: Optional[Sequence[str] | str] = None,
+    ) -> str:
+        """Search the current document or an explicit document set."""
 
         if not query or not query.strip():
             return "❌ 检索关键词不能为空"
 
-        if not self.current_document_id:
-            return "❌ 当前没有选择 PDF。请先上传 PDF 或在下拉框中选择一个 PDF。"
+        try:
+            scope = build_document_scope(selected_documents)
+        except ValueError as error:
+            return f"❌ 文档选择无效: {error}"
+        explicit_scope = selected_documents is not None
 
-        return self.rag_tool.execute(
-            "search",
-            query=query,
-            limit=limit,
-            min_score=0.08,
-            document_id=self.current_document_id
-        )
+        if explicit_scope and not scope.document_ids:
+            return "❌ 请选择至少 1 篇文档"
+        if explicit_scope and len(scope.document_ids) > MAX_SELECTED_DOCUMENTS:
+            return f"❌ 最多选择 {MAX_SELECTED_DOCUMENTS} 篇文档"
+
+        if not explicit_scope and not self.current_document_id:
+            return "❌ 当前没有选择文档。请先上传文档或在下拉框中选择一个文档。"
+
+        rag_kwargs = {
+            "query": query,
+            "limit": limit,
+            "min_score": 0.08,
+        }
+
+        if explicit_scope:
+            rag_kwargs["document_ids"] = scope.document_ids
+        else:
+            rag_kwargs["document_id"] = self.current_document_id
+
+        return self.rag_tool.execute("search", **rag_kwargs)
 
     def add_note(self, note: str, concept: Optional[str] = None) -> str:
         """添加学习笔记"""
@@ -219,29 +462,27 @@ class PDFLearningAssistant:
             session_id=self.session_id
         )
 
-        self.history["notes"].append({
+        history_item = {
             "concept": concept or "",
             "note": note,
             "content": content,
             "session_id": self.session_id,
             "created_at": datetime.now().isoformat()
-        })
-
-        self._save_history()
+        }
+        self._update_history(lambda history: history["notes"].append(history_item))
 
         return result
 
     def clear_all_notes(self) -> str:
         """清空全部学习笔记：只清理学习历史中的 notes，不影响 PDF 文档和问答历史"""
 
-        notes = self.history.get("notes", [])
-        removed_notes = len(notes)
+        latest = self._load_latest_history()
+        removed_notes = len(latest.get("notes", []))
 
         # 1. 清空本地学习历史中的学习笔记
-        self.history["notes"] = []
+        self._update_history(lambda history: history.__setitem__("notes", []))
 
         # 2. 保存学习历史 JSON
-        self._save_history()
 
         # 3. 重置统计
         if "notes_added" in self.stats:
@@ -348,6 +589,7 @@ class PDFLearningAssistant:
     def generate_report(self) -> str:
         """生成学习报告"""
 
+        self._load_latest_history()
         memory_summary = self.memory_tool.execute("summary")
         rag_stats = self.rag_tool.execute("stats")
 
@@ -418,62 +660,38 @@ class PDFLearningAssistant:
 
     def _load_history(self) -> Dict[str, Any]:
         """加载学习历史"""
-
-        if not self.history_path.exists():
-            return {
-                "documents": [],
-                "questions": [],
-                "notes": [],
-                "sessions": []
-            }
-
-        try:
-            text = self.history_path.read_text(encoding="utf-8")
-            data = json.loads(text)
-
-            if not isinstance(data, dict):
-                return {
-                    "documents": [],
-                    "questions": [],
-                    "notes": [],
-                    "sessions": []
-                }
-
-            data.setdefault("documents", [])
-            data.setdefault("questions", [])
-            data.setdefault("notes", [])
-            data.setdefault("sessions", [])
-
-            return data
-
-        except Exception:
-            return {
-                "documents": [],
-                "questions": [],
-                "notes": [],
-                "sessions": []
-            }
+        return self.history_repository.load()
 
     def _save_history(self) -> None:
         """保存学习历史"""
-
         try:
-            self.history_path.parent.mkdir(parents=True, exist_ok=True)
-
             self.history["last_updated"] = datetime.now().isoformat()
-
-            self.history_path.write_text(
-                json.dumps(self.history, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-
+            self.history_repository.save(self.history)
         except Exception as e:
             print(f"[WARNING] 学习历史保存失败: {e}")
+
+    def _load_latest_history(self) -> Dict[str, Any]:
+        with self._write_lock:
+            self.history = self._load_history()
+            return self.history
+
+    def _update_history(self, mutation) -> Dict[str, Any]:
+        """Merge a change into the latest persisted history under the user lock."""
+        with self._write_lock:
+            if self.coordinator is not None:
+                self.history = self.coordinator.update_history(mutation)
+            else:
+                self.history = self.history_repository.update(mutation)
+            return self.history
+
+    def _execute_memory(self, action: str, **kwargs):
+        with self._write_lock:
+            return self.memory_tool.execute(action, **kwargs)
 
     def get_documents(self):
         """获取历史导入过的文档列表，用于 Gradio 下拉框"""
 
-        documents = self.history.get("documents", [])
+        documents = self._load_latest_history().get("documents", [])
 
         choices = []
 
@@ -541,108 +759,102 @@ class PDFLearningAssistant:
             return "❌ 当前没有选择 PDF，无法删除"
 
         document_id = self.current_document_id
-        current_document = self.current_document
-
-        # 1. 删除 RAG 知识库中的该文档 chunks
-        rag_result = self.rag_tool.execute(
-            "delete_document",
-            document_id=document_id
-        )
-
-        # 2. 从历史 documents 中删除
-        documents = self.history.get("documents", [])
-        new_documents = []
-
-        removed_docs = 0
-
-        for item in documents:
-            item_document_id = item.get("document_id") or Path(item.get("document_path", "")).stem
-
-            if item_document_id == document_id:
-                removed_docs += 1
-                continue
-
-            new_documents.append(item)
-
-        self.history["documents"] = new_documents
-
-        # 3. 可选：删除该 PDF 相关问答记录
-        questions = self.history.get("questions", [])
-        new_questions = []
-
-        removed_questions = 0
-
-        for item in questions:
-            item_doc = str(item.get("document", ""))
-
-            if current_document and item_doc == current_document:
-                removed_questions += 1
-                continue
-
-            if document_id and document_id in item_doc:
-                removed_questions += 1
-                continue
-
-            new_questions.append(item)
-
-        self.history["questions"] = new_questions
-
-        # 4. 保存历史
-        self._save_history()
-
-        # 5. 重置当前文档
+        result = self._delete_document_coordinated(document_id)
         self.current_document_id = None
         self.current_document = None
-
-        return (
-            f"{rag_result}\n\n"
-            f"🧹 学习历史已同步清理\n"
-            f"- 删除历史文档记录: {removed_docs} 条\n"
-            f"- 删除相关问答记录: {removed_questions} 条\n"
-            f"- 当前 PDF 已重置"
-        )
+        return result
 
     def clear_all_documents(self) -> str:
         """清空全部 PDF：清空 RAG 知识库 + 清理学习历史中的文档和问答记录 + 重置当前 PDF"""
 
-        # 1. 清空 RAG 知识库全部 chunks
-        rag_result = self.rag_tool.execute("clear")
+        return self._clear_documents_coordinated()
 
-        # 2. 统计清理前数量
-        old_documents = self.history.get("documents", [])
-        old_questions = self.history.get("questions", [])
+    def _delete_document_coordinated(self, document_id: str) -> str:
+        with self._write_lock:
+            latest = self._load_history()
+            source_paths = [
+                Path(item.get("document_path", ""))
+                for item in latest["documents"]
+                if item.get("document_id") == document_id
+            ]
+            rag_result = self.rag_tool.execute("delete_document", document_id=document_id)
+            if self.coordinator is not None:
+                removed_docs, removed_questions = self.coordinator.delete_document(document_id)
+                self.history = self.coordinator.load_history()
+            else:
+                removed_docs, removed_questions = self.history_repository.delete_document(document_id)
+                self.history = self.history_repository.load()
 
-        removed_documents = len(old_documents)
-        removed_questions = len(old_questions)
+            # Unlink source files.  When a coordinator is present every
+            # path must be inside the user document root — rejections
+            # are collected and reported as partial failure.
+            skipped_paths: list[Path] = []
+            for path in source_paths:
+                if not path.exists():
+                    continue
+                if self.coordinator is not None:
+                    try:
+                        self.coordinator.safe_unlink(path)
+                    except ValueError:
+                        skipped_paths.append(path)
+                else:
+                    path.unlink()
 
-        # 3. 清空 PDF 文档历史和问答历史
-        self.history["documents"] = []
-        self.history["questions"] = []
-
-        # 注意：这里不清空 notes
-        # 因为学习笔记可能是用户主动保存的长期知识
-        # 如果你想连笔记一起清空，可以把下面这一行取消注释
-        # self.history["notes"] = []
-
-        self._save_history()
-
-        # 4. 重置当前 PDF 状态
-        self.current_document = None
-        self.current_document_id = None
-
-        # 5. 重置统计中的文档和问题数量
-        self.stats["documents_loaded"] = 0
-        self.stats["questions_asked"] = 0
-
-        return (
-            f"✅ 已清空全部 PDF\n\n"
-            f"{rag_result}\n\n"
-            f"🧹 学习历史已同步清理\n"
-            f"- 删除历史文档记录: {removed_documents} 条\n"
-            f"- 删除相关问答记录: {removed_questions} 条\n"
-            f"- 当前 PDF 已重置\n"
-            f"- 学习笔记已保留"
+        result = (
+            f"{rag_result}\n\nHistory synchronized\n"
+            f"- documents removed: {removed_docs}\n"
+            f"- questions removed: {removed_questions}"
         )
+        if skipped_paths:
+            result += (
+                "\n- ⚠️ source files outside user root were not deleted: "
+                + ", ".join(str(p) for p in skipped_paths)
+            )
+        return result
+
+    def _clear_documents_coordinated(self) -> str:
+        with self._write_lock:
+            latest = self._load_history()
+            source_paths = [Path(item.get("document_path", "")) for item in latest["documents"]]
+            rag_result = self.rag_tool.execute("clear")
+            if self.coordinator is not None:
+                removed_docs, removed_questions = self.coordinator.clear_documents()
+                self.history = self.coordinator.load_history()
+            else:
+                removed_docs, removed_questions = self.history_repository.clear_documents()
+                self.history = self.history_repository.load()
+
+            # Unlink source files.  When a coordinator is present every
+            # path must be inside the user document root — rejections
+            # are collected and reported as partial failure.
+            skipped_paths: list[Path] = []
+            for path in source_paths:
+                if not path.exists():
+                    continue
+                if self.coordinator is not None:
+                    try:
+                        self.coordinator.safe_unlink(path)
+                    except ValueError:
+                        skipped_paths.append(path)
+                else:
+                    path.unlink()
+
+            self.current_document = None
+            self.current_document_id = None
+            self.stats["documents_loaded"] = 0
+            self.stats["questions_asked"] = 0
+        result = (
+            f"{rag_result}\n\nHistory synchronized\n"
+            f"- documents removed: {removed_docs}\n"
+            f"- questions removed: {removed_questions}\n"
+            "- notes retained"
+        )
+        if skipped_paths:
+            result += (
+                "\n- ⚠️ source files outside user root were not deleted: "
+                + ", ".join(str(p) for p in skipped_paths)
+            )
+        return result
 
     def export_report_markdown(self) -> str:
         """导出学习报告为 Markdown 文件"""
@@ -650,19 +862,23 @@ class PDFLearningAssistant:
         from pathlib import Path
         from datetime import datetime
 
-        report_dir = Path("./reports")
+        report_dir = self.report_dir
         report_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_path = report_dir / f"learning_report_{self.user_id}_{timestamp}.md"
 
         report = self.generate_report()
-
+        if self.report_service is not None:
+            with self._write_lock:
+                record = self.report_service.create_markdown_snapshot(
+                    self.user_id, "Learning report", report
+                )
+            return str(self.report_service.report_file_path(self.user_id, record.id))
         file_path.write_text(report, encoding="utf-8")
-
         return str(file_path)
 
-    def export_report_docx(self) -> str:
+    def export_report_docx(self, report_id: Optional[str] = None) -> str:
         """导出学习报告为格式更美观的 Word 文件"""
 
         from pathlib import Path
@@ -673,13 +889,27 @@ class PDFLearningAssistant:
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.oxml.ns import qn
 
-        report_dir = Path("./reports")
+        report_dir = self.report_dir
         report_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_path = report_dir / f"learning_report_{self.user_id}_{timestamp}.docx"
 
-        report = self.generate_report()
+        if self.report_service is not None:
+            if report_id is None:
+                report = self.generate_report()
+                with self._write_lock:
+                    record = self.report_service.create_markdown_snapshot(
+                        self.user_id, "Learning report", report
+                    )
+                report_id = record.id
+            else:
+                report = self.report_service.read_report(self.user_id, report_id)
+            file_path = self.runtime.paths.reports / f"{report_id}.docx"
+            if file_path.exists():
+                return str(file_path)
+        else:
+            report = self.generate_report()
 
         doc = Document()
 
@@ -802,5 +1032,3 @@ class PDFLearningAssistant:
         doc.save(str(file_path))
 
         return str(file_path)
-
-

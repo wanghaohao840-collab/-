@@ -12,6 +12,13 @@
 - 每次交付时明确说明：改动文件、验证结果、是否已提交、是否已推送；推送失败时保留本地提交并说明原因。
 - 未经用户明确授权，不提交 `.env`、API Key、令牌、个人数据、运行缓存、上传文档或生成报告等敏感/运行时文件。
 
+### 固定运行环境
+
+- 项目实际测试和启动环境是仓库内的 `venv`，不要直接使用系统 Python、Anaconda 或其他解释器。
+- 验证命令：`.\venv\Scripts\python.exe -m pytest -q`
+- 启动命令：`.\venv\Scripts\python.exe .\ui\gradio_app.py`
+- 当前已验证：Gradio 6.19.0、python-docx 1.2.0、pytest 8.4.1，且 `pip check` 无冲突。
+
 ## 1. 项目定位
 
 本项目是一个基于 **Memory + RAG** 的智能文档学习助手，而不只是大模型 API 或 PDF 问答 Demo。目标是围绕用户文档和学习过程形成完整闭环：
@@ -112,6 +119,8 @@
 - 学习报告及 Markdown、Word 导出；
 - 删除当前文档、清空全部文档和清空笔记；
 - Gradio 可视化界面。
+- 多文档问答已支持 1–10 篇范围选择、联合问答、对比分析、联合总结、稳定来源引用、上下文预算和有界并发 map-reduce；验证时必须使用项目 `venv`。
+- 本地多用户注册、登录、会话过期与退出；用户 UUID 目录隔离；同用户多会话共享 Runtime、会话级当前文档独立；报告、迁移和损坏恢复均按用户作用域处理。
 
 不要仅依据历史对话宣称某项已完成。开始相关工作前，应检查对应代码并运行最小验证。
 
@@ -122,7 +131,7 @@
 1. 引入 Qdrant，并保留 JSON/Qdrant 后端切换能力；
 2. 为 Qdrant 实现 payload 过滤、collection 管理及 `document_id` 隔离；
 3. 接入 Neo4j，逐步形成实体、概念关系、章节关系和 GraphRAG；
-4. 支持多用户数据隔离；
+4. 将当前单进程多用户协调升级为可选的多进程/分布式会话与锁；
 5. 支持多文档联合问答、对比和总结；
 6. 增加批量导入、异步任务、进度、失败重试和任务队列。
 
@@ -155,3 +164,18 @@ QDRANT_COLLECTION=doc_learning_vectors
 - 总结问题和局部检索是否都正常；
 - 是否实际加载本地 `hello_agents`；
 - 是否验证了上传、切换、问答、检索、引用、报告和删除的受影响路径。
+## 10. 多文档问答质量增强（2026-07）
+
+当前已按推荐顺序落地：
+
+- `evals/data/multi_document_qa.json` 与 `evals/multi_document_qa.py`：离线 golden cases 覆盖联合问答、对比、联合总结和缺失文档。
+- `SimpleRAGPipeline` 与 `RAGPipeline`：`retrieval_mode="vector|hybrid"`，hybrid 融合词面召回；`use_mmr`、`mmr_lambda` 和 `vector_weight` 控制多样性与权重。默认仍是 vector。
+- `RAGTool`：单篇总结使用进程内有界缓存，键包含命名空间、文档内容/版本、问题、上下文上限和提示词版本；文档替换后自动失效。
+- `PDFLearningAssistant` / `app/summary_tasks.py`：联合总结支持后台任务 ID、queued/running/progress/completed/failed/cancelled 状态、进度回调和协作式取消；Gradio 提供启动、查询、取消按钮。
+- 来源与对比：`RAGTool._last_action_data["sources"]` 提供 citation ID、document ID、页码、原文片段和可复制 reference；`structured_output=True` 时校验对比 JSON，校验失败保留 Markdown。
+
+验证记录：
+
+- `.\venv\Scripts\python.exe -m pytest -q --basetemp=.pytest-tmp-roadmap-full`：493 passed, 4 skipped。
+- 直接执行 `.\venv\Scripts\python.exe -m pytest -q` 时，Windows 系统临时目录无访问权限；使用仓库内 `--basetemp` 后完整套件通过。
+- `.\venv\Scripts\python.exe .\ui\gradio_app.py` 可启动并保持服务运行；验证后已停止本次启动的进程。

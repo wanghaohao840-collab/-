@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 from hello_agents.memory.base import MemoryConfig, MemoryItem, Episode
 from hello_agents.memory.embedding import create_embedding_model_with_fallback
 from hello_agents.memory.storage.document_store import SQLiteDocumentStore
-from hello_agents.memory.storage.qdrant_store import QdrantVectorStore
+from hello_agents.memory.storage.vector_store import InMemoryVectorStore
 
 
 class EpisodicMemory:
@@ -27,16 +27,20 @@ class EpisodicMemory:
 
         self.doc_store = SQLiteDocumentStore(config.database_path)
 
-        self.vector_store = QdrantVectorStore(
-            qdrant_url=getattr(config, "qdrant_url", None),
-            qdrant_api_key=getattr(config, "qdrant_api_key", None),
-            collection_name=getattr(config, "qdrant_collection", "hello_agents_vectors")
+        self.vector_store = storage_backend or InMemoryVectorStore(
+            collection_name=getattr(config, "qdrant_collection", "hello_agents_vectors"),
+            dimension=getattr(config, "qdrant_vector_size", 384),
         )
 
         self.embedder = create_embedding_model_with_fallback()
 
         self.sessions: Dict[str, List[str]] = {}
         self._episodes: Dict[str, Episode] = {}
+
+    def close(self) -> None:
+        if hasattr(self, "doc_store") and self.doc_store is not None:
+            self.doc_store.close()
+            self.doc_store = None
 
     def add(self, memory_item: MemoryItem) -> str:
         """添加情景记忆"""
@@ -97,6 +101,7 @@ class EpisodicMemory:
         """遗忘情景记忆"""
 
         before_count = len(self._episodes)
+        previous_ids = set(self._episodes)
         keep: Dict[str, Episode] = {}
 
         for episode_id, episode in self._episodes.items():
@@ -119,6 +124,7 @@ class EpisodicMemory:
                 keep[episode_id] = episode
 
         self._episodes = keep
+        self.vector_store.delete_vectors(list(previous_ids - set(self._episodes)))
 
         self.sessions = {}
         for episode in self._episodes.values():
@@ -131,6 +137,7 @@ class EpisodicMemory:
 
         self.sessions.clear()
         self._episodes.clear()
+        self.vector_store.clear()
 
     def count(self) -> int:
         """返回情景记忆数量"""

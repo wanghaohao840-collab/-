@@ -1,0 +1,541 @@
+import json
+import tempfile
+import threading
+import time
+import unittest
+from collections import Counter
+from pathlib import Path
+
+from hello_agents.memory.rag.pipeline import SimpleRAGPipeline
+from hello_agents.tools.builtin.rag_tool import RAGTool
+
+
+class FakeLLM:
+    def __init__(self):
+        self.prompts = []
+
+    def generate(self, prompt, **kwargs):
+        self.prompts.append(str(prompt))
+        return f"ANSWER-{len(self.prompts)}"
+
+    def estimate_tokens(self, text):
+        return len(str(text or ""))
+
+
+class RAGToolMultiDocumentTests(unittest.TestCase):
+    def make_tool(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        pipeline = SimpleRAGPipeline(
+            cache_path=str(Path(tmpdir.name) / "rag-cache.json"),
+            rag_namespace="test",
+        )
+        pipeline.dimension = 2
+        pipeline._to_vector = (
+            lambda text: [1.0, 0.0]
+            if "alpha" in text.lower() or "共同" in text
+            else [0.0, 1.0]
+        )
+
+        pipeline.add_text(
+            "alpha selected one",
+            document_id="doc-1",
+            metadata={"file_name": "one.md"},
+        )
+        pipeline.add_text(
+            "alpha selected two",
+            document_id="doc-2",
+            metadata={"file_name": "two.md"},
+        )
+        pipeline.add_text(
+            "alpha unselected three",
+            document_id="doc-3",
+            metadata={"file_name": "three.md"},
+        )
+
+        tool = RAGTool.__new__(RAGTool)
+        tool.rag_namespace = "test"
+        tool.qdrant_url = None
+        tool.qdrant_api_key = None
+        tool.collection_name = "rag_knowledge_base"
+        tool._pipelines = {"test": pipeline}
+        tool.llm = FakeLLM()
+        return tool
+
+    def test_search_limits_results_to_document_ids(self):
+        tool = self.make_tool()
+
+        output = tool.execute(
+            "search",
+            query="alpha",
+            document_ids=["doc-2", "doc-1"],
+            rag_namespace="test",
+            limit=10,
+        )
+
+        self.assertIn("doc-1", output)
+        self.assertIn("doc-2", output)
+        self.assertNotIn("doc-3", output)
+        self.assertNotIn("three.md", output)
+
+    def test_joint_ask_uses_only_selected_documents(self):
+        tool = self.make_tool()
+
+        output = tool.execute(
+            "ask",
+            query="alpha",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            limit=10,
+            mode="joint",
+        )
+
+        prompt = tool.llm.prompts[-1]
+        self.assertIn("alpha selected one", prompt)
+        self.assertIn("alpha selected two", prompt)
+        self.assertNotIn("alpha unselected three", prompt)
+        self.assertIn("ANSWER-1", output)
+
+    def test_joint_ask_exposes_copyable_source_payloads(self):
+        tool = self.make_tool()
+
+        tool.execute(
+            "ask",
+            query="alpha",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="joint",
+        )
+
+        sources = tool._last_action_data["sources"]
+        self.assertEqual(
+            {source["document_id"] for source in sources},
+            {"doc-1", "doc-2"},
+        )
+        self.assertTrue(all(source["citation_id"] for source in sources))
+        self.assertTrue(all(source["reference"].startswith("[S-") for source in sources))
+        self.assertTrue(all(source["excerpt"] for source in sources))
+
+    def test_compare_accepts_valid_structured_output_and_renders_markdown(self):
+        tool = self.make_tool()
+        pipeline = tool._pipelines["test"]
+        first = pipeline.search("alpha", document_id="doc-1", limit=1)[0]
+        second = pipeline.search("alpha", document_id="doc-2", limit=1)[0]
+        first_id = tool._citation_id(first)
+        second_id = tool._citation_id(second)
+        value = {
+            "common_points": [
+                {"text": "shared alpha", "citations": [first_id, second_id]}
+            ],
+            "differences": [],
+            "per_document_evidence": [
+                {
+                    "document_id": "doc-1",
+                    "summary": "first",
+                    "citations": [first_id],
+                },
+                {
+                    "document_id": "doc-2",
+                    "summary": "second",
+                    "citations": [second_id],
+                },
+            ],
+            "missing_information": [],
+        }
+
+        def generate(prompt, **kwargs):
+            tool.llm.prompts.append(str(prompt))
+            return json.dumps(value)
+
+        tool.llm.generate = generate
+        output = tool.execute(
+            "ask",
+            query="compare alpha",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="compare",
+            structured_output=True,
+        )
+
+        self.assertEqual(tool._last_action_data["comparison_format"], "structured")
+        self.assertEqual(tool._last_action_data["comparison"], value)
+        self.assertIn("## 共同点", output)
+        self.assertIn("JSON", tool.llm.prompts[-1])
+
+    def test_compare_requires_at_least_two_documents(self):
+        tool = self.make_tool()
+
+        output = tool.execute(
+            "ask",
+            query="对比共同点",
+            document_ids=["doc-1"],
+            rag_namespace="test",
+            mode="compare",
+        )
+
+        self.assertIn("至少", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_auto_mode_prioritizes_compare_over_summary(self):
+        tool = self.make_tool()
+
+        tool.execute(
+            "ask",
+            query="请对比并总结共同点",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="auto",
+        )
+
+        prompt = tool.llm.prompts[-1]
+        self.assertIn("共同点", prompt)
+        self.assertIn("差异点", prompt)
+
+    def test_summary_mode_includes_each_selected_document(self):
+        tool = self.make_tool()
+
+        output = tool.execute(
+            "ask",
+            query="联合总结",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+
+        self.assertEqual(len(tool.llm.prompts), 3)
+        reduce_prompt = tool.llm.prompts[-1]
+        self.assertIn("doc-1", reduce_prompt)
+        self.assertIn("doc-2", reduce_prompt)
+        self.assertNotIn("alpha selected one", reduce_prompt)
+        self.assertNotIn("alpha selected two", reduce_prompt)
+        self.assertIn("ANSWER-3", output)
+
+    def test_summary_cache_reuses_unchanged_maps_and_invalidates_changed_document(self):
+        tool = self.make_tool()
+
+        tool.execute(
+            "ask",
+            query="summary cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+        self.assertEqual(len(tool.llm.prompts), 3)
+
+        tool.execute(
+            "ask",
+            query="summary cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+        self.assertEqual(len(tool.llm.prompts), 4)
+        self.assertEqual(tool._last_action_data["summary_cache_hits"], 2)
+
+        pipeline = tool._pipelines["test"]
+        pipeline.add_text(
+            "alpha selected one changed",
+            document_id="doc-1",
+            metadata={"file_name": "one.md"},
+        )
+        tool.execute(
+            "ask",
+            query="summary cache",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+        )
+
+        self.assertEqual(len(tool.llm.prompts), 6)
+        self.assertEqual(tool._last_action_data["summary_cache_hits"], 1)
+        self.assertEqual(tool._last_action_data["summary_cache_misses"], 1)
+
+    def test_summary_reports_mapping_and_reduce_progress(self):
+        tool = self.make_tool()
+        progress_events = []
+
+        tool.execute(
+            "ask",
+            query="progress summary",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+            progress_callback=lambda **event: progress_events.append(event),
+        )
+
+        self.assertEqual(progress_events[0]["stage"], "mapping")
+        self.assertEqual(progress_events[0]["completed"], 0)
+        self.assertTrue(
+            any(
+                event["stage"] == "reducing" and event["completed"] == 2
+                for event in progress_events
+            )
+        )
+        self.assertEqual(progress_events[-1]["stage"], "completed")
+
+    def test_summary_honors_pre_cancelled_event(self):
+        tool = self.make_tool()
+        cancel_event = threading.Event()
+        cancel_event.set()
+
+        output = tool.execute(
+            "ask",
+            query="cancelled summary",
+            document_ids=["doc-1", "doc-2"],
+            rag_namespace="test",
+            mode="summary",
+            cancel_event=cancel_event,
+        )
+
+        self.assertIn("已取消", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_rejects_more_than_ten_documents(self):
+        tool = self.make_tool()
+
+        output = tool.execute(
+            "ask",
+            query="alpha",
+            document_ids=[f"doc-{index}" for index in range(11)],
+            mode="joint",
+        )
+
+        self.assertIn("最多选择 10 篇", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_context_budget_truncates_copies_and_marks_sources(self):
+        tool = self.make_tool()
+        original = {
+            "content": "很长的正文" * 200,
+            "score": 1.0,
+            "metadata": {"document_id": "doc-1", "file_name": "one.md"},
+        }
+
+        context, included, truncated = tool._build_context(
+            [original],
+            token_budget=300,
+            return_details=True,
+        )
+
+        self.assertTrue(truncated)
+        self.assertIn("上下文已截断", context)
+        self.assertTrue(included[0]["truncated"])
+        self.assertEqual(original["content"], "很长的正文" * 200)
+        self.assertNotIn("truncated", original)
+
+    def test_answer_dedupes_by_pre_truncation_citation_id(self):
+        tool = self.make_tool()
+        first = {
+            "content": "shared-prefix",
+            "metadata": {"document_id": "doc-1"},
+            "citation_id": "S-original-a",
+            "truncated": True,
+        }
+        second = {
+            "content": "shared-prefix",
+            "metadata": {"document_id": "doc-1"},
+            "citation_id": "S-original-b",
+            "truncated": True,
+        }
+
+        output = tool._format_answer("answer", [first, second], truncated=True)
+
+        self.assertIn("S-original-a", output)
+        self.assertIn("S-original-b", output)
+        self.assertIn("参考知识条数: 2", output)
+
+    def test_compare_keeps_two_base_results_per_document(self):
+        tool = self.make_tool()
+        pipeline = tool._pipelines["test"]
+        calls = Counter()
+
+        def search(query, limit, min_score=0.0, document_id=None, **kwargs):
+            calls[document_id] += 1
+            return [
+                {
+                    "content": f"{document_id}-{index}",
+                    "score": 1.0 - index / 10,
+                    "metadata": {"document_id": document_id},
+                }
+                for index in range(5)
+            ]
+
+        pipeline.search = search
+        tool.execute(
+            "ask",
+            query="比较",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            limit=2,
+        )
+
+        prompt = tool.llm.prompts[-1]
+        for doc_id in ("doc-1", "doc-2"):
+            self.assertIn(f"{doc_id}-0", prompt)
+            self.assertIn(f"{doc_id}-1", prompt)
+        self.assertEqual(calls, Counter({"doc-1": 1, "doc-2": 1}))
+
+    def test_compare_returns_capacity_error_without_dropping_base_document(self):
+        tool = self.make_tool()
+        tool.llm.context_window_tokens = 1900
+        pipeline = tool._pipelines["test"]
+
+        pipeline.search = lambda query, limit, min_score=0.0, document_id=None, **kwargs: [
+            {
+                "content": f"{document_id}-" + "证据" * 300,
+                "score": 1.0 - index / 10,
+                "metadata": {"document_id": document_id},
+            }
+            for index in range(2)
+        ]
+
+        output = tool.execute(
+            "ask",
+            query="比较",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+        )
+
+        self.assertIn("上下文容量不足", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_summary_maps_concurrently_with_at_most_three_workers(self):
+        tool = self.make_tool()
+        pipeline = tool._pipelines["test"]
+        state = {"active": 0, "maximum": 0}
+        lock = threading.Lock()
+
+        pipeline.get_document_summary_context = lambda document_id, limit: [
+            {
+                "content": f"content-{document_id}",
+                "score": 1.0,
+                "metadata": {"document_id": document_id},
+            }
+        ]
+
+        class ConcurrentLLM(FakeLLM):
+            context_window_tokens = 8192
+
+            def generate(self, prompt, **kwargs):
+                with lock:
+                    self.prompts.append(str(prompt))
+                    if "请仅根据以下资料总结文档" in prompt:
+                        state["active"] += 1
+                        state["maximum"] = max(state["maximum"], state["active"])
+                if "请仅根据以下资料总结文档" in prompt:
+                    time.sleep(0.04)
+                    with lock:
+                        state["active"] -= 1
+                return "summary"
+
+        tool.llm = ConcurrentLLM()
+        output = tool.execute(
+            "ask",
+            query="联合总结",
+            document_ids=[f"doc-{index}" for index in range(6)],
+            mode="summary",
+        )
+
+        self.assertGreater(state["maximum"], 1)
+        self.assertLessEqual(state["maximum"], 3)
+        reduce_prompt = tool.llm.prompts[-1]
+        for index in range(6):
+            self.assertIn(f"doc-{index}", reduce_prompt)
+        self.assertIn("summary", output)
+
+    def test_summary_partial_failure_keeps_successful_documents(self):
+        tool = self.make_tool()
+        pipeline = tool._pipelines["test"]
+
+        def summary_context(document_id, limit):
+            if document_id == "doc-2":
+                raise RuntimeError("map boom")
+            return [
+                {
+                    "content": f"content-{document_id}",
+                    "score": 1.0,
+                    "metadata": {"document_id": document_id},
+                }
+            ]
+
+        pipeline.get_document_summary_context = summary_context
+        output = tool.execute(
+            "ask",
+            query="联合总结",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+        )
+
+        self.assertEqual(len(tool.llm.prompts), 2)
+        self.assertIn("doc-2", tool.llm.prompts[-1])
+        self.assertIn("map boom", tool.llm.prompts[-1])
+        self.assertIn("ANSWER-2", output)
+
+    def test_summary_all_failures_skip_reduce(self):
+        tool = self.make_tool()
+        pipeline = tool._pipelines["test"]
+
+        def fail(document_id, limit):
+            raise RuntimeError(f"failed-{document_id}")
+
+        pipeline.get_document_summary_context = fail
+        output = tool.execute(
+            "ask",
+            query="联合总结",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+        )
+
+        self.assertEqual(tool.llm.prompts, [])
+        self.assertIn("doc-1", output)
+        self.assertIn("doc-2", output)
+
+    def test_joint_graph_context_is_limited_to_selected_documents(self):
+        tool = self.make_tool()
+
+        class Graph:
+            def __init__(self):
+                self.calls = []
+
+            def get_graph_context(self, document_id, query, **kwargs):
+                self.calls.append(document_id)
+                return {
+                    "success": True,
+                    "document_id": document_id,
+                    "status": "ready",
+                    "data": {
+                        "entities": [{
+                            "id": f"{document_id}:concept",
+                            "type": "Concept",
+                            "name": "alpha",
+                        }],
+                        "relations": [],
+                    },
+                }
+
+        graph = Graph()
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="alpha",
+            document_ids=["doc-1", "doc-2"],
+            mode="joint",
+            graph_mode="auto",
+        )
+
+        self.assertIn("G-", output)
+        self.assertEqual(graph.calls, ["doc-1", "doc-2"])
+
+    def test_constructor_passes_explicit_cache_path_to_default_pipeline(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        cache_path = Path(tmpdir.name) / "rag-cache.json"
+
+        tool = RAGTool(rag_namespace="scoped", cache_path=str(cache_path))
+
+        self.assertEqual(tool._pipelines["scoped"].cache_path, cache_path)
+
+
+if __name__ == "__main__":
+    unittest.main()

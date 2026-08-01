@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+import pytest
+
+from hello_agents.memory.storage.neo4j_store import (
+    Neo4jConfigError,
+    Neo4jGraphStore,
+)
+
+
+class FakeResult:
+    def __init__(self, records=None):
+        self._records = list(records or [])
+
+    def data(self):
+        return list(self._records)
+
+    def single(self):
+        return self._records[0] if self._records else None
+
+
+class RecordingTransaction:
+    def __init__(self, responses=None, fail_on=None):
+        self.calls = []
+        self.responses = responses or {}
+        self.fail_on = fail_on
+
+    def run(self, query, **parameters):
+        self.calls.append((query, parameters))
+        if self.fail_on and self.fail_on in query:
+            raise RuntimeError("transaction failed")
+        for marker, records in self.responses.items():
+            if marker in query:
+                return FakeResult(records)
+        return FakeResult()
+
+
+class RecordingSession:
+    def __init__(self, driver):
+        self.driver = driver
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute_write(self, callback):
+        tx = RecordingTransaction(self.driver.responses, self.driver.fail_on)
+        self.driver.transactions.append(tx)
+        return callback(tx)
+
+    def execute_read(self, callback):
+        tx = RecordingTransaction(self.driver.responses)
+        self.driver.transactions.append(tx)
+        return callback(tx)
+
+    def run(self, query, **parameters):
+        tx = RecordingTransaction(self.driver.responses)
+        self.driver.transactions.append(tx)
+        return tx.run(query, **parameters)
+
+
+class RecordingDriver:
+    def __init__(self, responses=None, fail_on=None):
+        self.responses = responses or {}
+        self.fail_on = fail_on
+        self.transactions = []
+        self.session_databases = []
+        self.closed = False
+
+    def session(self, database=None):
+        self.session_databases.append(database)
+        return RecordingSession(self)
+
+    def close(self):
+        self.closed = True
+
+
+def sample_graph():
+    return {
+        "document": {"name": "安全文档", "source": "fixture"},
+        "chapters": [
+            {
+                "chapter_id": "doc-1:chapter:0",
+                "title": "第一章",
+                "level": 1,
+                "order": 0,
+                "heading_path": ["第一章"],
+                "parent_id": None,
+            }
+        ],
+        "chunks": [
+            {
+                "chunk_id": "chunk-1",
+                "content": "Alice 解释图数据库",
+                "page_number": 1,
+                "chunk_index": 0,
+                "chapter_id": "doc-1:chapter:0",
+            }
+        ],
+        "concepts": [
+            {
+                "concept_id": "concept-1",
+                "name": "图数据库",
+                "normalized_name": "图数据库",
+                "description": "图结构存储",
+            }
+        ],
+        "knowledge_points": [],
+        "persons": [],
+        "relations": [
+            {
+                "source_id": "chunk-1",
+                "target_id": "concept-1",
+                "type": "MENTIONS",
+                "properties": {
+                    "chunk_id": "chunk-1",
+                    "evidence": "解释图数据库",
+                    "confidence": 0.9,
+                },
+            }
+        ],
+    }
+
+
+def test_requires_complete_configuration_without_injected_driver():
+    with pytest.raises(Neo4jConfigError):
+        Neo4jGraphStore(uri=None, username="neo4j", password=None)
+
+
+def test_rejects_empty_namespace_before_a_graph_operation():
+    store = Neo4jGraphStore(driver=RecordingDriver())
+
+    with pytest.raises(ValueError, match="rag_namespace"):
+        store.delete_document("doc-1", rag_namespace="")
+
+
+def test_representation_and_public_state_do_not_expose_credentials():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(
+        driver=driver,
+        database="neo4j",
+        uri="neo4j://secret-host",
+        username="secret-user",
+        password="secret-password",
+    )
+
+    rendered = f"{store!r} {store!s} {store.__dict__}"
+    assert "secret-password" not in rendered
+    assert "secret-user" not in rendered
+    assert "secret-host" not in rendered
+    assert "config" not in store.__dict__
+
+
+def test_schema_initialization_is_idempotent_per_instance():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(driver=driver)
+
+    store.initialize_schema()
+    first_count = sum(len(tx.calls) for tx in driver.transactions)
+    store.initialize_schema()
+
+    assert first_count >= 6
+    assert sum(len(tx.calls) for tx in driver.transactions) == first_count
+
+
+def test_replace_document_graph_uses_one_transaction_and_scoped_parameters():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(driver=driver)
+
+    result = store.replace_document_graph(
+        document_id="doc-1",
+        build_id="build-1",
+        graph=sample_graph(),
+    )
+
+    write_tx = driver.transactions[-1]
+    assert result["node_count"] == 4
+    assert result["relation_count"] >= 3
+    assert len(driver.transactions) >= 2  # schema plus one write transaction
+    assert any("DETACH DELETE" in query for query, _ in write_tx.calls)
+    assert all(
+        params.get("document_id") == "doc-1"
+        for query, params in write_tx.calls
+        if "document_id" in query
+    )
+    assert all("安全文档" not in query for query, _ in write_tx.calls)
+
+
+def test_replace_failure_propagates_without_a_second_write_transaction():
+    driver = RecordingDriver(fail_on="GRAPH_WRITE_DOCUMENT")
+    store = Neo4jGraphStore(driver=driver)
+
+    with pytest.raises(RuntimeError, match="transaction failed"):
+        store.replace_document_graph("doc-1", "build-1", sample_graph())
+
+    write_transactions = [
+        tx for tx in driver.transactions
+        if any("GRAPH_REPLACE_DELETE" in query for query, _ in tx.calls)
+    ]
+    assert len(write_transactions) == 1
+
+
+def test_build_lookup_and_delete_are_document_scoped():
+    driver = RecordingDriver(
+        responses={
+            "GRAPH_GET_BUILD": [
+                {"build_id": "build-1", "graph_status": "ready"}
+            ],
+            "GRAPH_DELETE_COUNT": [
+                {"nodes_removed": 4, "relations_removed": 3}
+            ],
+        }
+    )
+    store = Neo4jGraphStore(driver=driver)
+
+    assert store.get_document_build("doc-1") == {
+        "build_id": "build-1",
+        "graph_status": "ready",
+    }
+    assert store.delete_document("doc-1") == {
+        "nodes_removed": 4,
+        "relations_removed": 3,
+    }
+
+    calls = [call for tx in driver.transactions for call in tx.calls]
+    scoped = [
+        params for query, params in calls
+        if "GRAPH_GET_BUILD" in query or "GRAPH_DELETE" in query
+    ]
+    assert scoped
+    assert all(params["document_id"] == "doc-1" for params in scoped)
+
+
+def test_graph_query_uses_independent_cursors_and_excludes_chunk_content():
+    driver = RecordingDriver(
+        responses={
+            "GRAPH_QUERY_NODES": [
+                {
+                    "id": "chunk-1",
+                    "type": "Chunk",
+                    "properties": {
+                        "chunk_id": "chunk-1",
+                        "content": "hidden",
+                        "document_id": "doc-1",
+                    },
+                },
+                {"id": "concept-1", "type": "Concept", "properties": {}},
+            ],
+            "GRAPH_QUERY_RELATIONS": [
+                {
+                    "source_id": "chunk-1",
+                    "target_id": "concept-1",
+                    "type": "MENTIONS",
+                    "properties": {"confidence": 0.9},
+                    "source": {"id": "chunk-1", "type": "Chunk", "name": None},
+                    "target": {
+                        "id": "concept-1",
+                        "type": "Concept",
+                        "name": "图数据库",
+                    },
+                },
+                {
+                    "source_id": "concept-1",
+                    "target_id": "concept-2",
+                    "type": "RELATED_TO",
+                    "properties": {},
+                    "source": {"id": "concept-1", "type": "Concept", "name": "A"},
+                    "target": {"id": "concept-2", "type": "Concept", "name": "B"},
+                },
+            ],
+        }
+    )
+    store = Neo4jGraphStore(driver=driver)
+
+    result = store.get_document_graph(
+        "doc-1",
+        node_cursor="5",
+        relation_cursor="9",
+        node_limit=1,
+        relation_limit=1,
+    )
+
+    assert "content" not in result["nodes"][0]["properties"]
+    assert result["relations"][0]["target"]["name"] == "图数据库"
+    assert result["page"]["next_node_cursor"] == "6"
+    assert result["page"]["next_relation_cursor"] == "10"
+    calls = [call for tx in driver.transactions for call in tx.calls]
+    node_params = next(params for query, params in calls if "GRAPH_QUERY_NODES" in query)
+    rel_params = next(params for query, params in calls if "GRAPH_QUERY_RELATIONS" in query)
+    assert node_params["skip"] == 5
+    assert rel_params["skip"] == 9
+
+
+def test_graph_context_is_scoped_parameterized_and_bounded():
+    driver = RecordingDriver(
+        responses={
+            "GRAPH_QUERY_CONTEXT": [
+                {
+                    "entity": {
+                        "id": "concept-1",
+                        "type": "Concept",
+                        "name": "Neo4j",
+                        "properties": {"normalized_name": "neo4j"},
+                    },
+                    "neighbor": {
+                        "id": "person-1",
+                        "type": "Person",
+                        "name": "Alice",
+                        "properties": {"content": "must-not-leak"},
+                    },
+                    "relation": {
+                        "source_id": "concept-1",
+                        "target_id": "person-1",
+                        "type": "RELATED_TO",
+                        "properties": {"evidence": "Neo4j by Alice"},
+                    },
+                }
+            ]
+        }
+    )
+    store = Neo4jGraphStore(driver=driver)
+
+    result = store.get_graph_context(
+        "doc-1",
+        query_terms=["neo4j", "alice"],
+        rag_namespace="tenant-a",
+        node_limit=2,
+        relation_limit=3,
+    )
+
+    assert result["entities"][0]["id"] == "concept-1"
+    assert result["entities"][0]["type"] == "Concept"
+    assert result["entities"][1]["id"] == "person-1"
+    assert "content" not in result["entities"][1]["properties"]
+    assert result["relations"][0]["type"] == "RELATED_TO"
+    calls = [
+        call
+        for tx in driver.transactions
+        for call in tx.calls
+        if "GRAPH_QUERY_CONTEXT" in call[0]
+    ]
+    assert len(calls) == 1
+    query, parameters = calls[0]
+    assert "neo4j" not in query
+    assert parameters["document_id"] == "doc-1"
+    assert parameters["rag_namespace"] == "tenant-a"
+    assert parameters["query_terms"] == ["neo4j", "alice"]
+    assert parameters["node_limit"] == 2
+    assert parameters["relation_limit"] == 3
+
+
+def test_namespace_is_part_of_every_document_scope():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(driver=driver)
+
+    store.replace_document_graph(
+        "shared-doc",
+        "build-a",
+        sample_graph(),
+        rag_namespace="tenant-a",
+    )
+    store.delete_document("shared-doc", rag_namespace="tenant-b")
+
+    scoped_calls = [
+        parameters
+        for tx in driver.transactions
+        for query, parameters in tx.calls
+        if "$document_id" in query
+    ]
+    assert any(params.get("rag_namespace") == "tenant-a" for params in scoped_calls)
+    assert any(params.get("rag_namespace") == "tenant-b" for params in scoped_calls)

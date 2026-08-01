@@ -3,9 +3,11 @@ import uuid
 
 import pytest
 
+from hello_agents.memory.base import MemoryConfig
 from hello_agents.memory.rag.contracts import DocumentSegment
 from hello_agents.memory.rag.qdrant_pipeline import QdrantRAGPipeline
 from hello_agents.memory.storage.vector_store import QdrantVectorStore, VectorPoint
+from hello_agents.memory.types.semantic import SemanticMemory
 
 
 QDRANT_TEST_URL = os.getenv("QDRANT_TEST_URL")
@@ -100,6 +102,57 @@ def test_real_qdrant_vector_store_contract():
         assert store.count(collection) == 1
     finally:
         store.client.delete_collection(collection_name=collection)
+
+
+@pytest.mark.skipif(
+    not QDRANT_TEST_URL,
+    reason="Set QDRANT_TEST_URL to run against an explicitly authorized Qdrant service",
+)
+def test_real_qdrant_semantic_memory_creates_filter_indexes(monkeypatch, tmp_path):
+    from qdrant_client import QdrantClient
+    import hello_agents.memory.types.semantic as semantic_module
+
+    monkeypatch.setattr(
+        semantic_module,
+        "get_text_embedder",
+        lambda: LiveTestEmbedder(),
+    )
+
+    client = QdrantClient(
+        url=QDRANT_TEST_URL,
+        api_key=os.getenv("QDRANT_TEST_API_KEY") or None,
+    )
+    collection = f"semantic_index_test_{uuid.uuid4().hex}"
+    store = QdrantVectorStore(
+        url=QDRANT_TEST_URL,
+        api_key=os.getenv("QDRANT_TEST_API_KEY") or None,
+        client=client,
+        retry_delays=(),
+    )
+    config = MemoryConfig(
+        database_path=str(tmp_path / "memory.db"),
+        qdrant_collection=collection,
+        qdrant_vector_size=2,
+    )
+    try:
+        SemanticMemory(config, storage_backend=store)
+        payload_schema = client.get_collection(
+            collection_name=collection
+        ).payload_schema
+
+        def schema_name(field_name):
+            data_type = getattr(
+                payload_schema[field_name],
+                "data_type",
+                payload_schema[field_name],
+            )
+            return str(getattr(data_type, "value", data_type)).lower()
+
+        assert schema_name("memory_type") == "keyword"
+        assert schema_name("user_id") == "keyword"
+    finally:
+        if client.collection_exists(collection_name=collection):
+            client.delete_collection(collection_name=collection)
 
 
 @pytest.mark.skipif(

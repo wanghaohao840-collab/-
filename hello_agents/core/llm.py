@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, Iterable, List, Optional
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
@@ -18,13 +20,7 @@ except Exception:
 
 
 class HelloAgentsLLM:
-    """HelloAgents 的 LLM 统一封装
-
-    这个版本的目标：
-    1. 先保证 RAGTool 可以正常初始化
-    2. 支持 DeepSeek / OpenAI-compatible API
-    3. 如果没有配置 API，也不会让程序直接崩溃
-    """
+    """Unified LLM wrapper for OpenAI-compatible chat APIs."""
 
     def __init__(
         self,
@@ -33,7 +29,11 @@ class HelloAgentsLLM:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: int = 60,
-        **kwargs
+        max_retries: Optional[int] = None,
+        retry_backoff: Optional[float] = None,
+        context_window_tokens: Optional[int] = None,
+        tokenizer: Any = None,
+        **kwargs,
     ):
         self.model = (
             model
@@ -58,6 +58,22 @@ class HelloAgentsLLM:
         )
 
         self.timeout = timeout
+        self.max_retries = (
+            max_retries
+            if max_retries is not None
+            else int(os.getenv("LLM_MAX_RETRIES", "2"))
+        )
+        self.retry_backoff = (
+            retry_backoff
+            if retry_backoff is not None
+            else float(os.getenv("LLM_RETRY_BACKOFF", "0.5"))
+        )
+        self.context_window_tokens = (
+            context_window_tokens
+            if context_window_tokens is not None
+            else int(os.getenv("LLM_CONTEXT_WINDOW_TOKENS", "8192"))
+        )
+        self.tokenizer = tokenizer
         self.client = None
 
         if OpenAI is not None and self.api_key:
@@ -65,54 +81,210 @@ class HelloAgentsLLM:
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=self.timeout,
+                max_retries=0,
             )
+
+    def estimate_tokens(self, text: str) -> int:
+        """Estimate tokens with an injected matching tokenizer when available."""
+
+        value = str(text or "")
+        encode = getattr(self.tokenizer, "encode", None)
+        if callable(encode):
+            return len(encode(value))
+        return len(value)
+
+    def _normalize_messages(
+        self,
+        prompt: Any,
+        system_prompt: Optional[str],
+    ) -> List[Dict[str, str]]:
+        if isinstance(prompt, list):
+            messages = []
+            for message in prompt:
+                if hasattr(message, "to_dict"):
+                    message = message.to_dict()
+                messages.append(
+                    {
+                        "role": str(message["role"]),
+                        "content": str(message["content"]),
+                    }
+                )
+            return messages
+
+        messages: List[Dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": str(prompt)})
+        return messages
+
+    def _is_retriable_error(self, error: Exception) -> bool:
+        error_text = f"{error.__class__.__name__}: {error}".lower()
+        retriable_markers = (
+            "stream disconnected before completion",
+            "transport error",
+            "network error",
+            "error decoding response body",
+            "connection",
+            "connecterror",
+            "readerror",
+            "remoteprotocolerror",
+            "timeout",
+            "timed out",
+            "api connection",
+            "api timeout",
+            "temporarily unavailable",
+            "rate limit",
+            "server error",
+            "500",
+            "502",
+            "503",
+            "504",
+        )
+        non_retriable_markers = (
+            "authentication",
+            "permission",
+            "invalid_request",
+            "badrequest",
+            "401",
+            "403",
+            "404",
+        )
+        return (
+            any(marker in error_text for marker in retriable_markers)
+            and not any(marker in error_text for marker in non_retriable_markers)
+        )
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        delay = self.retry_backoff * (2 ** max(attempt - 1, 0))
+        if delay > 0:
+            time.sleep(delay)
+
+    def _completion_text(self, response: Any) -> str:
+        return response.choices[0].message.content or ""
+
+    def _stream_chunk_text(self, chunk: Any) -> str:
+        if not getattr(chunk, "choices", None):
+            return ""
+        delta = getattr(chunk.choices[0], "delta", None)
+        return getattr(delta, "content", None) or ""
+
+    def _create_completion(self, messages: List[Dict[str, str]], **kwargs) -> Any:
+        return self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            **kwargs,
+        )
 
     def chat(
         self,
-        prompt: str,
+        prompt: Any,
         system_prompt: str = "你是一个有帮助的AI助手。",
         temperature: float = 0.2,
         max_tokens: int = 1024,
-        **kwargs
+        **kwargs,
     ) -> str:
-        """普通文本对话"""
+        """Run a non-streaming chat completion."""
 
         if self.client is None:
             return (
-                "【LLM未配置】当前没有可用的大模型客户端。"
+                "[LLM未配置] 当前没有可用的大模型客户端。"
                 "请检查 .env 中的 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL_ID。"
             )
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt},
-        ]
+        messages = self._normalize_messages(prompt, system_prompt)
+        request_kwargs = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        request_kwargs.update(kwargs)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = self._create_completion(messages, **request_kwargs)
+                return self._completion_text(response)
+            except Exception as error:
+                if attempt >= self.max_retries or not self._is_retriable_error(error):
+                    return f"[LLM调用失败] {error}"
+                self._sleep_before_retry(attempt + 1)
 
-        return response.choices[0].message.content
+        return "[LLM调用失败] 未知错误"
 
-    def generate(self, prompt: str, **kwargs) -> str:
-        """兼容 generate 调用"""
+    def stream_invoke(
+        self,
+        prompt: Any,
+        system_prompt: str = "你是一个有帮助的AI助手。",
+        temperature: float = 0.2,
+        max_tokens: int = 1024,
+        **kwargs,
+    ) -> Iterable[str]:
+        """Stream completion chunks; recover from transient transport errors."""
+
+        if self.client is None:
+            yield self.chat(prompt, system_prompt=system_prompt, **kwargs)
+            return
+
+        messages = self._normalize_messages(prompt, system_prompt)
+        request_kwargs = {
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        request_kwargs.update(kwargs)
+
+        for attempt in range(self.max_retries + 1):
+            emitted_any = False
+            try:
+                stream = self._create_completion(messages, **request_kwargs)
+                for chunk in stream:
+                    text = self._stream_chunk_text(chunk)
+                    if text:
+                        emitted_any = True
+                        yield text
+                return
+            except Exception as error:
+                if not self._is_retriable_error(error):
+                    yield f"[LLM流式调用失败] {error}"
+                    return
+                if emitted_any:
+                    fallback_kwargs = dict(kwargs)
+                    fallback_kwargs.pop("stream", None)
+                    yield self.chat(
+                        messages,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **fallback_kwargs,
+                    )
+                    return
+                if attempt >= self.max_retries:
+                    fallback_kwargs = dict(kwargs)
+                    fallback_kwargs.pop("stream", None)
+                    yield self.chat(
+                        messages,
+                        system_prompt=system_prompt,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        **fallback_kwargs,
+                    )
+                    return
+                self._sleep_before_retry(attempt + 1)
+
+    def generate(self, prompt: Any, **kwargs) -> str:
+        """Compatibility wrapper for generate calls."""
 
         return self.chat(prompt, **kwargs)
 
-    def think(self, prompt: str, **kwargs) -> str:
-        """兼容 think 调用"""
+    def think(self, prompt: Any, **kwargs) -> str:
+        """Compatibility wrapper for think calls."""
 
         return self.chat(prompt, **kwargs)
 
-    def invoke(self, prompt: str, **kwargs) -> str:
-        """兼容 invoke 调用"""
+    def invoke(self, prompt: Any, **kwargs) -> str:
+        """Compatibility wrapper for invoke calls."""
 
         return self.chat(prompt, **kwargs)
 
-    def __call__(self, prompt: str, **kwargs) -> str:
-        """兼容 llm(prompt) 调用"""
+    def __call__(self, prompt: Any, **kwargs) -> str:
+        """Compatibility wrapper for llm(prompt) calls."""
 
         return self.chat(prompt, **kwargs)
