@@ -6,7 +6,7 @@ from threading import RLock
 
 from hello_agents.memory.base import MemoryConfig
 from app.history import HistoryRepository
-from assistants.pdf_learning_assistant import PDFLearningAssistant
+from assistants.pdf_learning_assistant import ImportRAGError, PDFLearningAssistant
 
 
 class FakeMemoryTool:
@@ -28,10 +28,21 @@ class FakeRAGTool:
 
 
 class FakeActionResult:
-    def __init__(self, success, message="rag-ok", data=None):
+    def __init__(
+        self,
+        success,
+        message="rag-ok",
+        data=None,
+        error="",
+        error_code="",
+        retryable=False,
+    ):
         self.success = success
         self.message = message
         self.data = data or {}
+        self.error = error
+        self.error_code = error_code
+        self.retryable = retryable
 
 
 class FakeStructuredRAGTool(FakeRAGTool):
@@ -308,9 +319,11 @@ class PDFLearningAssistantMultiDocumentTests(unittest.TestCase):
         self.addCleanup(lambda: path.unlink(missing_ok=True))
         path.write_text("body", encoding="utf-8")
 
-        result = assistant.load_document(str(path))
+        with self.assertRaises(ImportRAGError) as captured:
+            assistant.load_document(str(path))
 
-        self.assertEqual(result, "import failed")
+        self.assertEqual(captured.exception.error_code, "rag_operation")
+        self.assertFalse(captured.exception.retryable)
         self.assertEqual(assistant.current_document_id, "current-doc")
         self.assertEqual(assistant.current_document, "/docs/current.md")
         self.assertEqual(assistant.stats["documents_loaded"], 2)

@@ -1,9 +1,11 @@
 from datetime import datetime
+import uuid
 from typing import List, Optional, Dict, Any
 
 from hello_agents.tools.base import Tool
 from hello_agents.memory.base import MemoryConfig
 from hello_agents.memory.manager import MemoryManager
+from hello_agents.memory.rag.prepare import PROJECT_POINT_NAMESPACE_UUID
 
 
 class MemoryTool(Tool):
@@ -159,6 +161,62 @@ class MemoryTool(Tool):
             return self._execute_unlocked(action, **kwargs)
         with lock:
             return self._execute_unlocked(action, **kwargs)
+
+    def ensure_import_event(
+        self,
+        import_task_id: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
+        lock = getattr(self, "coordination_lock", None)
+        if lock is None:
+            return self._ensure_import_event_unlocked(
+                import_task_id, content, metadata, session_id
+            )
+        with lock:
+            return self._ensure_import_event_unlocked(
+                import_task_id, content, metadata, session_id
+            )
+
+    def _ensure_import_event_unlocked(
+        self,
+        import_task_id: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]],
+        session_id: Optional[str],
+    ) -> str:
+        if not import_task_id:
+            raise ValueError("import_task_id is required")
+        episodic = self.memory_manager.memory_types.get("episodic")
+        if episodic is None:
+            raise ValueError("episodic memory is not enabled")
+
+        for episode in episodic._episodes.values():
+            if str(episode.context.get("import_task_id", "")) == import_task_id:
+                return episode.episode_id
+
+        memory_id = "import-" + str(
+            uuid.uuid5(
+                PROJECT_POINT_NAMESPACE_UUID,
+                f"{self.user_id}:{import_task_id}",
+            )
+        )
+        event_metadata = dict(metadata or {})
+        event_metadata.update(
+            {
+                "user_id": self.user_id,
+                "import_task_id": import_task_id,
+                "session_id": session_id or self.current_session_id or "import",
+            }
+        )
+        return self.memory_manager.add_memory(
+            content=content,
+            memory_type="episodic",
+            importance=0.8,
+            metadata=event_metadata,
+            memory_id=memory_id,
+        )
 
     def _execute_unlocked(self, action: str, **kwargs) -> str:
         """执行记忆操作

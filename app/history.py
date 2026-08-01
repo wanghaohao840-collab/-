@@ -104,6 +104,18 @@ class HistoryRepository:
     def add_document(self, item: dict[str, Any]) -> None:
         self.update(lambda data: data["documents"].append(item))
 
+    def upsert_document(self, item: dict[str, Any]) -> dict[str, Any]:
+        document_id = str(item["document_id"])
+
+        def mutate(data: dict[str, Any]) -> None:
+            for index, current in enumerate(data["documents"]):
+                if str(current.get("document_id", "")) == document_id:
+                    data["documents"][index] = dict(item)
+                    return
+            data["documents"].append(dict(item))
+
+        return self.update(mutate)
+
     def add_question(self, item: dict[str, Any]) -> None:
         self.update(lambda data: data["questions"].append(item))
 

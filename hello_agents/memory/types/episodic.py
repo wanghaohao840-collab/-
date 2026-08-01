@@ -58,10 +58,20 @@ class EpisodicMemory:
             }
         )
 
+        previous = self._episodes.get(episode.episode_id)
+        if previous is not None:
+            previous_ids = self.sessions.get(previous.session_id, [])
+            self.sessions[previous.session_id] = [
+                episode_id
+                for episode_id in previous_ids
+                if episode_id != episode.episode_id
+            ]
+
         if episode.session_id not in self.sessions:
             self.sessions[episode.session_id] = []
 
-        self.sessions[episode.session_id].append(episode.episode_id)
+        if episode.episode_id not in self.sessions[episode.session_id]:
+            self.sessions[episode.session_id].append(episode.episode_id)
         self._episodes[episode.episode_id] = episode
 
         self._persist_episode(episode)

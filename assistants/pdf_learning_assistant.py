@@ -20,6 +20,33 @@ from hello_agents.tools.builtin.rag_tool import RAGTool
 from assistants.document_selection import build_document_scope
 
 
+class ImportRAGError(RuntimeError):
+    """Structured RAG import failure consumed by the background runner."""
+
+    def __init__(self, action_result: Any):
+        message = str(
+            getattr(action_result, "error", "")
+            or getattr(action_result, "message", "")
+            or "RAG document import failed"
+        )
+        super().__init__(message)
+        self.error_code = str(
+            getattr(action_result, "error_code", "") or "rag_operation"
+        )
+        self.retryable = bool(getattr(action_result, "retryable", False))
+        self.action_result = action_result
+
+
+class ImportMemoryEventError(RuntimeError):
+    """Import completed durably but its idempotent memory event failed."""
+
+    error_code = "memory_import_event"
+    retryable = True
+
+    def __init__(self):
+        super().__init__("Failed to record the import memory event")
+
+
 class PDFLearningAssistant:
     """PDF 学习助手
 
@@ -136,6 +163,8 @@ class PDFLearningAssistant:
         pdf_path: str,
         document_id: Optional[str] = None,
         original_name: Optional[str] = None,
+        import_task_id: Optional[str] = None,
+        progress_callback: Any = None,
     ) -> str:
         """导入文档，支持 PDF / TXT / Markdown"""
 
@@ -165,8 +194,11 @@ class PDFLearningAssistant:
                 "document_path": str(path),
                 "file_suffix": suffix,
                 "source_type": "document",
+                "import_task_id": import_task_id,
             },
         }
+        if progress_callback is not None:
+            add_kwargs["progress_callback"] = progress_callback
 
         history_item = {
             "document_id": document_id,
@@ -175,63 +207,127 @@ class PDFLearningAssistant:
             "file_suffix": suffix,
             "session_id": self.session_id,
             "loaded_at": datetime.now().isoformat(),
+            "import_task_id": import_task_id,
         }
 
-        # ── critical section: RAG mutation + History commit ─────────
+        # ── critical section: RAG + History + import memory event ───
         with self._write_lock:
-            if hasattr(self.rag_tool, "execute_result"):
-                action_result = self.rag_tool.execute_result("add_document", **add_kwargs)
-                result = action_result.message
-                if not action_result.success:
-                    return result  # History untouched; no compensation needed
+            latest_history = self.history_repository.load()
+            existing = None
+            if import_task_id:
+                existing = next(
+                    (
+                        item
+                        for item in latest_history["documents"]
+                        if str(item.get("document_id", "")) == document_id
+                    ),
+                    None,
+                )
+            rag_has_document = False
+            if import_task_id:
+                try:
+                    pipeline = self.rag_tool._get_pipeline()
+                    list_document_ids = getattr(pipeline, "list_document_ids", None)
+                    if callable(list_document_ids):
+                        rag_has_document = document_id in list_document_ids()
+                except Exception:
+                    rag_has_document = False
+
+            already_imported = bool(
+                import_task_id
+                and existing
+                and existing.get("import_task_id") == import_task_id
+                and rag_has_document
+            )
+            rag_mutated = False
+            if already_imported:
+                result = f"✅ 文档已导入\n- document_id: {document_id}"
+                committed_history = latest_history
             else:
-                result = self.rag_tool.execute("add_document", **add_kwargs)
-
-            # Commit History inside the same lock — fresh merge against
-            # the latest persisted snapshot.
-            try:
-                if self.coordinator is not None:
-                    self.history = self.coordinator.update_history(
-                        lambda h: h["documents"].append(history_item)
+                if hasattr(self.rag_tool, "execute_result"):
+                    action_result = self.rag_tool.execute_result(
+                        "add_document", **add_kwargs
                     )
+                    result = action_result.message
+                    if not action_result.success:
+                        raise ImportRAGError(action_result)
                 else:
-                    self.history = self.history_repository.update(
-                        lambda h: h["documents"].append(history_item)
-                    )
-            except Exception:
-                # Best-effort compensation: remove the RAG document we
-                # just staged so the two stores stay consistent.
-                if self.coordinator is not None:
-                    self.coordinator.compensate_rag_add(
-                        self.rag_tool, document_id, reason="history update failed"
-                    )
-                else:
-                    try:
-                        self.rag_tool.execute("delete_document", document_id=document_id)
-                    except Exception:
-                        pass
-                raise
+                    result = self.rag_tool.execute("add_document", **add_kwargs)
+                rag_mutated = True
 
-        # ── outside lock: session-local state ────────────────────────
-        self.current_document = str(path)
-        self.current_document_id = document_id
-        self.stats["documents_loaded"] += 1
+                # Commit History inside the same lock — fresh merge against
+                # the latest persisted snapshot.
+                try:
+                    if self.coordinator is not None:
+                        def upsert(data):
+                            for index, item in enumerate(data["documents"]):
+                                if str(item.get("document_id", "")) == document_id:
+                                    data["documents"][index] = dict(history_item)
+                                    return
+                            data["documents"].append(dict(history_item))
 
-        # ── episodic memory (uses coordination_lock → reentrant) ────
-        self.memory_tool.execute(
-            "add",
-            content=f"用户导入了文档：{path.name}",
-            memory_type="episodic",
-            importance=0.8,
-            event_type="document_loaded",
-            session_id=self.session_id,
-            metadata={
+                        committed_history = self.coordinator.update_history(upsert)
+                    else:
+                        committed_history = self.history_repository.upsert_document(
+                            history_item
+                        )
+                except Exception:
+                    # Only undo a RAG document written by this invocation.
+                    if rag_mutated:
+                        if self.coordinator is not None:
+                            self.coordinator.compensate_rag_add(
+                                self.rag_tool,
+                                document_id,
+                                reason="history update failed",
+                            )
+                        else:
+                            try:
+                                self.rag_tool.execute(
+                                    "delete_document", document_id=document_id
+                                )
+                            except Exception:
+                                pass
+                    raise
+
+            memory_metadata = {
                 "document_id": document_id,
                 "document_name": document_name,
                 "document_path": str(path),
                 "file_suffix": suffix,
-            },
-        )
+                "import_task_id": import_task_id,
+            }
+            try:
+                if import_task_id and hasattr(
+                    self.memory_tool, "ensure_import_event"
+                ):
+                    self.memory_tool.ensure_import_event(
+                        import_task_id=import_task_id,
+                        content=f"用户导入了文档：{document_name}",
+                        metadata=memory_metadata,
+                        session_id=self.session_id,
+                    )
+                else:
+                    memory_result = self.memory_tool.execute(
+                        "add",
+                        content=f"用户导入了文档：{path.name}",
+                        memory_type="episodic",
+                        importance=0.8,
+                        event_type="document_loaded",
+                        session_id=self.session_id,
+                        metadata=memory_metadata,
+                    )
+                    if isinstance(memory_result, str) and memory_result.startswith("❌"):
+                        raise RuntimeError(memory_result)
+            except ImportMemoryEventError:
+                raise
+            except Exception as error:
+                raise ImportMemoryEventError() from error
+
+        # ── outside lock: session-local state ────────────────────────
+        self.history = committed_history
+        self.current_document = str(path)
+        self.current_document_id = document_id
+        self.stats["documents_loaded"] += 1
 
         return result
 

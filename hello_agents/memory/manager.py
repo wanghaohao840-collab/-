@@ -96,7 +96,8 @@ class MemoryManager:
         memory_type: str = "working",
         importance: float = 0.5,
         metadata: Optional[Dict[str, Any]] = None,
-        auto_classify: bool = False
+        auto_classify: bool = False,
+        memory_id: Optional[str] = None,
     ) -> str:
         """添加记忆"""
 
@@ -109,11 +110,16 @@ class MemoryManager:
         if memory_type not in self.memory_types:
             raise ValueError(f"未启用的记忆类型: {memory_type}")
 
+        item_kwargs = {
+            "content": content,
+            "memory_type": memory_type,
+            "importance": importance,
+            "metadata": metadata or {},
+        }
+        if memory_id is not None:
+            item_kwargs["id"] = memory_id
         memory_item = MemoryItem(
-            content=content,
-            memory_type=memory_type,
-            importance=importance,
-            metadata=metadata or {}
+            **item_kwargs
         )
 
         memory_item.metadata.setdefault("user_id", self.user_id)
