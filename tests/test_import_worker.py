@@ -192,6 +192,47 @@ def test_success_moves_staged_file_to_formal_path_and_records_progress(tmp_path)
     assert runtimes.acquired == runtimes.released == [user_id]
 
 
+def test_staged_progress_is_first_and_percentages_are_monotonic(tmp_path):
+    runner, repository, _, _, clock, user_id, task_id = make_runner(tmp_path)
+    claimed = claim(repository, clock)
+    updates = []
+    original_update = repository.update_progress
+
+    def record_update(*args, **kwargs):
+        updates.append((args[2], args[3]))
+        return original_update(*args, **kwargs)
+
+    repository.update_progress = record_update
+    runner.run(claimed)
+
+    assert updates[0] == ("staged", 10)
+    assert [progress for _, progress in updates] == sorted(
+        progress for _, progress in updates
+    )
+    assert repository.get_task(user_id, task_id).progress == 100
+
+
+def test_staged_cleanup_failure_preserves_success_and_staged_copy(
+    tmp_path, monkeypatch
+):
+    runner, repository, storage, _, clock, user_id, task_id = make_runner(tmp_path)
+    claimed = claim(repository, clock)
+    staged = storage.user_paths(user_id).root / claimed.staged_relative_path
+    formal = storage.document_path(user_id, claimed.document_id, claimed.file_suffix)
+
+    def fail_cleanup(_path):
+        raise OSError("staging volume unavailable")
+
+    monkeypatch.setattr(runner, "_cleanup_staged_file", fail_cleanup)
+    runner.run(claimed)
+
+    completed = repository.get_task(user_id, task_id)
+    assert completed.status == "succeeded"
+    assert completed.error_code is None
+    assert staged.exists()
+    assert formal.exists()
+
+
 def test_failure_removes_formal_file_but_preserves_staged_copy(tmp_path):
     runner, repository, storage, _, clock, user_id, task_id = make_runner(
         tmp_path, failures=[ValueError("corrupt document")]
@@ -243,6 +284,19 @@ def test_legacy_failure_string_does_not_mark_task_succeeded(tmp_path):
 )
 def test_classify_import_failure(error, expected):
     assert classify_import_failure(error) == expected
+
+
+def test_classify_structured_error_code_is_whitelisted_and_sanitized():
+    error = RuntimeError("backend rejected token=secret")
+    error.error_code = "token=secret"
+    error.retryable = False
+
+    error_code, retryable, summary = classify_import_failure(error)
+
+    assert error_code == "unexpected_error"
+    assert retryable is False
+    assert "secret" not in error_code
+    assert "secret" not in summary
 
 
 class BlockingRunner:
@@ -311,6 +365,69 @@ def test_worker_pool_starts_four_non_daemon_workers_and_serializes_each_user(tmp
         assert {task.user_id for task in blocking_runner.started} == set(users)
         assert len(pool._worker_threads) == 4
         assert all(not thread.daemon for thread in pool._worker_threads)
+    finally:
+        blocking_runner.release.set()
+        pool.stop(wait=True)
+
+
+def test_worker_pool_notify_wakes_scheduler_promptly(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    storage = UserStorage(tmp_path / "data")
+    repository = ImportTaskRepository(db_path)
+    user_id = AuthService(db_path).register(
+        "notify-user", "correct horse battery"
+    ).id
+    batch_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    staged = storage.staged_import_path(user_id, batch_id, task_id, ".md")
+    staged.write_bytes(b"x")
+    blocking_runner = BlockingRunner()
+    pool = ImportWorkerPool(
+        repository,
+        FakeRuntimeRegistry(storage),
+        storage,
+        runner=blocking_runner,
+    )
+
+    original_claim_next = repository.claim_next
+    first_claim = True
+
+    def claim_next_with_queued_task(blocked_user_ids, *args, **kwargs):
+        nonlocal first_claim
+        if first_claim:
+            first_claim = False
+            # Queue the task and notify before the scheduler enters its idle
+            # wait.  A generation predicate must observe this notification;
+            # a plain Condition wait would miss it and sleep for its timeout.
+            repository.create_batch(
+                user_id,
+                [
+                    ImportTaskCreate(
+                        task_id=task_id,
+                        batch_id=batch_id,
+                        user_id=user_id,
+                        document_id=str(uuid.uuid4()),
+                        original_name="notify.md",
+                        file_suffix=".md",
+                        size_bytes=1,
+                        staged_relative_path=str(
+                            staged.relative_to(storage.user_paths(user_id).root)
+                        ),
+                    )
+                ],
+            )
+            pool.notify()
+            return None
+        return original_claim_next(blocked_user_ids, *args, **kwargs)
+
+    repository.claim_next = claim_next_with_queued_task
+    pool.start()
+    try:
+        started_at = time.monotonic()
+        pool.notify()
+        wait_for(lambda: bool(blocking_runner.started), timeout=0.75)
+        assert time.monotonic() - started_at < 0.75
     finally:
         blocking_runner.release.set()
         pool.stop(wait=True)

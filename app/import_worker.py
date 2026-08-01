@@ -28,6 +28,21 @@ from hello_agents.memory.rag.errors import (
 logger = logging.getLogger(__name__)
 _RETRY_DELAYS = (2, 10, 30)
 _STOP = object()
+_SAFE_STRUCTURED_ERROR_CODES = {
+    "document_invalid",
+    "rag_connection",
+    "rag_authentication",
+    "rag_config",
+    "rag_collectionerror",
+    "rag_documenttoolargeerror",
+    "rag_embeddingerror",
+    "rag_operation",
+    "database_busy",
+    "staged_cleanup_failed",
+    "staged_file_missing",
+    "process_interrupted",
+    "unexpected_error",
+}
 _STAGE_RANGES = {
     "parsing": (10, 25),
     "chunking": (25, 40),
@@ -42,7 +57,13 @@ def classify_import_failure(error: BaseException) -> tuple[str, bool, str]:
     retryable = getattr(error, "retryable", None)
     if error_code and retryable is not None:
         summary = sanitize_error_message(error)[:500] or error.__class__.__name__
-        return str(error_code), bool(retryable), summary
+        # Structured errors can originate in backend responses.  Persist only
+        # known, stable codes so arbitrary values (for example
+        # ``token=secret``) cannot become public task metadata.
+        normalized_code = str(error_code).strip().lower()
+        if normalized_code not in _SAFE_STRUCTURED_ERROR_CODES:
+            normalized_code = "unexpected_error"
+        return normalized_code, bool(retryable), summary
     if isinstance(error, (RAGConnectionError, TimeoutError, ConnectionError)):
         return "rag_connection", True, sanitize_error_message(error)[:500]
     if isinstance(error, RAGAuthenticationError):
@@ -95,14 +116,17 @@ class ImportTaskRunner:
                 raise FileNotFoundError("Staged import file is missing")
 
             runtime = self.runtime_registry.acquire_background(task.user_id)
+            # Record that the durable staged copy is ready before any formal
+            # document copy or parsing begins.  The progress callback starts
+            # from this value and never reports a lower percentage.
+            self.repository.update_progress(
+                task.user_id, task.task_id, "staged", 10, now=self._now_iso()
+            )
             formal_path = self.storage.document_path(
                 task.user_id, task.document_id, task.file_suffix
             )
             temporary_path = self.storage.temporary_document_path(
                 task.user_id, task.document_id, task.file_suffix
-            )
-            self.repository.update_progress(
-                task.user_id, task.task_id, "staged", 10, now=self._now_iso()
             )
             shutil.copyfile(staged_path, temporary_path)
             temporary_path.replace(formal_path)
@@ -127,6 +151,17 @@ class ImportTaskRunner:
             self.repository.mark_succeeded(
                 task.user_id, task.task_id, now=self._now_iso()
             )
+            try:
+                self._cleanup_staged_file(staged_path)
+            except OSError:
+                # The durable task transition is committed before cleanup;
+                # retaining a staged copy is safe and recoverable if deletion
+                # fails, so do not downgrade a succeeded task.
+                logger.warning(
+                    "could not remove completed import staging file", exc_info=True
+                )
+            else:
+                self._remove_empty_batch_dir(staged_path.parent)
         except Exception as error:
             self._remove_attempt_files(temporary_path, formal_path)
             error_code, retryable, summary = classify_import_failure(error)
@@ -150,14 +185,6 @@ class ImportTaskRunner:
                     error_code,
                     summary,
                     now=self._now_iso(),
-                )
-        else:
-            try:
-                staged_path.unlink(missing_ok=True)
-                self._remove_empty_batch_dir(staged_path.parent)
-            except OSError:
-                logger.warning(
-                    "could not remove completed import staging file", exc_info=True
                 )
         finally:
             if assistant is not None:
@@ -194,6 +221,11 @@ class ImportTaskRunner:
                 path.unlink(missing_ok=True)
             except OSError:
                 logger.warning("could not remove failed import file", exc_info=True)
+
+    @staticmethod
+    def _cleanup_staged_file(path: Path) -> None:
+        """Remove the durable staged source, surfacing cleanup failures."""
+        path.unlink(missing_ok=True)
 
     def _progress_callback(self, task: ImportTaskRecord):
         last_progress = 10
@@ -257,6 +289,7 @@ class ImportWorkerPool:
         self._scheduler_thread: threading.Thread | None = None
         self._task_queue: queue.Queue[ImportTaskRecord | object] = queue.Queue()
         self._active_count = 0
+        self._notify_generation = 0
 
     def start(self) -> None:
         with self._condition:
@@ -269,6 +302,7 @@ class ImportWorkerPool:
             self._stop_event.clear()
             self._blocked_user_ids.clear()
             self._active_count = 0
+            self._notify_generation = 0
             self._task_queue = queue.Queue()
             self._worker_threads = [
                 threading.Thread(
@@ -303,6 +337,7 @@ class ImportWorkerPool:
 
     def notify(self) -> None:
         with self._condition:
+            self._notify_generation += 1
             self._condition.notify_all()
 
     def _scheduler_loop(self) -> None:
@@ -313,6 +348,7 @@ class ImportWorkerPool:
                         self._condition.wait(timeout=1.0)
                         continue
                     blocked = set(self._blocked_user_ids)
+                    observed_generation = self._notify_generation
                 try:
                     task = self.repository.claim_next(blocked)
                 except sqlite3.OperationalError:
@@ -323,7 +359,8 @@ class ImportWorkerPool:
                 if task is None:
                     with self._condition:
                         self._condition.wait_for(
-                            self._stop_event.is_set,
+                            lambda: self._stop_event.is_set()
+                            or self._notify_generation != observed_generation,
                             timeout=1.0,
                         )
                     continue
