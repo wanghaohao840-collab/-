@@ -212,7 +212,9 @@ class PDFLearningAssistant:
 
         # ── critical section: RAG + History + import memory event ───
         with self._write_lock:
-            latest_history = self.history_repository.load()
+            latest_history = (
+                self.history_repository.load() if import_task_id else self.history
+            )
             existing = None
             if import_task_id:
                 existing = next(
@@ -223,15 +225,15 @@ class PDFLearningAssistant:
                     ),
                     None,
                 )
-            rag_has_document = False
-            if import_task_id:
-                try:
-                    pipeline = self.rag_tool._get_pipeline()
-                    list_document_ids = getattr(pipeline, "list_document_ids", None)
-                    if callable(list_document_ids):
-                        rag_has_document = document_id in list_document_ids()
-                except Exception:
-                    rag_has_document = False
+            rag_existed_before: Optional[bool] = None
+            try:
+                pipeline = self.rag_tool._get_pipeline()
+                list_document_ids = getattr(pipeline, "list_document_ids", None)
+                if callable(list_document_ids):
+                    rag_existed_before = document_id in list_document_ids()
+            except Exception:
+                pass
+            rag_has_document = rag_existed_before is True
 
             already_imported = bool(
                 import_task_id
@@ -240,6 +242,7 @@ class PDFLearningAssistant:
                 and rag_has_document
             )
             rag_mutated = False
+            rag_created_by_invocation = False
             if already_imported:
                 result = f"✅ 文档已导入\n- document_id: {document_id}"
                 committed_history = latest_history
@@ -254,6 +257,9 @@ class PDFLearningAssistant:
                 else:
                     result = self.rag_tool.execute("add_document", **add_kwargs)
                 rag_mutated = True
+                rag_created_by_invocation = rag_existed_before is False or (
+                    import_task_id is None and rag_existed_before is None
+                )
 
                 # Commit History inside the same lock — fresh merge against
                 # the latest persisted snapshot.
@@ -273,7 +279,7 @@ class PDFLearningAssistant:
                         )
                 except Exception:
                     # Only undo a RAG document written by this invocation.
-                    if rag_mutated:
+                    if rag_mutated and rag_created_by_invocation:
                         if self.coordinator is not None:
                             self.coordinator.compensate_rag_add(
                                 self.rag_tool,

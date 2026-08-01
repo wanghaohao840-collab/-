@@ -372,6 +372,32 @@ def test_already_imported_retry_never_deletes_preexisting_rag_document(
     assert not any(call[0] == "delete_document" for call in assistant.rag_tool.calls)
 
 
+def test_split_brain_history_failure_preserves_preexisting_rag_document(
+    tmp_path, monkeypatch
+):
+    assistant, source = make_assistant(
+        tmp_path,
+        history_documents=[],
+        rag_document_ids=["doc-1"],
+    )
+    monkeypatch.setattr(
+        assistant.history_repository,
+        "upsert_document",
+        lambda _item: (_ for _ in ()).throw(RuntimeError("history unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="history unavailable"):
+        assistant.load_document(
+            str(source),
+            document_id="doc-1",
+            import_task_id="task-1",
+        )
+
+    assert assistant.rag_tool.pipeline.document_ids == {"doc-1"}
+    assert [call[0] for call in assistant.rag_tool.calls] == ["add_document"]
+    assert assistant.memory_tool.calls == []
+
+
 def test_history_failure_compensates_only_rag_written_by_this_call(
     tmp_path, monkeypatch
 ):
