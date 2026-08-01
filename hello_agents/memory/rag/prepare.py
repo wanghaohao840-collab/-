@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+from app.import_models import ProgressCallback
 from hello_agents.memory.rag.contracts import DocumentSegment, PreparedChunk
 
 
 PROJECT_POINT_NAMESPACE_UUID = uuid.UUID("c273c00a-40ac-47a9-b475-164f135ada18")
+logger = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -51,6 +54,23 @@ def normalize_vector(vector: Any) -> list[float]:
     return [float(item) for item in vector]
 
 
+def report_progress(
+    callback: ProgressCallback | None,
+    stage: str,
+    done: int,
+    total: int,
+    message: str,
+) -> None:
+    """Report best-effort progress without allowing UI callbacks to break imports."""
+
+    if callback is None:
+        return
+    try:
+        callback(stage, done, total, message)
+    except Exception:
+        logger.warning("RAG progress callback failed", exc_info=True)
+
+
 def prepare_document_chunks(
     document_id: str,
     segments: Sequence[DocumentSegment],
@@ -58,13 +78,13 @@ def prepare_document_chunks(
     split_text: Callable[[str], list[str]],
     embed_text: Callable[[str], list[float]],
     id_for_chunk: Callable[[str, str, int], str] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[PreparedChunk]:
     if not document_id:
         raise ValueError("document_id is required")
 
     id_for_chunk = id_for_chunk or qdrant_point_id
-    prepared: list[PreparedChunk] = []
-    chunk_index = 0
+    pending: list[tuple[dict[str, Any], str]] = []
 
     for segment in segments:
         if not segment.content or not segment.content.strip():
@@ -76,9 +96,14 @@ def prepare_document_chunks(
             if not chunk_text:
                 continue
 
-            chunk_id = id_for_chunk(rag_namespace, document_id, chunk_index)
-            now = utc_now_iso()
-            metadata = {
+            pending.append((segment_metadata, chunk_text))
+
+    prepared: list[PreparedChunk] = []
+    total_chunks = len(pending)
+    for chunk_index, (segment_metadata, chunk_text) in enumerate(pending):
+        chunk_id = id_for_chunk(rag_namespace, document_id, chunk_index)
+        now = utc_now_iso()
+        metadata = {
                 "memory_id": chunk_id,
                 "document_id": document_id,
                 "chunk_index": chunk_index,
@@ -93,15 +118,21 @@ def prepare_document_chunks(
                 **segment_metadata,
             }
 
-            prepared.append(
-                PreparedChunk(
-                    id=chunk_id,
-                    document_id=document_id,
-                    content=chunk_text,
-                    vector=normalize_vector(embed_text(chunk_text)),
-                    metadata=json_safe_dict(metadata),
-                )
+        prepared.append(
+            PreparedChunk(
+                id=chunk_id,
+                document_id=document_id,
+                content=chunk_text,
+                vector=normalize_vector(embed_text(chunk_text)),
+                metadata=json_safe_dict(metadata),
             )
-            chunk_index += 1
+        )
+        report_progress(
+            progress_callback,
+            "embedding",
+            chunk_index + 1,
+            total_chunks,
+            "embedding",
+        )
 
     return prepared

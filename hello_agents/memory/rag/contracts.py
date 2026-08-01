@@ -26,3 +26,5 @@ class RAGActionResult:
     message: str
     data: dict[str, Any]
     error: str = ""
+    error_code: str = ""
+    retryable: bool = False

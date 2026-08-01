@@ -10,10 +10,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.import_models import ProgressCallback
 from hello_agents.memory.embedding import get_text_embedder, get_dimension
 from hello_agents.memory.rag.contracts import DocumentSegment
 from hello_agents.memory.rag.errors import RAGConfigError
-from hello_agents.memory.rag.prepare import default_chunk_id, prepare_document_chunks, utc_now_iso
+from hello_agents.memory.rag.prepare import (
+    default_chunk_id,
+    prepare_document_chunks,
+    report_progress,
+    utc_now_iso,
+)
 from hello_agents.memory.storage.vector_store import InMemoryVectorStore, VectorPoint
 
 
@@ -133,6 +139,7 @@ class SimpleRAGPipeline:
             metadata: Optional[Dict[str, Any]] = None,
             replace_existing: bool = True,
             save_cache: bool = True,
+            progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         """添加文本到 RAG 知识库，并可选择是否立即持久化"""
 
@@ -150,6 +157,7 @@ class SimpleRAGPipeline:
         if replace_existing:
             removed = self._remove_document_chunks(document_id)
 
+        report_progress(progress_callback, "chunking", 0, 1, "chunking")
         chunk_texts = self._split_text(text)
 
         added = 0
@@ -164,6 +172,13 @@ class SimpleRAGPipeline:
             chunk_id = f"{document_id}_{existing_count + index}"
 
             vector = self._to_vector(chunk_text)
+            report_progress(
+                progress_callback,
+                "embedding",
+                index + 1,
+                len(chunk_texts),
+                "embedding",
+            )
 
             payload = {
                 "memory_id": chunk_id,
@@ -181,13 +196,32 @@ class SimpleRAGPipeline:
             points.append(VectorPoint(id=chunk_id, vector=vector, payload=payload))
             added += 1
 
+        report_progress(progress_callback, "chunking", 1, 1, "chunking")
+        persistence_steps = int(bool(points)) + int(save_cache)
+        persisted = 0
         if points:
             self._ensure_store_ready()
             self._vector_store.upsert(self._collection, points)
+            persisted += 1
+            report_progress(
+                progress_callback,
+                "persisting",
+                persisted,
+                persistence_steps,
+                "persisting",
+            )
 
         # 关键：只有 save_cache=True 时才保存
         if save_cache:
             self._save_cache()
+            persisted += 1
+            report_progress(
+                progress_callback,
+                "persisting",
+                persisted,
+                persistence_steps,
+                "persisting",
+            )
 
         message = f"已添加文本知识，生成 {added} 个 chunk"
         if removed:
@@ -208,6 +242,7 @@ class SimpleRAGPipeline:
         segments: List[DocumentSegment],
         save_cache: bool = True,
         allow_empty: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         """Replace all chunks for one document using shared preparation logic."""
 
@@ -219,6 +254,7 @@ class SimpleRAGPipeline:
                 "chunks_removed": 0,
             }
 
+        report_progress(progress_callback, "chunking", 0, len(segments), "chunking")
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=segments,
@@ -226,6 +262,10 @@ class SimpleRAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=default_chunk_id,
+            progress_callback=progress_callback,
+        )
+        report_progress(
+            progress_callback, "chunking", len(segments), len(segments), "chunking"
         )
         if not prepared and not allow_empty:
             return {
@@ -264,11 +304,29 @@ class SimpleRAGPipeline:
                 vector=chunk.vector,
                 payload=chunk.metadata,
             ))
+        persistence_steps = int(bool(new_points)) + int(save_cache)
+        persisted = 0
         if new_points:
             self._vector_store.upsert(self._collection, new_points)
+            persisted += 1
+            report_progress(
+                progress_callback,
+                "persisting",
+                persisted,
+                persistence_steps,
+                "persisting",
+            )
 
         if save_cache:
             self._save_cache()
+            persisted += 1
+            report_progress(
+                progress_callback,
+                "persisting",
+                persisted,
+                persistence_steps,
+                "persisting",
+            )
 
         return {
             "success": True,

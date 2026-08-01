@@ -15,7 +15,19 @@ from typing import Dict, Any, List, Optional
 from hello_agents.tools.base import Tool
 from hello_agents.core.llm import HelloAgentsLLM
 from hello_agents.memory.rag.contracts import DocumentSegment, RAGActionResult
+from hello_agents.memory.rag.errors import (
+    RAGAuthenticationError,
+    RAGCollectionError,
+    RAGConfigError,
+    RAGConnectionError,
+    RAGDocumentTooLargeError,
+    RAGEmbeddingError,
+    RAGOperationError,
+    sanitize_error_message,
+    sanitize_qdrant_url,
+)
 from hello_agents.memory.rag.pipeline import create_rag_pipeline
+from hello_agents.memory.rag.prepare import report_progress
 from hello_agents.memory.rag.result_utils import (
     normalize_document_scope,
     resolve_qa_mode,
@@ -336,6 +348,7 @@ class RAGTool(Tool):
     def execute(self, action: Optional[str] = None, **kwargs) -> str:
         """RAGTool 统一执行入口"""
 
+        self._last_action_error = None
         if not action:
             return "❌ 请提供 action，例如 add_text/add_document/search/ask/stats/clear"
 
@@ -380,8 +393,10 @@ class RAGTool(Tool):
 
             return f"❌ 不支持的 RAG 操作: {action}"
 
-        except Exception as e:
-            return f"❌ RAG 操作失败: {e}"
+        except Exception as exc:
+            self._last_action_error = exc
+            safe_error = self._safe_action_error(exc, kwargs.get("file_path"))
+            return f"❌ RAG 操作失败: {safe_error}"
 
     def execute_result(self, action: Optional[str] = None, **kwargs) -> RAGActionResult:
         """Execute an action and return structured status plus the legacy message."""
@@ -389,18 +404,115 @@ class RAGTool(Tool):
         normalized_action = (action or kwargs.get("action") or "").lower().strip()
         self._last_action_data = {}
         message = self.execute(action, **kwargs)
-        data = dict(getattr(self, "_last_action_data", {}) or {})
+        data = self._safe_action_data(
+            dict(getattr(self, "_last_action_data", {}) or {})
+        )
         success = data.get("success")
         if success is None:
             success = not self._looks_like_failure(message)
         data.setdefault("success", bool(success))
+        error_code = ""
+        retryable = False
+        error_summary = ""
+        if not success:
+            failure = getattr(self, "_last_action_error", None)
+            error_code, retryable = self._classify_action_failure(
+                failure, normalized_action
+            )
+            error_summary = self._safe_action_error(
+                failure or message, kwargs.get("file_path")
+            )
+            data["error_code"] = error_code
+            data["retryable"] = retryable
         return RAGActionResult(
             action=normalized_action,
             success=bool(success),
             message=message,
             data=data,
-            error="" if success else message,
+            error=error_summary,
+            error_code=error_code,
+            retryable=retryable,
         )
+
+    @staticmethod
+    def _classify_action_failure(
+        failure: BaseException | None, action: str
+    ) -> tuple[str, bool]:
+        if isinstance(failure, RAGConnectionError):
+            return "rag_connection", True
+        if isinstance(failure, RAGAuthenticationError):
+            return "rag_authentication", False
+        if isinstance(failure, RAGConfigError):
+            return "rag_config", False
+        if isinstance(failure, RAGCollectionError):
+            return "rag_collection", False
+        if isinstance(failure, RAGDocumentTooLargeError):
+            return "rag_document_too_large", False
+        if isinstance(failure, RAGEmbeddingError):
+            return "rag_embedding", False
+        if isinstance(failure, RAGOperationError):
+            return "rag_operation", RAGTool._error_is_transient(failure)
+        if isinstance(failure, (ValueError, FileNotFoundError)):
+            return "document_invalid", False
+        if failure is not None:
+            return "unexpected_error", False
+        if action == "add_document":
+            return "document_invalid", False
+        return "rag_operation", False
+
+    @staticmethod
+    def _error_is_transient(error: BaseException) -> bool:
+        explicit = getattr(error, "retryable", None)
+        if explicit is not None:
+            return bool(explicit)
+        text = str(error).lower()
+        status_match = re.search(r"\b([45]\d{2})\b", text)
+        if status_match:
+            status = int(status_match.group(1))
+            return status in {408, 425, 429} or status >= 500
+        return any(
+            marker in text
+            for marker in (
+                "timeout",
+                "timed out",
+                "temporarily unavailable",
+                "temporary outage",
+                "connection reset",
+            )
+        )
+
+    def _safe_action_error(
+        self, error: object, file_path: object = None
+    ) -> str:
+        text = str(error or "")
+        if file_path:
+            path_text = str(file_path)
+            text = text.replace(path_text, Path(path_text).name)
+        text = sanitize_error_message(
+            text, (self.qdrant_api_key or "",)
+        )
+        text = re.sub(
+            r"https?://[^\s<>()]+",
+            lambda match: sanitize_qdrant_url(match.group(0)),
+            text,
+        )
+        return text[:500]
+
+    def _safe_action_data(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: self._safe_action_data(item)
+                for key, item in value.items()
+                if str(key).lower()
+                not in {"file_path", "traceback", "stack", "stack_trace"}
+            }
+        if isinstance(value, list):
+            return [self._safe_action_data(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._safe_action_data(item) for item in value)
+        if isinstance(value, str):
+            return self._safe_action_error(value)
+        return value
 
     def _looks_like_failure(self, message: str) -> bool:
         text = str(message or "")
@@ -638,6 +750,7 @@ class RAGTool(Tool):
     ) -> str:
         """添加本地 txt / md / pdf / docx 文档到知识库"""
 
+        progress_callback = kwargs.pop("progress_callback", None)
         path = Path(file_path)
 
         if not path.exists():
@@ -677,9 +790,17 @@ class RAGTool(Tool):
                 reader = PdfReader(str(path))
                 pipeline = self._get_pipeline(rag_namespace)
                 segments = []
+                total_pages = len(reader.pages)
 
                 for i, page in enumerate(reader.pages):
                     page_text = page.extract_text() or ""
+                    report_progress(
+                        progress_callback,
+                        "parsing",
+                        i + 1,
+                        total_pages,
+                        "parsing",
+                    )
                     if not page_text.strip():
                         continue
 
@@ -699,16 +820,19 @@ class RAGTool(Tool):
                     return f"鉂?PDF 鏈彁鍙栧埌鏈夋晥鏂囨湰: {file_path}"
 
                 if hasattr(pipeline, "replace_document"):
-                    result = pipeline.replace_document(
-                        document_id=document_id,
-                        segments=segments,
-                        save_cache=True,
-                    )
+                    pipeline_kwargs = {
+                        "document_id": document_id,
+                        "segments": segments,
+                        "save_cache": True,
+                    }
+                    if progress_callback is not None:
+                        pipeline_kwargs["progress_callback"] = progress_callback
+                    result = pipeline.replace_document(**pipeline_kwargs)
                 else:
-                    result = pipeline.add_text(
-                        text="\n\n".join(segment.content for segment in segments),
-                        document_id=document_id,
-                        metadata={
+                    pipeline_kwargs = {
+                        "text": "\n\n".join(segment.content for segment in segments),
+                        "document_id": document_id,
+                        "metadata": {
                             "file_path": str(path),
                             "file_name": path.name,
                             "file_suffix": suffix,
@@ -716,8 +840,11 @@ class RAGTool(Tool):
                             "source_type": "pdf",
                             **(metadata or {}),
                         },
-                        replace_existing=replace_existing,
-                    )
+                        "replace_existing": replace_existing,
+                    }
+                    if progress_callback is not None:
+                        pipeline_kwargs["progress_callback"] = progress_callback
+                    result = pipeline.add_text(**pipeline_kwargs)
 
                 if not result.get("success"):
                     self._last_action_data = {
@@ -758,8 +885,9 @@ class RAGTool(Tool):
                     f"- graph_status: {graph_result.get('status')}"
                 )
 
-            except Exception as e:
-                return f"鉂?鏂囦欢璇诲彇澶辫触: {e}"
+            except Exception as exc:
+                self._last_action_error = exc
+                return f"鉂?鏂囦欢璇诲彇澶辫触: {self._safe_action_error(exc, file_path)}"
 
         try:
             if suffix in [".txt", ".md"]:
@@ -767,6 +895,7 @@ class RAGTool(Tool):
                     text = path.read_text(encoding=encoding)
                 except UnicodeDecodeError:
                     text = path.read_text(encoding="gbk")
+                report_progress(progress_callback, "parsing", 1, 1, "parsing")
 
             # ✅ 修改点 2：新增 Word 文档读取分支
             elif suffix == ".docx":
@@ -781,6 +910,7 @@ class RAGTool(Tool):
                         paragraphs.append(text_part)
 
                 text = "\n\n".join(paragraphs)
+                report_progress(progress_callback, "parsing", 1, 1, "parsing")
 
                 if not text.strip():
                     return f"❌ Word 文档未提取到有效文本: {file_path}"
@@ -853,8 +983,9 @@ class RAGTool(Tool):
             else:
                 return f"❌ 不支持的文件类型: {suffix}"
 
-        except Exception as e:
-            return f"❌ 文件读取失败: {e}"
+        except Exception as exc:
+            self._last_action_error = exc
+            return f"❌ 文件读取失败: {self._safe_action_error(exc, file_path)}"
 
         if not text.strip():
             return f"❌ 文件内容为空: {file_path}"
@@ -877,18 +1008,24 @@ class RAGTool(Tool):
         pipeline = self._get_pipeline(rag_namespace)
 
         if hasattr(pipeline, "replace_document"):
-            result = pipeline.replace_document(
-                document_id=document_id,
-                segments=[DocumentSegment(content=text, metadata=final_metadata)],
-                save_cache=True,
-            )
+            pipeline_kwargs = {
+                "document_id": document_id,
+                "segments": [DocumentSegment(content=text, metadata=final_metadata)],
+                "save_cache": True,
+            }
+            if progress_callback is not None:
+                pipeline_kwargs["progress_callback"] = progress_callback
+            result = pipeline.replace_document(**pipeline_kwargs)
         else:
-            result = pipeline.add_text(
-                text=text,
-                document_id=document_id,
-                metadata=final_metadata,
-                replace_existing=replace_existing,
-            )
+            pipeline_kwargs = {
+                "text": text,
+                "document_id": document_id,
+                "metadata": final_metadata,
+                "replace_existing": replace_existing,
+            }
+            if progress_callback is not None:
+                pipeline_kwargs["progress_callback"] = progress_callback
+            result = pipeline.add_text(**pipeline_kwargs)
 
         if result.get("success"):
             graph_result = self._build_graph_after_import(

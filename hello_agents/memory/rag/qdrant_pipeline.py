@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from app.import_models import ProgressCallback
 from hello_agents.memory.embedding import get_dimension, get_text_embedder
 from hello_agents.memory.rag.contracts import DocumentSegment
 from hello_agents.memory.rag.errors import (
@@ -10,7 +11,12 @@ from hello_agents.memory.rag.errors import (
     RAGDocumentTooLargeError,
     RAGEmbeddingError,
 )
-from hello_agents.memory.rag.prepare import prepare_document_chunks, qdrant_point_id, utc_now_iso
+from hello_agents.memory.rag.prepare import (
+    prepare_document_chunks,
+    qdrant_point_id,
+    report_progress,
+    utc_now_iso,
+)
 from hello_agents.memory.rag.result_utils import (
     RETRIEVAL_MODES,
     dedupe_results_by_source,
@@ -92,6 +98,7 @@ class RAGPipeline:
         metadata: Optional[Dict[str, Any]] = None,
         replace_existing: bool = True,
         save_cache: bool = True,
+        progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         if not text or not text.strip():
             return {"success": False, "message": "text is empty", "chunks_added": 0, "chunks_removed": 0}
@@ -100,9 +107,14 @@ class RAGPipeline:
 
             document_id = str(uuid.uuid4())
         if replace_existing:
-            return self.replace_document(document_id, [DocumentSegment(text, metadata or {})])
+            return self.replace_document(
+                document_id,
+                [DocumentSegment(text, metadata or {})],
+                progress_callback=progress_callback,
+            )
 
         existing_count = self._max_chunk_index(document_id) + 1
+        report_progress(progress_callback, "chunking", 0, 1, "chunking")
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=[DocumentSegment(text, metadata or {})],
@@ -110,10 +122,12 @@ class RAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=lambda ns, doc, index: qdrant_point_id(ns, doc, existing_count + index),
+            progress_callback=progress_callback,
         )
+        report_progress(progress_callback, "chunking", 1, 1, "chunking")
         for chunk in prepared:
             chunk.metadata["chunk_index"] = existing_count + int(chunk.metadata["chunk_index"])
-        self._upsert_chunks(prepared)
+        self._upsert_chunks(prepared, progress_callback=progress_callback)
         return {
             "success": True,
             "document_id": document_id,
@@ -128,10 +142,12 @@ class RAGPipeline:
         segments: List[DocumentSegment],
         save_cache: bool = True,
         allow_empty: bool = False,
+        progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         if not document_id:
             return {"success": False, "message": "document_id cannot be empty", "chunks_added": 0, "chunks_removed": 0}
 
+        report_progress(progress_callback, "chunking", 0, len(segments), "chunking")
         prepared = prepare_document_chunks(
             document_id=document_id,
             segments=segments,
@@ -139,6 +155,10 @@ class RAGPipeline:
             split_text=self._split_text,
             embed_text=self._to_vector,
             id_for_chunk=qdrant_point_id,
+            progress_callback=progress_callback,
+        )
+        report_progress(
+            progress_callback, "chunking", len(segments), len(segments), "chunking"
         )
         existing_payloads = self._scroll_payloads(document_id=document_id)
         old_count = len(existing_payloads)
@@ -160,7 +180,7 @@ class RAGPipeline:
                 updated_at=updated_at,
                 document_version=version,
             )
-        self._upsert_chunks(prepared)
+        self._upsert_chunks(prepared, progress_callback=progress_callback)
         self._delete_orphan_chunks(document_id, len(prepared))
         return {
             "success": True,
@@ -352,7 +372,11 @@ class RAGPipeline:
             if payload.get("document_id")
         })
 
-    def _upsert_chunks(self, chunks) -> None:
+    def _upsert_chunks(
+        self,
+        chunks,
+        progress_callback: ProgressCallback | None = None,
+    ) -> None:
         points: list[VectorPoint] = []
         for chunk in chunks:
             metadata = dict(chunk.metadata)
@@ -370,7 +394,9 @@ class RAGPipeline:
                 payload["metadata"].pop(duplicate, None)
             points.append(VectorPoint(chunk.id, chunk.vector, payload))
 
-        self.vector_store.upsert(self.collection_name, points)
+        if points:
+            self.vector_store.upsert(self.collection_name, points)
+            report_progress(progress_callback, "persisting", 1, 1, "persisting")
 
     def _split_text(self, text: str, chunk_size: int = 800, chunk_overlap: int = 120) -> List[str]:
         text = text.strip()
