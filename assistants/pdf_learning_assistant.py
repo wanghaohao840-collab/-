@@ -869,7 +869,8 @@ class PDFLearningAssistant:
     def clear_all_documents(self) -> str:
         """清空全部 PDF：清空 RAG 知识库 + 清理学习历史中的文档和问答记录 + 重置当前 PDF"""
 
-        import_task_service = getattr(self.runtime, "import_task_service", None)
+        runtime = getattr(self, "runtime", None)
+        import_task_service = getattr(runtime, "import_task_service", None)
         if import_task_service is not None and import_task_service.has_active_tasks(
             self.user_id
         ):

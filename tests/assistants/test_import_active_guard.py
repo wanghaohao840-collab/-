@@ -28,3 +28,11 @@ def test_clear_all_documents_refuses_while_user_has_active_imports(monkeypatch):
 
     assert "imports are active" in result
     assert service.calls == ["user-a"]
+
+
+def test_clear_all_documents_keeps_legacy_behavior_without_runtime(monkeypatch):
+    assistant = object.__new__(PDFLearningAssistant)
+    assistant.user_id = "user-a"
+    monkeypatch.setattr(assistant, "_clear_documents_coordinated", lambda: "cleared")
+
+    assert assistant.clear_all_documents() == "cleared"

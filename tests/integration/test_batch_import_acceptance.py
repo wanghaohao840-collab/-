@@ -15,11 +15,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.runtime as runtime_module
 from app.auth import AuthService
 from app.database import initialize_database
 from app.import_repository import ImportTaskRepository
 from app.import_service import ImportTaskService
 from app.import_worker import ImportTaskRunner, ImportWorkerPool
+from app.runtime import UserRuntimeRegistry
 from app.storage import UserStorage
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 from hello_agents.memory.rag.errors import RAGConnectionError
@@ -43,18 +45,25 @@ class FakeAssistant:
     outcomes: list[BaseException] = []
     loaded: dict[str, list[str]] = {}
     completed = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+    block = False
 
     def __init__(self, *, user_id, runtime, **_kwargs):
         self.user_id = user_id
         self.runtime = runtime
 
     def load_document(self, _path, *, document_id, progress_callback, **_kwargs):
+        type(self).entered.set()
+        if type(self).block:
+            assert type(self).release.wait(timeout=5)
         if type(self).outcomes:
             raise type(self).outcomes.pop(0)
         progress_callback("parsing", 1, 1, "parsed")
         progress_callback("chunking", 1, 1, "chunked")
         progress_callback("embedding", 1, 1, "embedded")
         progress_callback("persisting", 1, 1, "persisted")
+        self.runtime.rag_tool.record_document(document_id)
         type(self).loaded.setdefault(self.user_id, []).append(document_id)
         type(self).completed.set()
         return "ok"
@@ -64,70 +73,31 @@ class FakeAssistant:
 
 
 @pytest.fixture(autouse=True)
-def reset_fake_assistant():
+def reset_fake_assistant(monkeypatch):
+    monkeypatch.setattr(runtime_module, "RAGTool", OfflineRAGTool)
     FakeAssistant.outcomes = []
     FakeAssistant.loaded = {}
     FakeAssistant.completed = threading.Event()
+    FakeAssistant.entered = threading.Event()
+    FakeAssistant.release = threading.Event()
+    FakeAssistant.block = False
 
 
-class OfflineRuntimeRegistry:
-    """Minimal lease-aware runtime registry with no backend clients."""
+class OfflineRAGTool:
+    """In-memory RAG adapter used only at the real runtime boundary."""
 
-    def __init__(self, storage):
-        self.storage = storage
-        self.runtimes = {}
-        self.import_task_service = None
+    def __init__(self, *, rag_namespace, **_kwargs):
+        self.rag_namespace = rag_namespace
+        self.document_ids = []
 
-    def get_or_create(self, user_id):
-        runtime = self.runtimes.get(user_id)
-        if runtime is None:
-            runtime = SimpleNamespace(
-                paths=self.storage.ensure_user_dirs(user_id),
-                import_task_service=self.import_task_service,
-                active_session_count=0,
-                active_background_count=0,
-            )
-            self.runtimes[user_id] = runtime
-        return runtime
+    def record_document(self, document_id):
+        self.document_ids.append(document_id)
 
-    def set_import_task_service(self, service):
-        self.import_task_service = service
-        for runtime in self.runtimes.values():
-            runtime.import_task_service = service
+    def list_documents(self):
+        return list(self.document_ids)
 
-    def acquire_session(self, user_id):
-        runtime = self.get_or_create(user_id)
-        runtime.active_session_count += 1
-        return runtime
-
-    def release_session(self, user_id):
-        runtime = self.runtimes.get(user_id)
-        if runtime is not None:
-            runtime.active_session_count = max(0, runtime.active_session_count - 1)
-            self._release_if_unused(user_id)
-
-    def acquire_background(self, user_id):
-        runtime = self.get_or_create(user_id)
-        runtime.active_background_count += 1
-        return runtime
-
-    def release_background(self, user_id):
-        runtime = self.runtimes.get(user_id)
-        if runtime is not None:
-            runtime.active_background_count = max(
-                0, runtime.active_background_count - 1
-            )
-            self._release_if_unused(user_id)
-
-    def has_runtime(self, user_id):
-        return user_id in self.runtimes
-
-    def _release_if_unused(self, user_id):
-        runtime = self.runtimes.get(user_id)
-        if runtime is not None and not (
-            runtime.active_session_count or runtime.active_background_count
-        ):
-            self.runtimes.pop(user_id)
+    def close(self):
+        pass
 
 
 class OfflineSessions:
@@ -135,7 +105,7 @@ class OfflineSessions:
 
     def __init__(self, db_path, storage):
         self.auth = AuthService(db_path)
-        self.runtime_registry = OfflineRuntimeRegistry(storage)
+        self.runtime_registry = UserRuntimeRegistry(db_path, storage)
         self._sessions = {}
 
     def register(self, username, password):
@@ -171,6 +141,27 @@ class TrackingImportTaskRepository(ImportTaskRepository):
         return super().update_progress(
             user_id, task_id, stage, progress, now=now
         )
+
+
+class RecoveryTrackingImportTaskRepository(ImportTaskRepository):
+    """Captures the synchronous recovery transition performed by pool.start()."""
+
+    def __init__(self, db_path):
+        super().__init__(db_path)
+        self.recovery_results = []
+
+    def recover_running(self, storage, now=None):
+        recovered = super().recover_running(storage, now=now)
+        from app.database import connect
+
+        with connect(self.db_path) as connection:
+            rows = connection.execute(
+                "select status, error_code from import_tasks order by id"
+            ).fetchall()
+        self.recovery_results = [
+            (row["status"], row["error_code"]) for row in rows
+        ]
+        return recovered
 
 
 class OfflineImportApp:
@@ -213,7 +204,7 @@ class OfflineImportApp:
         return task
 
     def restarted_pool(self):
-        repository = ImportTaskRepository(self.db_path)
+        repository = RecoveryTrackingImportTaskRepository(self.db_path)
         runner = ImportTaskRunner(
             repository,
             self.sessions.runtime_registry,
@@ -254,6 +245,12 @@ def test_two_users_import_same_name_without_cross_scope_access(tmp_path):
         app.service.get_batch(token_a, batch_b.batch_id)
     assert FakeAssistant.loaded[user_a] == [batch_a.tasks[0].document_id]
     assert FakeAssistant.loaded[user_b] == [batch_b.tasks[0].document_id]
+    runtime_a = app.sessions.runtime_registry.get_or_create(user_a)
+    runtime_b = app.sessions.runtime_registry.get_or_create(user_b)
+    assert runtime_a.rag_tool.rag_namespace == f"pdf_{user_a}"
+    assert runtime_b.rag_tool.rag_namespace == f"pdf_{user_b}"
+    assert runtime_a.rag_tool.list_documents() == [batch_a.tasks[0].document_id]
+    assert runtime_b.rag_tool.list_documents() == [batch_b.tasks[0].document_id]
     assert app.storage.user_paths(user_a).root != app.storage.user_paths(user_b).root
     path_a = app.storage.document_path(user_a, batch_a.tasks[0].document_id, ".md")
     path_b = app.storage.document_path(user_b, batch_b.tasks[0].document_id, ".md")
@@ -287,15 +284,11 @@ def test_restart_recovers_running_task_with_staged_file_and_completes(tmp_path):
     assert claimed is not None and claimed.status == "running"
     recovered_repository, restarted = app.restarted_pool()
 
-    assert recovered_repository.recover_running(app.storage, now=app.clock.iso()) == 1
-    recovered = recovered_repository.get_task(user_id, claimed.task_id)
-    assert recovered is not None
-    assert (recovered.status, recovered.error_code) == (
-        "queued", "process_interrupted",
-    )
-
     restarted.start()
     try:
+        assert recovered_repository.recovery_results == [
+            ("queued", "process_interrupted")
+        ]
         assert FakeAssistant.completed.wait(timeout=5)
     finally:
         restarted.stop()
@@ -311,10 +304,15 @@ def test_restart_marks_missing_staged_source_failed(tmp_path):
     claimed = app.repository.claim_next(set(), now=app.clock.iso())
     assert claimed is not None
     (app.storage.user_paths(user_id).root / claimed.staged_relative_path).unlink()
-    _, restarted = app.restarted_pool()
+    recovered_repository, restarted = app.restarted_pool()
 
     restarted.start()
-    restarted.stop()
+    try:
+        assert recovered_repository.recovery_results == [
+            ("failed", "staged_file_missing")
+        ]
+    finally:
+        restarted.stop()
 
     task = _task(app, user_id, batch.batch_id)
     assert task.status == "failed"
@@ -364,16 +362,28 @@ def test_four_transient_attempts_fail_then_batch_retry_resets_automatic_count(tm
     ]
 
 
-def test_logout_does_not_cancel_claimed_background_import(tmp_path):
+def test_logout_does_not_cancel_running_background_import(tmp_path):
     app = OfflineImportApp(tmp_path)
     token = app.sessions.register("UserA", "correct horse battery")
     user_id = app.sessions.get_session(token).user_id
+    runtime = app.sessions.get_session(token).runtime
     batch = app.service.submit_batch(token, [app.upload("logout.md", b"A")])
-    claimed = app.repository.claim_next(set(), now=app.clock.iso())
-    assert claimed is not None
+    FakeAssistant.block = True
+    app.pool.start()
+    try:
+        assert FakeAssistant.entered.wait(timeout=5)
+        assert runtime.active_background_count == 1
 
-    app.sessions.logout(token)
-    app.pool.runner.run(claimed)
+        app.sessions.logout(token)
+
+        assert app.sessions.runtime_registry.has_runtime(user_id) is True
+        assert runtime.active_session_count == 0
+        assert runtime.active_background_count == 1
+        FakeAssistant.release.set()
+        assert FakeAssistant.completed.wait(timeout=5)
+    finally:
+        FakeAssistant.release.set()
+        app.pool.stop()
 
     assert _task(app, user_id, batch.batch_id).status == "succeeded"
     assert app.sessions.runtime_registry.has_runtime(user_id) is False
