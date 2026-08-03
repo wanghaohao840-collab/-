@@ -116,13 +116,39 @@ class UserStorage:
         recorded = Path(recorded_relative_path)
         if recorded.is_absolute() or recorded != expected_relative:
             raise ValueError("Staged import path does not match its task")
-        expected = self.assert_within_user(
-            normalized_user_id, root / expected_relative
-        )
-        resolved = self.assert_within_user(normalized_user_id, root / recorded)
+        imports = root / "imports"
+        batch_dir = imports / normalized_batch_id
+        target = batch_dir / f"{normalized_task_id}{normalized_suffix}"
+        for component in (imports, batch_dir, target):
+            self._reject_staged_reparse_point(component)
+
+        real_imports = imports.resolve(strict=False)
+        real_batch_dir = batch_dir.resolve(strict=False)
+        expected_real_batch_dir = real_imports / normalized_batch_id
+        if real_batch_dir != expected_real_batch_dir:
+            raise UnsafePathError("Staged import batch escapes imports root")
+
+        resolved = target.resolve(strict=False)
+        expected = real_batch_dir / f"{normalized_task_id}{normalized_suffix}"
         if resolved != expected:
             raise ValueError("Staged import path does not match its task")
+        inside_imports = resolved == real_imports or real_imports in resolved.parents
+        inside_batch = (
+            resolved == real_batch_dir or real_batch_dir in resolved.parents
+        )
+        if not inside_imports or not inside_batch:
+            raise UnsafePathError("Staged import path escapes its batch directory")
         return resolved
+
+    @staticmethod
+    def _reject_staged_reparse_point(path: Path) -> None:
+        """Reject link-like staging components before resolving them."""
+
+        if not (path.exists() or path.is_symlink()):
+            return
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        if path.is_symlink() or attributes & 0x400:
+            raise UnsafePathError("Staged import path contains a link or reparse point")
 
     def assert_within_user(self, user_id: str, path: Path | str) -> Path:
         root = self.user_paths(user_id).root.resolve()
