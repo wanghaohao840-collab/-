@@ -328,9 +328,10 @@ class ImportWorkerPool:
         scheduler.start()
 
     def stop(self, wait: bool = True) -> None:
-        self._stop_event.set()
-        self.notify()
         with self._condition:
+            self._stop_event.set()
+            self._notify_generation += 1
+            self._condition.notify_all()
             scheduler = self._scheduler_thread
             workers = list(self._worker_threads)
         if wait and scheduler is not None:
@@ -369,9 +370,21 @@ class ImportWorkerPool:
                         )
                     continue
                 with self._condition:
-                    self._blocked_user_ids.add(task.user_id)
-                    self._active_count += 1
-                self._task_queue.put(task)
+                    if self._stop_event.is_set():
+                        release_claim = True
+                    else:
+                        release_claim = False
+                        self._blocked_user_ids.add(task.user_id)
+                        self._active_count += 1
+                        self._task_queue.put(task)
+                if release_claim:
+                    try:
+                        self.repository.release_claim(task.user_id, task.task_id)
+                    except Exception:
+                        logger.exception(
+                            "import scheduler could not release a shutdown claim"
+                        )
+                    break
         finally:
             for _ in self._worker_threads:
                 self._task_queue.put(_STOP)

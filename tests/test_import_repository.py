@@ -51,6 +51,54 @@ def test_create_claim_and_complete_task(tmp_path):
     assert repo.get_batch(user_id, task.batch_id).succeeded == 1
 
 
+def test_release_claim_requeues_without_counting_an_attempt(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task], now="2026-07-30T00:00:00Z")
+    claimed = repo.claim_next(set(), now="2026-07-30T00:00:01Z")
+    repo.update_progress(
+        user_id,
+        claimed.task_id,
+        "embedding",
+        70,
+        now="2026-07-30T00:00:02Z",
+    )
+
+    released = repo.release_claim(
+        user_id, claimed.task_id, now="2026-07-30T00:00:03Z"
+    )
+
+    assert released.status == "queued"
+    assert released.stage == "queued"
+    assert released.progress == 0
+    assert released.started_at is None
+    assert released.next_attempt_at is None
+    assert released.total_attempt_count == 0
+    assert released.updated_at == "2026-07-30T00:00:03Z"
+    assert repo.get_batch(user_id, task.batch_id).updated_at == released.updated_at
+
+
+def test_release_claim_is_user_scoped_and_requires_running_state(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    other_user = AuthService(repo.db_path).register(
+        "release-other-user", "correct horse battery"
+    ).id
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+
+    with pytest.raises(InvalidImportTransition):
+        repo.release_claim(user_id, task.task_id)
+
+    repo.claim_next(set())
+    with pytest.raises(KeyError):
+        repo.release_claim(other_user, task.task_id)
+    assert repo.get_task(user_id, task.task_id).status == "running"
+
+    repo.release_claim(user_id, task.task_id)
+    with pytest.raises(InvalidImportTransition):
+        repo.release_claim(user_id, task.task_id)
+
+
 def test_invalid_succeeded_to_queued_transition_is_rejected(tmp_path):
     repo, user_id = make_repo(tmp_path)
     task = make_task(user_id)

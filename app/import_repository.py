@@ -182,6 +182,24 @@ class ImportTaskRepository:
             (stage, progress, now or _utc_now()),
         )
 
+    def release_claim(
+        self, user_id: str, task_id: str, now: str | None = None
+    ) -> ImportTaskRecord:
+        """Requeue a claimed task when its attempt never started."""
+        return self._transition_update(
+            user_id,
+            task_id,
+            "status = 'running'",
+            """status = 'queued', stage = 'queued', progress = 0,
+               next_attempt_at = null, started_at = null,
+               total_attempt_count = case
+                   when total_attempt_count > 0 then total_attempt_count - 1
+                   else 0
+               end,
+               updated_at = ?""",
+            (now or _utc_now(),),
+        )
+
     def mark_succeeded(
         self, user_id: str, task_id: str, now: str | None = None
     ) -> ImportTaskRecord:

@@ -458,3 +458,69 @@ def test_worker_pool_notify_wakes_scheduler_promptly(tmp_path):
     finally:
         blocking_runner.release.set()
         pool.stop(wait=True)
+
+
+def test_worker_pool_requeues_claim_returned_after_stop_begins(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    storage = UserStorage(tmp_path / "data")
+    repository = ImportTaskRepository(db_path)
+    user_id = AuthService(db_path).register(
+        "shutdown-race-user", "correct horse battery"
+    ).id
+    batch_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    staged = storage.staged_import_path(user_id, batch_id, task_id, ".md")
+    staged.write_bytes(b"x")
+    repository.create_batch(
+        user_id,
+        [
+            ImportTaskCreate(
+                task_id=task_id,
+                batch_id=batch_id,
+                user_id=user_id,
+                document_id=str(uuid.uuid4()),
+                original_name="shutdown.md",
+                file_suffix=".md",
+                size_bytes=1,
+                staged_relative_path=str(
+                    staged.relative_to(storage.user_paths(user_id).root)
+                ),
+            )
+        ],
+    )
+    claim_entered = threading.Event()
+    allow_claim = threading.Event()
+    original_claim_next = repository.claim_next
+
+    def blocked_claim_next(blocked_user_ids, *args, **kwargs):
+        claim_entered.set()
+        assert allow_claim.wait(timeout=3)
+        return original_claim_next(blocked_user_ids, *args, **kwargs)
+
+    repository.claim_next = blocked_claim_next
+    blocking_runner = BlockingRunner()
+    pool = ImportWorkerPool(
+        repository,
+        FakeRuntimeRegistry(storage),
+        storage,
+        runner=blocking_runner,
+        worker_count=1,
+    )
+
+    pool.start()
+    assert claim_entered.wait(timeout=3)
+    pool.stop(wait=False)
+    allow_claim.set()
+    assert pool._scheduler_thread is not None
+    pool._scheduler_thread.join(timeout=3)
+    blocking_runner.release.set()
+    pool.stop(wait=True)
+
+    task = repository.get_task(user_id, task_id)
+    assert blocking_runner.started == []
+    assert task.status == "queued"
+    assert task.stage == "queued"
+    assert task.progress == 0
+    assert task.started_at is None
+    assert task.total_attempt_count == 0
