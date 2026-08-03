@@ -64,6 +64,14 @@ _SECRET_QUERY_KEYS = {
     "secret",
     "client_secret",
 }
+_SECRET_KEY_PATTERN = "|".join(
+    re.escape(key) for key in sorted(_SECRET_QUERY_KEYS, key=len, reverse=True)
+)
+_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
+    rf"((?:[\"']?(?:{_SECRET_KEY_PATTERN})[\"']?)\s*[=:]\s*)"
+    r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*')",
+    flags=re.IGNORECASE,
+)
 
 
 def sanitize_qdrant_url(url: str) -> str:
@@ -98,6 +106,7 @@ def sanitize_error_message(message: object, secrets: tuple[str, ...] = ()) -> st
         flags=re.IGNORECASE,
     )
     text = re.sub(r"\b(Bearer\s+)([^\s,;]+)", r"\1***", text, flags=re.IGNORECASE)
+    text = _QUOTED_SECRET_ASSIGNMENT_RE.sub(r"\1***", text)
     for key in _SECRET_QUERY_KEYS:
         text = re.sub(
             rf"((?:[\"']?{re.escape(key)}[\"']?)\s*[=:]\s*[\"']?)([^\"'&,;\s}}\]]+)",
