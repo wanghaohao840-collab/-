@@ -78,8 +78,8 @@ class FakeImportService:
         self.calls.append(("get_batch", token, batch_id))
         return _summary()
 
-    def retry_task(self, token, task_id):
-        self.calls.append(("retry_task", token, task_id))
+    def retry_task(self, token, task_id, expected_batch_id=None):
+        self.calls.append(("retry_task", token, task_id, expected_batch_id))
         return _summary(_task(status="queued", stage="queued", progress=0))
 
     def retry_failed_in_batch(self, token, batch_id):
@@ -167,9 +167,12 @@ def test_retry_handler_passes_only_current_session_token(monkeypatch):
     monkeypatch.setattr(module, "import_service", service)
     monkeypatch.setattr(module, "_require_session", lambda token: object())
 
-    module.retry_import_task("token-a", "task-a")
+    result = module.retry_import_task(
+        "token-a", "batch-a", ("batch-a", "task-a")
+    )
 
-    assert service.calls == [("retry_task", "token-a", "task-a")]
+    assert service.calls == [("retry_task", "token-a", "task-a", "batch-a")]
+    assert result[-1] == ""
 
 
 def test_selected_row_resolves_to_server_owned_task_id(monkeypatch):
@@ -179,13 +182,13 @@ def test_selected_row_resolves_to_server_owned_task_id(monkeypatch):
     monkeypatch.setattr(module, "import_service", service)
     monkeypatch.setattr(module, "_require_session", lambda token: object())
 
-    task_id = module.select_import_task(
+    selection = module.select_import_task(
         "token-a",
         "batch-a",
         SimpleNamespace(index=(0, 0)),
     )
 
-    assert task_id == "task-a"
+    assert selection == ("batch-a", "task-a")
     assert service.calls == [("get_batch", "token-a", "batch-a")]
 
 
@@ -209,6 +212,37 @@ def test_plain_module_import_creates_no_data_or_workers(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "Blocks"
     assert not data_root.exists()
+
+
+def test_supported_launch_stops_real_workers_before_process_exit(tmp_path):
+    data_root = tmp_path / "launch-data"
+    environment = os.environ | {"PDF_ASSISTANT_DATA_DIR": str(data_root)}
+    code = """
+import threading
+import ui.gradio_app as app
+
+class NoServerDemo:
+    def launch(self, **_kwargs):
+        assert any(thread.name == "import-scheduler" for thread in threading.enumerate())
+        print("launch-returning", flush=True)
+
+app.demo = NoServerDemo()
+app.launch_app()
+assert not any(thread.name.startswith("import-") for thread in threading.enumerate())
+print("launch-finished", flush=True)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["launch-returning", "launch-finished"]
 
 
 def test_initialize_services_is_idempotent_without_starting_workers(monkeypatch):
@@ -270,8 +304,9 @@ def test_submit_batch_id_is_bound_to_hidden_state():
         if block_fn.fn is module.submit_import_batch
     )
 
-    assert len(binding.outputs) == 4
+    assert len(binding.outputs) == 5
     assert binding.outputs[0].__class__.__name__ == "State"
+    assert binding.outputs[-1].__class__.__name__ == "State"
 
 
 def test_empty_poll_does_not_query_service(monkeypatch):
@@ -280,14 +315,18 @@ def test_empty_poll_does_not_query_service(monkeypatch):
     service = FakeImportService()
     monkeypatch.setattr(module, "import_service", service)
 
-    assert module.refresh_import_batch("", "batch-a") == ("", [])
+    assert module.refresh_import_batch("", "batch-a", ("batch-a", "task-a")) == (
+        "",
+        [],
+        "",
+    )
     assert service.calls == []
 
 
 @pytest.mark.parametrize(
     "handler,args",
     [
-        ("refresh_import_batch", ("token-a", "")),
+        ("refresh_import_batch", ("token-a", "", ("batch-a", "task-a"))),
         (
             "select_import_task",
             ("token-a", "", SimpleNamespace(index=(0, 0))),
@@ -304,7 +343,7 @@ def test_missing_batch_authenticates_nonblank_token_without_query(
     monkeypatch.setattr(module, "import_service", service)
     monkeypatch.setattr(module, "_require_session", lambda token: checked.append(token))
 
-    assert getattr(module, handler)(*args) in [("", []), ""]
+    assert getattr(module, handler)(*args) in [("", [], ""), ""]
     assert checked == ["token-a"]
     assert service.calls == []
 
@@ -315,11 +354,12 @@ def test_empty_batch_list_refresh_does_not_query_service(monkeypatch):
     service = FakeImportService()
     monkeypatch.setattr(module, "import_service", service)
 
-    update, summary, rows = module.refresh_import_batches("")
+    update, summary, rows, selection = module.refresh_import_batches("")
 
     assert update == gr.update(choices=[], value=None)
     assert summary == ""
     assert rows == []
+    assert selection == ""
     assert service.calls == []
 
 
@@ -375,9 +415,80 @@ def test_batch_refresh_is_authenticated_and_user_scoped(monkeypatch):
     monkeypatch.setattr(module, "import_service", service)
     monkeypatch.setattr(module, "_require_session", lambda token: object())
 
-    update, text, rows = module.refresh_import_batches("token-a")
+    update, text, rows, selection = module.refresh_import_batches("token-a")
 
     assert update["value"] == "batch-a"
     assert "总数" in text
     assert rows[0][0] == "notes.md"
+    assert selection == ""
     assert service.calls == [("list_batches", "token-a", 50)]
+
+
+def test_timer_refresh_keeps_only_selection_tied_to_visible_failed_task(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    kept = module.refresh_import_batch(
+        "token-a", "batch-a", ("batch-a", "task-a")
+    )
+    stale = module.refresh_import_batch(
+        "token-a", "batch-a", ("batch-b", "task-a")
+    )
+
+    assert kept[-1] == ("batch-a", "task-a")
+    assert stale[-1] == ""
+
+
+def test_retry_rejects_stale_selection_from_another_batch(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    with pytest.raises(gr.Error, match="visible batch"):
+        module.retry_import_task("token-a", "batch-b", ("batch-a", "task-a"))
+
+    assert service.calls == []
+
+
+def test_batch_retry_clears_selected_task(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    result = module.retry_import_batch_failures("token-a", "batch-a")
+
+    assert result[-1] == ""
+
+
+def test_batch_table_refresh_bindings_update_selection_state():
+    import ui.gradio_app as module
+
+    refresh_bindings = [
+        block_fn
+        for block_fn in module.demo.fns.values()
+        if block_fn.fn in {module.refresh_import_batch, module.refresh_import_batches}
+    ]
+    retry_bindings = [
+        block_fn
+        for block_fn in module.demo.fns.values()
+        if block_fn.fn
+        in {module.retry_import_task, module.retry_import_batch_failures}
+    ]
+
+    assert refresh_bindings
+    assert retry_bindings
+    assert all(
+        binding.outputs[-1].__class__.__name__ == "State"
+        for binding in refresh_bindings
+    )
+    assert all(
+        binding.outputs[-1].__class__.__name__ == "State"
+        for binding in retry_bindings
+    )

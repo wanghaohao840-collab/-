@@ -861,10 +861,24 @@ class PDFLearningAssistant:
             return "❌ 当前没有选择 PDF，无法删除"
 
         document_id = self.current_document_id
-        result = self._delete_document_coordinated(document_id)
-        self.current_document_id = None
-        self.current_document = None
-        return result
+        runtime = getattr(self, "runtime", None)
+        runtime_lock = getattr(runtime, "lock", None)
+        with runtime_lock or self._write_lock:
+            import_task_service = getattr(runtime, "import_task_service", None)
+            active_for_document = getattr(
+                import_task_service, "has_active_task_for_document", None
+            )
+            if callable(active_for_document) and active_for_document(
+                self.user_id, document_id
+            ):
+                return (
+                    "Cannot delete this document while its import is active; "
+                    "wait for it to finish."
+                )
+            result = self._delete_document_coordinated(document_id)
+            self.current_document_id = None
+            self.current_document = None
+            return result
 
     def clear_all_documents(self) -> str:
         """清空全部 PDF：清空 RAG 知识库 + 清理学习历史中的文档和问答记录 + 重置当前 PDF"""

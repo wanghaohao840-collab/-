@@ -69,7 +69,9 @@ def _require_assistant(session_token):
     if not session_token:
         raise gr.Error("Please log in first")
     if session_registry is None:
-        raise gr.Error("Application services are not initialized; please log in again")
+        raise gr.Error(
+            "Please log in again; application services are not initialized"
+        )
     try:
         return session_registry.get_assistant(session_token)
     except InvalidSessionError as exc:
@@ -80,7 +82,9 @@ def _require_session(session_token):
     if not session_token:
         raise gr.Error("Please log in first")
     if session_registry is None:
-        raise gr.Error("Application services are not initialized; please log in again")
+        raise gr.Error(
+            "Please log in again; application services are not initialized"
+        )
     try:
         return session_registry.get_session(session_token)
     except InvalidSessionError as exc:
@@ -293,16 +297,22 @@ def submit_import_batch(session_token, files, progress=gr.Progress()):
         )
     except gr.Error:
         raise
-    return summary.batch_id, format_batch_summary(summary), format_task_table(summary), document_update
+    return (
+        summary.batch_id,
+        format_batch_summary(summary),
+        format_task_table(summary),
+        document_update,
+        "",
+    )
 
 
 def refresh_import_batches(session_token):
     if not session_token:
-        return gr.update(choices=[], value=None), "", []
+        return gr.update(choices=[], value=None), "", [], ""
     _require_session(session_token)
     batches = import_service.list_batches(session_token, limit=50)
     if not batches:
-        return gr.update(choices=[], value=None), "", []
+        return gr.update(choices=[], value=None), "", [], ""
     selected = batches[0]
     return (
         gr.update(
@@ -311,6 +321,7 @@ def refresh_import_batches(session_token):
         ),
         format_batch_summary(selected),
         format_task_table(selected),
+        "",
     )
 
 
@@ -318,12 +329,12 @@ def clear_import_ui():
     return gr.update(choices=[], value=None), "", [], ""
 
 
-def refresh_import_batch(session_token, batch_id):
+def refresh_import_batch(session_token, batch_id, selected_task=""):
     if not session_token:
-        return "", []
+        return "", [], ""
     _require_session(session_token)
     if not batch_id:
-        return "", []
+        return "", [], ""
     try:
         summary = import_service.get_batch(session_token, batch_id)
     except KeyError as exc:
@@ -331,6 +342,7 @@ def refresh_import_batch(session_token, batch_id):
     return (
         format_batch_summary(summary),
         format_task_table(summary),
+        _retain_import_task_selection(summary, batch_id, selected_task),
     )
 
 
@@ -350,18 +362,24 @@ def select_import_task(session_token, batch_id, evt: gr.SelectData):
     if not isinstance(row_index, int) or not 0 <= row_index < len(summary.tasks):
         return ""
     task = summary.tasks[row_index]
-    return task.task_id if task.status == "failed" else ""
+    return (batch_id, task.task_id) if task.status == "failed" else ""
 
 
-def retry_import_task(session_token, task_id):
+def retry_import_task(session_token, batch_id, selected_task=""):
     _require_session(session_token)
-    if not task_id:
+    selection = _import_task_selection(selected_task)
+    if selection is None:
         raise gr.Error("Please select a failed task")
+    selected_batch_id, task_id = selection
+    if not batch_id or selected_batch_id != batch_id:
+        raise gr.Error("Selected task does not belong to the visible batch")
     try:
-        summary = import_service.retry_task(session_token, task_id)
+        summary = import_service.retry_task(
+            session_token, task_id, expected_batch_id=batch_id
+        )
     except (ValueError, KeyError) as exc:
         raise gr.Error(str(exc))
-    return format_batch_summary(summary), format_task_table(summary)
+    return format_batch_summary(summary), format_task_table(summary), ""
 
 
 def retry_import_batch_failures(session_token, batch_id):
@@ -372,7 +390,31 @@ def retry_import_batch_failures(session_token, batch_id):
         summary = import_service.retry_failed_in_batch(session_token, batch_id)
     except (ValueError, KeyError) as exc:
         raise gr.Error(str(exc))
-    return format_batch_summary(summary), format_task_table(summary)
+    return format_batch_summary(summary), format_task_table(summary), ""
+
+
+def _import_task_selection(value):
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    batch_id, task_id = value
+    if not isinstance(batch_id, str) or not isinstance(task_id, str):
+        return None
+    if not batch_id or not task_id:
+        return None
+    return batch_id, task_id
+
+
+def _retain_import_task_selection(summary, batch_id, selected_task):
+    selection = _import_task_selection(selected_task)
+    if selection is None or selection[0] != batch_id:
+        return ""
+    selected_task_id = selection[1]
+    if any(
+        task.task_id == selected_task_id and task.status == "failed"
+        for task in summary.tasks
+    ):
+        return selection
+    return ""
 
 
 def refresh_documents(session_token):
@@ -872,11 +914,6 @@ def restore_memory(session_token, backup_id):
     except (ValueError, FileNotFoundError) as exc:
         return f"❌ Invalid backup: {exc}"
     return f"{'✅' if result.success else '❌'} {result.message}"
-
-if __name__ == "__main__":
-    initialize_app_services()
-    start_import_workers()
-
 
 with gr.Blocks(title="文档 智能学习助手") as demo:
     session_token = gr.State("")
@@ -1382,7 +1419,12 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         ).then(
             fn=refresh_import_batches,
             inputs=session_token,
-            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            outputs=[
+                import_batch_dropdown,
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+            ],
             queue=False,
         )
 
@@ -1393,7 +1435,12 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         ).then(
             fn=refresh_import_batches,
             inputs=session_token,
-            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            outputs=[
+                import_batch_dropdown,
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+            ],
             queue=False,
         )
 
@@ -1421,30 +1468,49 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 import_summary,
                 import_tasks,
                 doc_dropdown_ask,
+                selected_import_task_id,
             ]
         ).then(
             fn=refresh_import_batches,
             inputs=session_token,
-            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            outputs=[
+                import_batch_dropdown,
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+            ],
             queue=False,
         )
 
         refresh_import_btn.click(
             fn=refresh_import_batches,
             inputs=session_token,
-            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            outputs=[
+                import_batch_dropdown,
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+            ],
             queue=False,
         )
         import_batch_dropdown.change(
             fn=refresh_import_batch,
-            inputs=[session_token, import_batch_dropdown],
-            outputs=[import_summary, import_tasks],
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                selected_import_task_id,
+            ],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
             queue=False,
         )
         import_timer.tick(
             fn=refresh_import_batch,
-            inputs=[session_token, import_batch_dropdown],
-            outputs=[import_summary, import_tasks],
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                selected_import_task_id,
+            ],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
             queue=False,
             show_progress="hidden",
         )
@@ -1456,15 +1522,31 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         )
         retry_selected_btn.click(
             fn=retry_import_task,
-            inputs=[session_token, selected_import_task_id],
-            outputs=[import_summary, import_tasks],
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                selected_import_task_id,
+            ],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
         )
         retry_batch_btn.click(
             fn=retry_import_batch_failures,
             inputs=[session_token, import_batch_dropdown],
-            outputs=[import_summary, import_tasks],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
         )
 
 
+def launch_app() -> None:
+    """Run the supported script lifecycle and always stop import workers."""
+
+    initialize_app_services()
+    try:
+        start_import_workers()
+        demo.launch(**load_launch_config().as_gradio_kwargs())
+    finally:
+        if import_worker_pool is not None:
+            import_worker_pool.stop(wait=True)
+
+
 if __name__ == "__main__":
-    demo.launch(**load_launch_config().as_gradio_kwargs())
+    launch_app()

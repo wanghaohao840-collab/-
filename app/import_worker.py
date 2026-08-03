@@ -204,19 +204,13 @@ class ImportTaskRunner:
                 self.runtime_registry.release_background(task.user_id)
 
     def _resolve_staged_path(self, task: ImportTaskRecord) -> Path:
-        recorded = self.storage.assert_within_user(
-            task.user_id,
-            self.storage.user_paths(task.user_id).root / task.staged_relative_path,
-        )
-        expected = self.storage.staged_import_path(
+        return self.storage.resolve_staged_import_path(
             task.user_id,
             task.batch_id,
             task.task_id,
             task.file_suffix,
+            task.staged_relative_path,
         )
-        if recorded != expected:
-            raise ValueError("Staged import path does not match its task")
-        return recorded
 
     @staticmethod
     def _remove_attempt_files(*paths: Path | None) -> None:
@@ -305,6 +299,7 @@ class ImportWorkerPool:
             ):
                 return
             self.repository.recover_running(self.storage)
+            self.repository.cleanup_succeeded_staging(self.storage)
             self._stop_event.clear()
             self._blocked_user_ids.clear()
             self._active_count = 0

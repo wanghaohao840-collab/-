@@ -221,6 +221,23 @@ def test_user_scoped_reads_and_failed_retry_reset_retry_state(tmp_path):
     assert retried.error_code is None
 
 
+def test_active_document_lookup_is_user_and_document_scoped(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    other_user = AuthService(repo.db_path).register(
+        "active-document-other", "correct horse battery"
+    ).id
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+
+    assert repo.has_active_task_for_document(user_id, task.document_id) is True
+    assert repo.has_active_task_for_document(other_user, task.document_id) is False
+    assert repo.has_active_task_for_document(user_id, str(uuid.uuid4())) is False
+
+    repo.claim_next(set())
+    repo.mark_succeeded(user_id, task.task_id)
+    assert repo.has_active_task_for_document(user_id, task.document_id) is False
+
+
 def test_recover_running_requeues_existing_stage_and_fails_missing_stage(tmp_path):
     repo, user_id = make_repo(tmp_path)
     staged_task = make_task(user_id, task_id="00000000-0000-0000-0000-000000000001")
@@ -266,3 +283,20 @@ def test_storage_rejects_non_uuid_import_identifiers(tmp_path):
 
     with pytest.raises(ValueError, match="UUID"):
         storage.import_batch_dir("not-a-uuid", str(uuid.uuid4()))
+
+
+def test_storage_rejects_staged_path_recorded_for_another_task(tmp_path):
+    storage = UserStorage(tmp_path / "data")
+    user_id, batch_id, task_id, other_task_id = (
+        str(uuid.uuid4()) for _ in range(4)
+    )
+    other = storage.staged_import_path(user_id, batch_id, other_task_id, ".md")
+
+    with pytest.raises(ValueError, match="does not match"):
+        storage.resolve_staged_import_path(
+            user_id,
+            batch_id,
+            task_id,
+            ".md",
+            str(other.relative_to(storage.user_paths(user_id).root)),
+        )

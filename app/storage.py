@@ -93,6 +93,37 @@ class UserStorage:
         )
         return self.assert_within_user(normalized_user_id, target)
 
+    def resolve_staged_import_path(
+        self,
+        user_id: str,
+        batch_id: str,
+        task_id: str,
+        suffix: str,
+        recorded_relative_path: str,
+    ) -> Path:
+        """Validate a persisted staging path without creating directories."""
+
+        normalized_user_id = _uuid_string(user_id, "user_id")
+        normalized_batch_id = _uuid_string(batch_id, "batch_id")
+        normalized_task_id = _uuid_string(task_id, "task_id")
+        normalized_suffix = self.validate_suffix(suffix)
+        root = self.user_paths(normalized_user_id).root
+        expected_relative = (
+            Path("imports")
+            / normalized_batch_id
+            / f"{normalized_task_id}{normalized_suffix}"
+        )
+        recorded = Path(recorded_relative_path)
+        if recorded.is_absolute() or recorded != expected_relative:
+            raise ValueError("Staged import path does not match its task")
+        expected = self.assert_within_user(
+            normalized_user_id, root / expected_relative
+        )
+        resolved = self.assert_within_user(normalized_user_id, root / recorded)
+        if resolved != expected:
+            raise ValueError("Staged import path does not match its task")
+        return resolved
+
     def assert_within_user(self, user_id: str, path: Path | str) -> Path:
         root = self.user_paths(user_id).root.resolve()
         resolved = Path(path).resolve()

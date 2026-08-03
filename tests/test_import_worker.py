@@ -20,6 +20,7 @@ from app.import_worker import (
     classify_import_failure,
 )
 from app.storage import UserStorage
+from assistants.pdf_learning_assistant import PDFLearningAssistant
 from hello_agents.memory.rag.errors import (
     RAGAuthenticationError,
     RAGConfigError,
@@ -234,6 +235,60 @@ def test_staged_cleanup_failure_preserves_success_and_staged_copy(
     assert formal.exists()
 
 
+def test_pool_start_reconciles_only_valid_succeeded_staging(tmp_path, monkeypatch):
+    runner, repository, storage, runtimes, clock, user_id, task_id = make_runner(
+        tmp_path
+    )
+    succeeded = claim(repository, clock)
+    succeeded_staged = (
+        storage.user_paths(user_id).root / succeeded.staged_relative_path
+    )
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_staged_file",
+        lambda _path: (_ for _ in ()).throw(OSError("staging volume unavailable")),
+    )
+    runner.run(succeeded)
+    assert repository.get_task(user_id, task_id).status == "succeeded"
+    assert succeeded_staged.exists()
+
+    failed_batch_id = str(uuid.uuid4())
+    failed_task_id = str(uuid.uuid4())
+    failed_staged = storage.staged_import_path(
+        user_id, failed_batch_id, failed_task_id, ".md"
+    )
+    failed_staged.write_bytes(b"retry me")
+    repository.create_batch(
+        user_id,
+        [
+            ImportTaskCreate(
+                task_id=failed_task_id,
+                batch_id=failed_batch_id,
+                user_id=user_id,
+                document_id=str(uuid.uuid4()),
+                original_name="failed.md",
+                file_suffix=".md",
+                size_bytes=8,
+                staged_relative_path=str(
+                    failed_staged.relative_to(storage.user_paths(user_id).root)
+                ),
+            )
+        ],
+    )
+    failed = repository.claim_next(set())
+    assert failed is not None
+    repository.mark_failed(user_id, failed.task_id, "document_invalid", "bad")
+
+    restarted = ImportWorkerPool(
+        repository, runtimes, storage, runner=BlockingRunner(), worker_count=1
+    )
+    restarted.start()
+    restarted.stop(wait=True)
+
+    assert not succeeded_staged.exists()
+    assert failed_staged.read_bytes() == b"retry me"
+
+
 def test_failure_removes_formal_file_but_preserves_staged_copy(tmp_path):
     runner, repository, storage, _, clock, user_id, task_id = make_runner(
         tmp_path, failures=[ValueError("corrupt document")]
@@ -372,6 +427,20 @@ class TerminalThenCrashRunner:
         raise RuntimeError("crashed after success")
 
 
+class ActiveDocumentImportService:
+    def __init__(self, repository, task_id):
+        self.repository = repository
+        self.task_id = task_id
+
+    def has_active_task_for_document(self, user_id, document_id):
+        task = self.repository.get_task(user_id, self.task_id)
+        return task is not None and task.document_id == document_id and task.status in {
+            "queued",
+            "running",
+            "retry_wait",
+        }
+
+
 def wait_for(predicate, timeout=3):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -498,6 +567,70 @@ def test_worker_pool_recovers_first_terminal_write_failure_and_runs_next_task(
     assert failed_once is True
     assert repository.get_task(user_id, first_task_id).status == "failed"
     assert repository.get_task(user_id, second_task_id).status == "succeeded"
+
+
+def test_two_session_delete_during_import_commit_is_refused(tmp_path, monkeypatch):
+    runner, repository, storage, runtimes, clock, user_id, task_id = make_runner(
+        tmp_path
+    )
+    claimed = claim(repository, clock)
+    shared_runtime = SimpleNamespace(
+        paths=storage.ensure_user_dirs(user_id),
+        lock=threading.RLock(),
+        memory_tool=SimpleNamespace(),
+        rag_tool=SimpleNamespace(),
+        history=SimpleNamespace(),
+        reports=SimpleNamespace(),
+        coordinator=SimpleNamespace(),
+    )
+    shared_runtime.import_task_service = ActiveDocumentImportService(
+        repository, task_id
+    )
+    monkeypatch.setattr(
+        runtimes, "acquire_background", lambda _user_id: shared_runtime
+    )
+    committing = threading.Event()
+    allow_success = threading.Event()
+    original_update_progress = repository.update_progress
+
+    def pause_before_success(*args, **kwargs):
+        result = original_update_progress(*args, **kwargs)
+        if args[2] == "committing":
+            committing.set()
+            assert allow_success.wait(timeout=3)
+        return result
+
+    monkeypatch.setattr(repository, "update_progress", pause_before_success)
+    formal = storage.document_path(
+        user_id, claimed.document_id, claimed.file_suffix
+    )
+    import_thread = threading.Thread(target=runner.run, args=(claimed,))
+    import_thread.start()
+    assert committing.wait(timeout=3)
+
+    foreground = object.__new__(PDFLearningAssistant)
+    foreground.user_id = user_id
+    foreground.runtime = shared_runtime
+    foreground._lock = shared_runtime.lock
+    foreground.current_document_id = claimed.document_id
+    foreground.current_document = str(formal)
+
+    def delete_formal(_document_id):
+        formal.unlink(missing_ok=True)
+        return "deleted"
+
+    monkeypatch.setattr(foreground, "_delete_document_coordinated", delete_formal)
+    try:
+        result = foreground.delete_current_document()
+    finally:
+        allow_success.set()
+        import_thread.join(timeout=3)
+
+    assert not import_thread.is_alive()
+    assert "import is active" in result
+    assert repository.get_task(user_id, task_id).status == "succeeded"
+    assert formal.exists()
+    assert foreground.current_document_id == claimed.document_id
 
 
 def test_worker_pool_starts_four_non_daemon_workers_and_serializes_each_user(tmp_path):

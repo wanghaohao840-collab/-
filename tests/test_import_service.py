@@ -155,6 +155,27 @@ def test_succeeded_task_cannot_be_retried(tmp_path):
         service.retry_task("valid-token", result.tasks[0].task_id)
 
 
+def test_retry_task_rejects_task_outside_displayed_batch(tmp_path):
+    service, repository, _, worker, user_id, _ = make_import_service(tmp_path)
+    first = service.submit_batch(
+        "valid-token", [uploaded_file(tmp_path, "first.md", b"first")]
+    )
+    second = service.submit_batch(
+        "valid-token", [uploaded_file(tmp_path, "second.md", b"second")]
+    )
+    task = repository.claim_next(set())
+    repository.mark_failed(user_id, task.task_id, "document_invalid", "bad")
+    notifications_before = worker.notify_count
+
+    with pytest.raises(KeyError, match="displayed batch"):
+        service.retry_task(
+            "valid-token", first.tasks[0].task_id, expected_batch_id=second.batch_id
+        )
+
+    assert repository.get_task(user_id, task.task_id).status == "failed"
+    assert worker.notify_count == notifications_before
+
+
 def _attach_runtime_lock(service, user_id):
     runtime = SimpleNamespace(lock=threading.RLock())
     service.session_registry.sessions["valid-token"] = SimpleNamespace(

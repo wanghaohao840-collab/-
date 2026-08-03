@@ -340,6 +340,39 @@ class ImportTaskRepository:
                 recovered += 1
         return recovered
 
+    def cleanup_succeeded_staging(self, storage: UserStorage) -> int:
+        """Remove only staging files whose persisted succeeded task path is exact."""
+
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select id, batch_id, user_id, file_suffix, staged_relative_path
+                from import_tasks where status = 'succeeded'
+                """
+            ).fetchall()
+
+        removed = 0
+        for row in rows:
+            try:
+                staged_path = storage.resolve_staged_import_path(
+                    row["user_id"],
+                    row["batch_id"],
+                    row["id"],
+                    row["file_suffix"],
+                    row["staged_relative_path"],
+                )
+                existed = staged_path.is_file()
+                staged_path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                continue
+            if existed:
+                removed += 1
+            try:
+                staged_path.parent.rmdir()
+            except OSError:
+                pass
+        return removed
+
     def has_active_tasks(self, user_id: str) -> bool:
         with connect(self.db_path) as conn:
             row = conn.execute(
@@ -349,6 +382,19 @@ class ImportTaskRepository:
                 limit 1
                 """,
                 (user_id,),
+            ).fetchone()
+            return row is not None
+
+    def has_active_task_for_document(self, user_id: str, document_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                select 1 from import_tasks
+                where user_id = ? and document_id = ?
+                  and status in ('queued', 'running', 'retry_wait')
+                limit 1
+                """,
+                (user_id, document_id),
             ).fetchone()
             return row is not None
 

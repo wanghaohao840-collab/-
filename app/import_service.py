@@ -118,10 +118,21 @@ class ImportTaskService:
             raise KeyError("import batch was not found")
         return summary
 
-    def retry_task(self, session_token: str, task_id: str) -> ImportBatchSummary:
+    def retry_task(
+        self,
+        session_token: str,
+        task_id: str,
+        expected_batch_id: str | None = None,
+    ) -> ImportBatchSummary:
         session = self._session(session_token)
         user_id = str(session.user_id)
         with self._runtime_lock(session):
+            if expected_batch_id is not None:
+                selected = self.repository.get_task(user_id, task_id)
+                if selected is None:
+                    raise KeyError("import task was not found")
+                if selected.batch_id != expected_batch_id:
+                    raise KeyError("import task is not in the displayed batch")
             task = self.repository.retry_task(user_id, task_id)
             summary = self.repository.get_batch(user_id, task.batch_id)
         if summary is None:  # pragma: no cover - guarded by the task foreign key
@@ -145,6 +156,9 @@ class ImportTaskService:
 
     def has_active_tasks(self, user_id: str) -> bool:
         return self.repository.has_active_tasks(user_id)
+
+    def has_active_task_for_document(self, user_id: str, document_id: str) -> bool:
+        return self.repository.has_active_task_for_document(user_id, document_id)
 
     def _inspect_file(self, value: Any) -> _PendingImport:
         raw_path = getattr(value, "name", value)
