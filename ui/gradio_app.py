@@ -35,12 +35,12 @@ legacy_migration = LegacyMigrationService(
 )
 
 import_repository = ImportTaskRepository(DATA_ROOT / "app.db")
-session_registry.runtime_registry.import_task_repository = import_repository
 import_worker_pool = ImportWorkerPool(
     import_repository,
     session_registry.runtime_registry,
     session_registry.storage,
 )
+_import_workers_started = False
 import_service = ImportTaskService(
     session_registry,
     import_repository,
@@ -64,6 +64,22 @@ def _require_session(session_token):
         return session_registry.get_session(session_token)
     except InvalidSessionError as exc:
         raise gr.Error(str(exc))
+
+
+def start_import_workers() -> None:
+    """Start the script-owned import workers exactly once.
+
+    Importing this module intentionally only constructs the pool.  The
+    supported ``python ui/gradio_app.py`` entry point starts it below, after
+    the application module has loaded, and registers its matching shutdown.
+    """
+
+    global _import_workers_started
+    if _import_workers_started:
+        return
+    import_worker_pool.start()
+    atexit.register(import_worker_pool.stop)
+    _import_workers_started = True
 
 
 def _empty_dropdowns():
@@ -807,8 +823,7 @@ def restore_memory(session_token, backup_id):
     return f"{'✅' if result.success else '❌'} {result.message}"
 
 if __name__ == "__main__":
-    import_worker_pool.start()
-    atexit.register(import_worker_pool.stop)
+    start_import_workers()
 
 
 with gr.Blocks(title="文档 智能学习助手") as demo:

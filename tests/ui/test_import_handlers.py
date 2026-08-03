@@ -149,6 +149,27 @@ def test_selected_row_resolves_to_server_owned_task_id(monkeypatch):
     assert service.calls == [("get_batch", "token-a", "batch-a")]
 
 
+def test_module_import_does_not_start_background_workers():
+    import ui.gradio_app as module
+
+    assert module.import_worker_pool._worker_threads == []
+    assert module.import_worker_pool._scheduler_thread is None
+
+
+def test_script_worker_startup_is_idempotent(monkeypatch):
+    import ui.gradio_app as module
+
+    calls = []
+    monkeypatch.setattr(module, "_import_workers_started", False)
+    monkeypatch.setattr(module.import_worker_pool, "start", lambda: calls.append("start"))
+    monkeypatch.setattr(module.atexit, "register", lambda callback: calls.append(callback))
+
+    module.start_import_workers()
+    module.start_import_workers()
+
+    assert calls == ["start", module.import_worker_pool.stop]
+
+
 def test_empty_poll_does_not_query_service(monkeypatch):
     import ui.gradio_app as module
 

@@ -248,7 +248,7 @@ class TestRejectedTokenNoStateChange:
         )
 
     @pytest.mark.parametrize("name,args_fn", AUTHENTICATED_IMPORT_HANDLERS)
-    @pytest.mark.parametrize("token_kind", ["forged", "expired"])
+    @pytest.mark.parametrize("token_kind", ["missing", "forged", "expired"])
     def test_rejected_import_handler_changes_no_persistent_state(
         self, name, args_fn, token_kind, tmp_path, monkeypatch,
     ):
@@ -258,7 +258,9 @@ class TestRejectedTokenNoStateChange:
         paths = isolated.storage.ensure_user_dirs(session.user_id)
         session.assistant.add_note("unchanged", concept="authorization")
 
-        if token_kind == "forged":
+        if token_kind == "missing":
+            rejected_token = ""
+        elif token_kind == "forged":
             rejected_token = "forged-token"
         else:
             isolated.idle_timeout = timedelta(seconds=-1)
@@ -274,11 +276,18 @@ class TestRejectedTokenNoStateChange:
         before = snapshot()
         monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
 
-        _require_raises_gr_error(
-            _get_handler(name),
-            *args_fn(rejected_token),
-            match=["log out", "expired", "log in"],
-        )
+        handler = _get_handler(name)
+        args = args_fn(rejected_token)
+        if token_kind == "missing" and name in {
+            "refresh_import_batches", "refresh_import_batch", "select_import_task",
+        }:
+            handler(*args)
+        else:
+            _require_raises_gr_error(
+                handler,
+                *args,
+                match=["log out", "expired", "log in"],
+            )
 
         assert snapshot() == before
         assert not any(paths.imports.iterdir())
