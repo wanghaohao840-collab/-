@@ -22,10 +22,10 @@ Qdrant queries and new writes are canonical ISO.
 
 ## Acceptance criteria
 
-- [ ] Protocol test proves filtered scroll, vector-preserving upsert, and ISO payload.
-- [ ] Migration runs once per user per instance.
-- [ ] Real Qdrant retrieves a normalized legacy point through datetime bounds.
-- [ ] Affected and full regressions pass.
+- [x] Protocol test proves filtered scroll, vector-preserving upsert, and ISO payload.
+- [x] Migration runs once per user per instance.
+- [x] Real Qdrant retrieves a normalized legacy point through datetime bounds.
+- [x] Affected and full regressions pass.
 
 ## Verification
 
@@ -40,8 +40,8 @@ powershell -ExecutionPolicy Bypass -File scripts/run_qdrant_integration.ps1
 - Delivered: new timestamps are canonical ISO; recognized legacy timestamps
   are normalized once per user through scoped, vector-preserving scroll/upsert.
 - Verification: focused consistency suite PASS (`5 passed`); real Qdrant PASS
-  (`6 passed`); memory regression PASS (`167 passed`); complete repository
-  domains PASS (`622 passed, 6 skipped`).
+  (`6 passed`); memory/Qdrant regression PASS (`171 passed, 5 skipped`);
+  complete repository suite PASS (`664 passed, 6 skipped`).
 - Scope confirmation: other users/types and unparseable timestamps are untouched.
 - Residual risks: unparseable legacy timestamps remain outside datetime filters.
-- Commit: not committed
+- Commit: included in `26e9045`

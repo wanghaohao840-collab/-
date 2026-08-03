@@ -22,10 +22,10 @@ episode/session state unchanged.
 
 ## Acceptance criteria
 
-- [ ] Vector failure restores SQLite rows.
-- [ ] Mid-SQLite failure restores earlier deletions.
-- [ ] Local maps remain unchanged on either failure.
-- [ ] Successful forget/clear behavior remains green.
+- [x] Vector failure restores SQLite rows.
+- [x] Mid-SQLite failure restores earlier deletions.
+- [x] Local maps remain unchanged on either failure.
+- [x] Successful forget/clear behavior remains green.
 
 ## Verification
 
@@ -38,8 +38,9 @@ episode/session state unchanged.
 - Status: done
 - Delivered: snapshotted SQLite rows are restored when SQLite or vector
   cleanup fails; local episode/session maps update only after durable cleanup.
-- Verification: focused consistency suite PASS (`5 passed`); memory regression
-  PASS (`167 passed`); complete repository domains PASS (`622 passed, 6 skipped`).
+- Verification: focused consistency suite PASS (`5 passed`); memory/Qdrant
+  regression PASS (`171 passed, 5 skipped`); complete repository suite PASS
+  (`664 passed, 6 skipped`).
 - Scope confirmation: exact-ID deletion and concurrent add behavior preserved.
 - Residual risks: rollback failure is surfaced as a combined runtime error.
-- Commit: not committed
+- Commit: included in `26e9045`

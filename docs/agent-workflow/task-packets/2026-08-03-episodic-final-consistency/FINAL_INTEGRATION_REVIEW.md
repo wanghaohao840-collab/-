@@ -27,8 +27,8 @@
 
 - Focused cleanup/protocol suite: PASS (`5 passed`).
 - Real local Qdrant integration: PASS (`6 passed`, service stopped cleanly).
-- Memory regression: PASS (`167 passed`).
-- Complete repository suite by non-overlapping domains: PASS (`622 passed, 6 skipped`).
+- Memory/Qdrant regression: PASS (`171 passed, 5 skipped`).
+- Complete repository suite: PASS (`664 passed, 6 skipped`).
 - `compileall`, UI import, and `git diff --check`: PASS.
 
 ## Findings
