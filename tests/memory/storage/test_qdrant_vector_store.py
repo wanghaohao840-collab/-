@@ -1,9 +1,10 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
 
 from hello_agents.memory.rag.errors import RAGConnectionError, RAGOperationError
-from hello_agents.memory.storage.vector_store import QdrantVectorStore
+from hello_agents.memory.storage.vector_store import QdrantVectorStore, VectorRange
 
 
 class HttpError(RuntimeError):
@@ -93,7 +94,44 @@ def test_unknown_payload_index_schema_fails_before_remote_call():
     client = PayloadIndexClient()
     store = QdrantVectorStore(client=client, retry_delays=())
 
-    with pytest.raises(ValueError, match=r"published_at.*datetime"):
-        store.ensure_payload_indexes("documents", {"published_at": "datetime"})
+    with pytest.raises(ValueError, match=r"body.*text"):
+        store.ensure_payload_indexes("documents", {"body": "text"})
 
     assert client.calls == []
+
+
+def test_qdrant_payload_indexes_accept_float_and_datetime():
+    client = PayloadIndexClient()
+    store = QdrantVectorStore(client=client, retry_delays=())
+
+    store.ensure_payload_indexes(
+        "episodes",
+        {"importance": "float", "timestamp": "datetime"},
+    )
+
+    assert [call["field_name"] for call in client.calls] == [
+        "importance",
+        "timestamp",
+    ]
+    assert [str(call["field_schema"].value).lower() for call in client.calls] == [
+        "float",
+        "datetime",
+    ]
+
+
+def test_qdrant_filter_maps_numeric_and_datetime_ranges():
+    store = QdrantVectorStore(client=PayloadIndexClient(), retry_delays=())
+    start = datetime.fromisoformat("2026-06-01T00:00:00")
+    end = datetime.fromisoformat("2026-08-01T00:00:00")
+
+    query_filter = store._filter(
+        {
+            "importance": VectorRange(gte=0.5),
+            "timestamp": VectorRange(gte=start, lte=end),
+        }
+    )
+    conditions = {condition.key: condition for condition in query_filter.must}
+
+    assert conditions["importance"].range.gte == 0.5
+    assert conditions["timestamp"].range.gte == start
+    assert conditions["timestamp"].range.lte == end

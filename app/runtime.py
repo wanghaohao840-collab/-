@@ -28,6 +28,7 @@ class UserRuntime:
     recovery: RecoveryService
     active_session_count: int = 0
     active_background_count: int = 0
+    import_task_repository: object | None = None
 
     def close(self) -> None:
         close = getattr(self.rag_tool, "close", None)
@@ -44,6 +45,7 @@ class UserRuntimeRegistry:
         self.storage = storage
         self._runtimes: dict[str, UserRuntime] = {}
         self._lock = RLock()
+        self.import_task_repository: object | None = None
 
     def get_or_create(self, user_id: str) -> UserRuntime:
         with self._lock:
@@ -92,6 +94,7 @@ class UserRuntimeRegistry:
                 history=history_repo,
                 reports=ReportService(self.db_path, self.storage),
                 recovery=recovery,
+                import_task_repository=self.import_task_repository,
             )
             self._runtimes[user_id] = runtime
             return runtime

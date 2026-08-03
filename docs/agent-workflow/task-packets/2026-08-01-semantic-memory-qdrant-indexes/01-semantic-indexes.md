@@ -1,7 +1,7 @@
 ---
 id: "semantic-memory-qdrant-indexes-01"
 title: "Declare SemanticMemory Qdrant filter indexes"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: []
 base-commit: "22dd4ece9a173327cfcd74227976e92d003736e6"
@@ -168,23 +168,40 @@ from `docs/agent-workflow/README.md` and wait for packet revision.
 ## Implementation handoff
 
 - Packet: `semantic-memory-qdrant-indexes-01`
-- Status: `ready`
+- Status: `done`
 - Delivered:
-  - implementation not started
+  - SemanticMemory now declares keyword payload indexes for its active
+    `memory_type` and `user_id` Qdrant filters.
 - Files changed:
-  - none
+  - `hello_agents/memory/types/semantic.py` — declares the two indexes after
+    collection preparation.
+  - `tests/memory/test_semantic_vector_store_protocol.py` — records and asserts
+    the exact protocol call.
+  - `tests/integration/test_qdrant_document_scope.py` — verifies the real
+    Qdrant payload schema and cleans up the unique collection.
 - Interfaces added or changed:
-  - none
+  - no public interface changes; `SemanticMemory.__init__` now consumes the
+    existing `VectorStore.ensure_payload_indexes` method.
 - Acceptance evidence:
-  - [ ] pending
+  - [x] Exact in-memory declaration — focused protocol test passed.
+  - [x] Live payload schema — both fields reported `keyword`.
+  - [x] Existing semantic and vector-store behavior — focused suite passed.
+  - [x] Combined regression — memory/tool/integration and full suites passed.
 - Verification:
-  - pending
+  - `.\venv\Scripts\python.exe -m pytest tests/memory/test_semantic_vector_store_protocol.py tests/memory/test_semantic_fallback.py tests/memory/storage/test_qdrant_vector_store.py -q --basetemp=.runtime/pytest-semantic-indexes` — PASS (9 passed)
+  - `powershell -ExecutionPolicy Bypass -File scripts\run_qdrant_integration.ps1` — PASS (4 passed)
+  - `.\venv\Scripts\python.exe -m pytest tests/memory tests/tools/test_rag_tool_backend_contract.py tests/integration/test_qdrant_document_scope.py -q --basetemp=.runtime/pytest-semantic-final` — PASS (124 passed, 4 skipped)
+  - `.\venv\Scripts\python.exe -m pytest -q --basetemp=.runtime/pytest-semantic-full` — PASS (494 passed, 5 skipped)
 - Scope confirmation:
   - changed only allowed files: yes
   - forbidden areas untouched: yes
 - Deviations:
-  - none
+  - The first live-suite run reached all business assertions and passed the new
+    test, but Qdrant returned a Windows file-lock error while deleting the
+    existing RAG lifecycle collection. An unchanged rerun passed 4/4.
 - Residual risks/follow-ups:
-  - none
+  - Qdrant collection deletion can be transiently flaky on Windows when a
+    storage directory is still locked; no product behavior failed.
 - Commit:
-  - not committed
+  - `dadfb1f` (the implementation was included by a concurrent broad checkpoint
+    commit, not a dedicated scoped commit from this task)

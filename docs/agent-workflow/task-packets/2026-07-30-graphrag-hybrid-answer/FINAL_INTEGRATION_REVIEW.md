@@ -84,3 +84,19 @@
 `accepted`. The storage, service, and answer-layer contracts agree; real
 Neo4j executed the new query; fallback and isolation invariants are covered;
 and the combined repository regression suite passes.
+
+## Re-approval: 2026-08-01
+
+- Standard environment remediation: installed the already-declared
+  `neo4j>=5.20,<6` dependency into the repository `venv`; resolved version is
+  `5.28.4` and `pip check` reports no broken requirements.
+- Fixed failed-connectivity cleanup so a newly created Neo4j driver is always
+  closed before `Neo4jConfigError` is raised; added a regression test.
+- Real local Neo4j acceptance in `venv`: `1 passed`; Bolt connectivity was
+  true and the test was not skipped.
+- Focused graph/storage/service/tool/live gate in `venv`: `72 passed`.
+- Final stable-worktree repository gate after the next phase:
+  `530 passed, 6 skipped`.
+- Compileall and `git diff --check`: pass.
+- Decision remains `accepted`; implementation may proceed to GraphRAG
+  compare/summary augmentation.

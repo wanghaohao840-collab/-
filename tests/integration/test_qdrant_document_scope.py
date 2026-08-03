@@ -1,16 +1,63 @@
 import os
+import time
 import uuid
+from datetime import datetime
 
 import pytest
 
-from hello_agents.memory.base import MemoryConfig
+from hello_agents.memory.base import MemoryConfig, MemoryItem
 from hello_agents.memory.rag.contracts import DocumentSegment
 from hello_agents.memory.rag.qdrant_pipeline import QdrantRAGPipeline
-from hello_agents.memory.storage.vector_store import QdrantVectorStore, VectorPoint
+from hello_agents.memory.storage.vector_store import (
+    QdrantVectorStore,
+    VectorPoint,
+    VectorRange,
+)
+from hello_agents.memory.types.episodic import EpisodicMemory
 from hello_agents.memory.types.semantic import SemanticMemory
 
 
 QDRANT_TEST_URL = os.getenv("QDRANT_TEST_URL")
+
+
+def _delete_collection_with_retry(
+    client,
+    collection_name,
+    retry_delays=(0.25, 0.5, 1.0),
+):
+    for attempt in range(1 + len(retry_delays)):
+        try:
+            if not client.collection_exists(collection_name=collection_name):
+                return
+            client.delete_collection(collection_name=collection_name)
+            return
+        except Exception:
+            if attempt >= len(retry_delays):
+                raise
+            time.sleep(retry_delays[attempt])
+
+
+def test_delete_collection_retries_transient_cleanup_failure():
+    class FlakyDeleteClient:
+        def __init__(self):
+            self.delete_calls = 0
+            self.deleted = False
+
+        def collection_exists(self, collection_name):
+            return not self.deleted
+
+        def delete_collection(self, collection_name):
+            self.delete_calls += 1
+            if self.delete_calls < 3:
+                raise RuntimeError("500 temporary Windows file lock")
+            self.deleted = True
+
+    client = FlakyDeleteClient()
+
+    _delete_collection_with_retry(client, "documents", retry_delays=(0, 0))
+
+    assert client.delete_calls == 3
+    assert client.deleted
 
 
 class LiveTestEmbedder:
@@ -64,7 +111,7 @@ def test_real_qdrant_match_any_does_not_leak_other_documents():
 
         assert {point.payload["document_id"] for point in points} == {"doc-1", "doc-2"}
     finally:
-        client.delete_collection(collection_name=collection)
+        _delete_collection_with_retry(client, collection)
 
 
 @pytest.mark.skipif(
@@ -101,7 +148,7 @@ def test_real_qdrant_vector_store_contract():
         assert store.delete_by_filter(collection, {"namespace": "a"}) == 1
         assert store.count(collection) == 1
     finally:
-        store.client.delete_collection(collection_name=collection)
+        _delete_collection_with_retry(store.client, collection)
 
 
 @pytest.mark.skipif(
@@ -151,8 +198,145 @@ def test_real_qdrant_semantic_memory_creates_filter_indexes(monkeypatch, tmp_pat
         assert schema_name("memory_type") == "keyword"
         assert schema_name("user_id") == "keyword"
     finally:
-        if client.collection_exists(collection_name=collection):
-            client.delete_collection(collection_name=collection)
+        _delete_collection_with_retry(client, collection)
+
+
+@pytest.mark.skipif(
+    not QDRANT_TEST_URL,
+    reason="Set QDRANT_TEST_URL to run against an explicitly authorized Qdrant service",
+)
+def test_real_qdrant_episodic_memory_preserves_shared_collection_scope(
+    monkeypatch,
+    tmp_path,
+):
+    from qdrant_client import QdrantClient
+    import hello_agents.memory.types.episodic as episodic_module
+
+    monkeypatch.setattr(
+        episodic_module,
+        "create_embedding_model_with_fallback",
+        lambda: LiveTestEmbedder(),
+    )
+
+    client = QdrantClient(
+        url=QDRANT_TEST_URL,
+        api_key=os.getenv("QDRANT_TEST_API_KEY") or None,
+    )
+    collection = f"episodic_scope_test_{uuid.uuid4().hex}"
+    store = QdrantVectorStore(
+        url=QDRANT_TEST_URL,
+        api_key=os.getenv("QDRANT_TEST_API_KEY") or None,
+        client=client,
+        retry_delays=(),
+    )
+    config = MemoryConfig(
+        database_path=str(tmp_path / "memory.db"),
+        qdrant_collection=collection,
+        qdrant_vector_size=2,
+    )
+    memory = None
+    try:
+        memory = EpisodicMemory(config, storage_backend=store)
+        payload_schema = client.get_collection(
+            collection_name=collection
+        ).payload_schema
+
+        def schema_name(field_name):
+            data_type = getattr(
+                payload_schema[field_name],
+                "data_type",
+                payload_schema[field_name],
+            )
+            return str(getattr(data_type, "value", data_type)).lower()
+
+        assert schema_name("memory_type") == "keyword"
+        assert schema_name("user_id") == "keyword"
+        assert schema_name("session_id") == "keyword"
+        assert schema_name("importance") == "float"
+        assert schema_name("timestamp") == "datetime"
+
+        episode = MemoryItem(
+            content="alpha episode",
+            memory_type="episodic",
+            importance=0.8,
+            metadata={"user_id": "user-1", "session_id": "session-1"},
+        )
+        episode.timestamp = "2026-07-01T00:00:00"
+        memory.add(episode)
+        assert [item.id for item in memory.retrieve(
+            "alpha",
+            user_id="user-1",
+            session_id="session-1",
+            min_importance=0.6,
+            start_time="2026-06-01T00:00:00",
+            end_time="2026-08-01T00:00:00",
+        )] == [episode.id]
+        assert store.count(
+            collection,
+            {
+                "memory_type": "episodic",
+                "importance": VectorRange(gte=0.6),
+                "timestamp": VectorRange(
+                    gte=datetime.fromisoformat("2026-06-01T00:00:00"),
+                    lte=datetime.fromisoformat("2026-08-01T00:00:00"),
+                ),
+            },
+        ) == 1
+
+        store.upsert(
+            collection,
+            [
+                VectorPoint(
+                    "legacy-episode",
+                    [1.0, 0.0],
+                    {
+                        "memory_type": "episodic",
+                        "user_id": "legacy-user",
+                        "session_id": "legacy-session",
+                        "importance": 0.8,
+                        "timestamp": "2026/07/01 10:00:00",
+                        "content": "alpha legacy episode",
+                    },
+                )
+            ],
+        )
+        assert [hit["id"] for hit in memory._vector_search(
+            "alpha",
+            user_id="legacy-user",
+            start_time="2026-07-01T00:00:00",
+            end_time="2026-07-01T23:59:59",
+        )] == ["legacy-episode"]
+        migrated = store.scroll(
+            collection,
+            {"memory_type": "episodic", "user_id": "legacy-user"},
+        )
+        assert [point.payload["timestamp"] for point in migrated] == [
+            "2026-07-01T10:00:00"
+        ]
+        store.delete_by_filter(collection, {"_id": ["legacy-episode"]})
+
+        store.upsert(
+            collection,
+            [
+                VectorPoint(
+                    "semantic-survivor",
+                    [0.0, 1.0],
+                    {
+                        "memory_type": "semantic",
+                        "user_id": "user-1",
+                    },
+                )
+            ],
+        )
+        memory.clear()
+
+        assert memory.doc_store.get_document(episode.id) is None
+        assert store.count(collection, {"memory_type": "episodic"}) == 0
+        assert store.count(collection, {"memory_type": "semantic"}) == 1
+    finally:
+        if memory is not None:
+            memory.close()
+        _delete_collection_with_retry(client, collection)
 
 
 @pytest.mark.skipif(
@@ -222,4 +406,4 @@ def test_real_qdrant_rag_pipeline_preserves_namespace_lifecycle(monkeypatch):
         assert ns_b.stats()["chunk_count"] == 1
         assert ns_b.clear()["chunks_removed"] == 1
     finally:
-        client.delete_collection(collection_name=collection)
+        _delete_collection_with_retry(client, collection)

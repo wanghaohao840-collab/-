@@ -8,6 +8,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .pytest-tmp-*/
+/.pytest-*/
 .superpowers/
 .idea/
 
@@ -20,6 +21,7 @@ memory_data/
 **/rag_cache/
 ui/knowledge_base/uploads/
 ui/reports/
+knowledge_base/.graph/
 
 *.pdf
 *.docx

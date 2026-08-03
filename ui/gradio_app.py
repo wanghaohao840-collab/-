@@ -1,9 +1,9 @@
 import os
 import json
 import sys
-import shutil
-import uuid
-import os
+import atexit
+import re
+from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
@@ -15,6 +15,11 @@ from assistants.document_selection import primary_document_label
 from app.database import initialize_database
 from app.session import InvalidSessionError, SessionRegistry
 from app.storage import UserStorage
+from app.import_models import ImportBatchSummary
+from app.import_repository import ImportTaskRepository
+from app.import_service import ImportTaskService
+from app.import_worker import ImportWorkerPool
+from hello_agents.memory.rag.errors import sanitize_error_message
 from app.migration import LegacyMigrationService
 from ui.launch_config import load_launch_config
 
@@ -29,6 +34,20 @@ legacy_migration = LegacyMigrationService(
     DATA_ROOT / "app.db", session_registry.storage, PROJECT_ROOT
 )
 
+import_repository = ImportTaskRepository(DATA_ROOT / "app.db")
+session_registry.runtime_registry.import_task_repository = import_repository
+import_worker_pool = ImportWorkerPool(
+    import_repository,
+    session_registry.runtime_registry,
+    session_registry.storage,
+)
+import_service = ImportTaskService(
+    session_registry,
+    import_repository,
+    session_registry.storage,
+    import_worker_pool,
+)
+
 UPLOAD_DIR = DATA_ROOT / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -36,6 +55,13 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 def _require_assistant(session_token):
     try:
         return session_registry.get_assistant(session_token)
+    except InvalidSessionError as exc:
+        raise gr.Error(str(exc))
+
+
+def _require_session(session_token):
+    try:
+        return session_registry.get_session(session_token)
     except InvalidSessionError as exc:
         raise gr.Error(str(exc))
 
@@ -92,41 +118,194 @@ def logout_user(session_token):
 
 
 def upload_document(session_token, file):
-    """上传文档，并自动刷新下拉框"""
+    """Backward-compatible single-file entry point for asynchronous imports."""
 
-    assistant = _require_assistant(session_token)
-
+    _require_session(session_token)
     if file is None:
-        return "❌ 请先上传文档文件", gr.update(), gr.update()
+        raise gr.Error("Please select at least one document")
+    return submit_import_batch(session_token, [file])
 
-    source_path = Path(file.name)
-    document_id = str(uuid.uuid4())
-    storage = session_registry.storage
-    suffix = storage.validate_suffix(source_path.suffix)
-    target_path = storage.document_path(assistant.user_id, document_id, suffix)
-    temp_path = storage.temporary_document_path(assistant.user_id, document_id, suffix)
+
+_IMPORT_STATUS_LABELS = {
+    "queued": "排队中",
+    "running": "执行中",
+    "retry_wait": "等待重试",
+    "succeeded": "成功",
+    "failed": "失败",
+}
+_IMPORT_STAGE_LABELS = {
+    "queued": "排队中",
+    "staged": "已暂存",
+    "parsing": "解析文档",
+    "chunking": "切分文档",
+    "embedding": "生成嵌入",
+    "persisting": "持久化",
+    "committing": "提交结果",
+    "succeeded": "已完成",
+    "failed": "失败",
+}
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(?:api_key|apikey|access_token|authorization|auth|token|key)\s*[=:]\s*[^\s,;]+"
+)
+_WINDOWS_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\s'\"]+")
+_UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:[^/\s'\"]+/)+[^\s'\"]*")
+
+
+def _format_import_timestamp(value):
+    if not value:
+        return "-"
     try:
-        shutil.copy2(source_path, temp_path)
-        os.replace(temp_path, target_path)
-        result = assistant.load_document(
-            str(target_path),
-            document_id=document_id,
-            original_name=source_path.name,
-        )
-        if assistant.current_document_id != document_id:
-            target_path.unlink(missing_ok=True)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        target_path.unlink(missing_ok=True)
-        raise
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone()
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return "-"
 
-    choices, current_value = _get_current_dropdown_value(session_token)
 
-    return (
-        result,
-        gr.update(choices=choices, value=[current_value] if current_value else []),
-        gr.update(choices=choices, value=[current_value] if current_value else []),
+def _format_import_error(task) -> str:
+    safe = sanitize_error_message(
+        task.error_summary or "",
+        secrets=(task.user_id, task.staged_relative_path),
     )
+    safe = _SECRET_ASSIGNMENT_RE.sub("[已脱敏]", safe)
+    safe = _WINDOWS_PATH_RE.sub("[路径已脱敏]", safe)
+    safe = _UNIX_PATH_RE.sub("[路径已脱敏]", safe)
+    return safe[:500]
+
+
+def format_batch_summary(summary: ImportBatchSummary) -> str:
+    return (
+        f"批次 `{summary.batch_id}`\n\n"
+        f"总数：{summary.total}　排队：{summary.queued}　执行中：{summary.running}　"
+        f"等待重试：{summary.retry_wait}　成功：{summary.succeeded}　失败：{summary.failed}"
+    )
+
+
+def format_task_table(summary: ImportBatchSummary) -> list[list[object]]:
+    rows: list[list[object]] = []
+    for task in summary.tasks:
+        rows.append(
+            [
+                task.original_name,
+                _IMPORT_STATUS_LABELS.get(task.status, "未知"),
+                _IMPORT_STAGE_LABELS.get(task.stage, "未知"),
+                int(task.progress),
+                int(task.total_attempt_count),
+                _format_import_timestamp(task.next_attempt_at),
+                _format_import_error(task),
+            ]
+        )
+    return rows
+
+
+def _batch_choice(summary: ImportBatchSummary):
+    label = (
+        f"{_format_import_timestamp(summary.created_at)} - "
+        f"{summary.succeeded}/{summary.total} succeeded"
+    )
+    return (label, summary.batch_id)
+
+
+def submit_import_batch(session_token, files, progress=gr.Progress()):
+    """Stage a batch for background import after authenticating the session."""
+
+    _require_session(session_token)
+    if not files:
+        raise gr.Error("Please select at least one document")
+    try:
+        summary = import_service.submit_batch(
+            session_token,
+            files,
+            progress=progress,
+        )
+    except (ValueError, KeyError) as exc:
+        raise gr.Error(str(exc))
+    document_update = gr.update()
+    try:
+        choices, current_value = _get_current_dropdown_value(session_token)
+        document_update = gr.update(
+            choices=choices,
+            value=[current_value] if current_value else [],
+        )
+    except gr.Error:
+        raise
+    return summary.batch_id, format_batch_summary(summary), format_task_table(summary), document_update
+
+
+def refresh_import_batches(session_token):
+    if not session_token:
+        return gr.update(choices=[], value=None), "", []
+    _require_session(session_token)
+    batches = import_service.list_batches(session_token, limit=50)
+    if not batches:
+        return gr.update(choices=[], value=None), "", []
+    selected = batches[0]
+    return (
+        gr.update(
+            choices=[_batch_choice(batch) for batch in batches],
+            value=selected.batch_id,
+        ),
+        format_batch_summary(selected),
+        format_task_table(selected),
+    )
+
+
+def clear_import_ui():
+    return gr.update(choices=[], value=None), "", []
+
+
+def refresh_import_batch(session_token, batch_id):
+    if not session_token or not batch_id:
+        return "", []
+    _require_session(session_token)
+    try:
+        summary = import_service.get_batch(session_token, batch_id)
+    except KeyError as exc:
+        raise gr.Error(str(exc))
+    return (
+        format_batch_summary(summary),
+        format_task_table(summary),
+    )
+
+
+def select_import_task(session_token, batch_id, evt: gr.SelectData):
+    """Resolve a selected failed row to its server-owned opaque task ID."""
+
+    if not session_token or not batch_id:
+        return ""
+    _require_session(session_token)
+    try:
+        summary = import_service.get_batch(session_token, batch_id)
+    except KeyError as exc:
+        raise gr.Error(str(exc))
+    row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    if not isinstance(row_index, int) or not 0 <= row_index < len(summary.tasks):
+        return ""
+    task = summary.tasks[row_index]
+    return task.task_id if task.status == "failed" else ""
+
+
+def retry_import_task(session_token, task_id):
+    _require_session(session_token)
+    if not task_id:
+        raise gr.Error("Please select a failed task")
+    try:
+        summary = import_service.retry_task(session_token, task_id)
+    except (ValueError, KeyError) as exc:
+        raise gr.Error(str(exc))
+    return format_batch_summary(summary), format_task_table(summary)
+
+
+def retry_import_batch_failures(session_token, batch_id):
+    _require_session(session_token)
+    if not batch_id:
+        raise gr.Error("Please select an import batch")
+    try:
+        summary = import_service.retry_failed_in_batch(session_token, batch_id)
+    except (ValueError, KeyError) as exc:
+        raise gr.Error(str(exc))
+    return format_batch_summary(summary), format_task_table(summary)
 
 
 def refresh_documents(session_token):
@@ -627,6 +806,9 @@ def restore_memory(session_token, backup_id):
         return f"❌ Invalid backup: {exc}"
     return f"{'✅' if result.success else '❌'} {result.message}"
 
+if __name__ == "__main__":
+    import_worker_pool.start()
+    atexit.register(import_worker_pool.stop)
 
 
 with gr.Blocks(title="文档 智能学习助手") as demo:
@@ -646,17 +828,36 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
     # 1. 上传文档
     # =========================
     with gr.Tab("1. 上传文档"):
-        pdf_file = gr.File(
-            label="上传文档文件",
+        import_files = gr.File(
+            label="批量上传文档",
+            file_count="multiple",
+            type="filepath",
             file_types=[".pdf", ".txt", ".md", ".docx"]
         )
 
-        upload_btn = gr.Button("导入文档")
+        submit_import_btn = gr.Button("提交导入")
 
         upload_output = gr.Textbox(
             label="文档导入结果",
             lines=6
         )
+        import_batch_dropdown = gr.Dropdown(
+            label="最近批次",
+            choices=[],
+            interactive=True,
+        )
+        import_summary = gr.Markdown()
+        import_tasks = gr.Dataframe(
+            headers=["文件名", "状态", "阶段", "进度", "尝试次数", "下次重试", "错误"],
+            datatype=["str", "str", "str", "number", "number", "str", "str"],
+            interactive=False,
+        )
+        selected_import_task_id = gr.State("")
+        with gr.Row():
+            retry_selected_btn = gr.Button("重试所选失败项")
+            retry_batch_btn = gr.Button("重试本批次全部失败项")
+            refresh_import_btn = gr.Button("手动刷新")
+        import_timer = gr.Timer(value=1, active=True)
 
     # =========================
     # 2. 文档 问答
@@ -1114,28 +1315,85 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             fn=login_user,
             inputs=[username_input, password_input],
             outputs=[session_token, auth_status, doc_dropdown_ask, doc_dropdown_search],
+        ).then(
+            fn=refresh_import_batches,
+            inputs=session_token,
+            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            queue=False,
         )
 
         register_btn.click(
             fn=register_user,
             inputs=[username_input, password_input],
             outputs=[session_token, auth_status, doc_dropdown_ask, doc_dropdown_search],
+        ).then(
+            fn=refresh_import_batches,
+            inputs=session_token,
+            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            queue=False,
         )
 
         logout_btn.click(
             fn=logout_user,
             inputs=session_token,
             outputs=[session_token, auth_status, doc_dropdown_ask, doc_dropdown_search],
+        ).then(
+            fn=clear_import_ui,
+            inputs=None,
+            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            queue=False,
         )
 
-        upload_btn.click(
-            fn=upload_document,
-            inputs=[session_token, pdf_file],
+        submit_import_btn.click(
+            fn=submit_import_batch,
+            inputs=[session_token, import_files],
             outputs=[
                 upload_output,
+                import_summary,
+                import_tasks,
                 doc_dropdown_ask,
-                doc_dropdown_search,
             ]
+        ).then(
+            fn=refresh_import_batches,
+            inputs=session_token,
+            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            queue=False,
+        )
+
+        refresh_import_btn.click(
+            fn=refresh_import_batches,
+            inputs=session_token,
+            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            queue=False,
+        )
+        import_batch_dropdown.change(
+            fn=refresh_import_batch,
+            inputs=[session_token, import_batch_dropdown],
+            outputs=[import_summary, import_tasks],
+            queue=False,
+        )
+        import_timer.tick(
+            fn=refresh_import_batch,
+            inputs=[session_token, import_batch_dropdown],
+            outputs=[import_summary, import_tasks],
+            queue=False,
+            show_progress="hidden",
+        )
+        import_tasks.select(
+            fn=select_import_task,
+            inputs=[session_token, import_batch_dropdown],
+            outputs=selected_import_task_id,
+            queue=False,
+        )
+        retry_selected_btn.click(
+            fn=retry_import_task,
+            inputs=[session_token, selected_import_task_id],
+            outputs=[import_summary, import_tasks],
+        )
+        retry_batch_btn.click(
+            fn=retry_import_batch_failures,
+            inputs=[session_token, import_batch_dropdown],
+            outputs=[import_summary, import_tasks],
         )
 
 

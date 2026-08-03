@@ -8,20 +8,8 @@ import pytest
 from hello_agents.memory.storage.neo4j_store import Neo4jGraphStore
 
 
-@pytest.mark.skipif(
-    not os.getenv("NEO4J_TEST_URI"),
-    reason="NEO4J_TEST_URI is not configured",
-)
-def test_live_neo4j_replace_query_and_delete():
-    document_id = f"codex-live-{uuid.uuid4()}"
-    namespace = "neo4j-live-tests"
-    store = Neo4jGraphStore(
-        uri=os.environ["NEO4J_TEST_URI"],
-        username=os.getenv("NEO4J_TEST_USERNAME", "neo4j"),
-        password=os.environ["NEO4J_TEST_PASSWORD"],
-        database=os.getenv("NEO4J_TEST_DATABASE", "neo4j"),
-    )
-    graph = {
+def _live_graph(document_id: str) -> dict:
+    return {
         "document": {"name": "Live fixture", "source": "pytest"},
         "chapters": [],
         "chunks": [{
@@ -50,6 +38,24 @@ def test_live_neo4j_replace_query_and_delete():
             },
         }],
     }
+
+
+@pytest.mark.skipif(
+    not os.getenv("NEO4J_TEST_URI"),
+    reason="NEO4J_TEST_URI is not configured",
+)
+def test_live_neo4j_replace_query_and_delete():
+    document_id = f"codex-live-{uuid.uuid4()}"
+    second_document_id = f"codex-live-{uuid.uuid4()}"
+    namespace = "neo4j-live-tests"
+    store = Neo4jGraphStore(
+        uri=os.environ["NEO4J_TEST_URI"],
+        username=os.getenv("NEO4J_TEST_USERNAME", "neo4j"),
+        password=os.environ["NEO4J_TEST_PASSWORD"],
+        database=os.getenv("NEO4J_TEST_DATABASE", "neo4j"),
+    )
+    graph = _live_graph(document_id)
+    second_graph = _live_graph(second_document_id)
     try:
         first = store.replace_document_graph(
             document_id,
@@ -76,6 +82,17 @@ def test_live_neo4j_replace_query_and_delete():
             graph,
             rag_namespace=namespace,
         )
+        store.replace_document_graph(
+            second_document_id,
+            "build-1",
+            second_graph,
+            rag_namespace=namespace,
+        )
+        shared = store.get_cross_document_entities(
+            [document_id, second_document_id],
+            query_terms=["neo4j"],
+            rag_namespace=namespace,
+        )
         build = store.get_document_build(
             document_id,
             rag_namespace=namespace,
@@ -92,6 +109,22 @@ def test_live_neo4j_replace_query_and_delete():
             for relation in graph_context["relations"]
         )
         assert build == {"build_id": "build-2", "graph_status": "ready"}
+        assert len(shared["entities"]) == 1
+        assert {
+            member["document_id"]
+            for member in shared["entities"][0]["members"]
+        } == {document_id, second_document_id}
+
+        removed_first = store.delete_document(
+            document_id,
+            rag_namespace=namespace,
+        )
+        assert removed_first["nodes_removed"] >= 0
+        assert store.get_cross_document_entities(
+            [document_id, second_document_id],
+            query_terms=["neo4j"],
+            rag_namespace=namespace,
+        ) == {"entities": []}
     finally:
         try:
             removed = store.delete_document(

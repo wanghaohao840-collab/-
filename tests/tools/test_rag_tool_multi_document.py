@@ -22,6 +22,72 @@ class FakeLLM:
         return len(str(text or ""))
 
 
+class FakeGraphContextService:
+    def __init__(self, failed_documents=None, cross_failed=False):
+        self.failed_documents = set(failed_documents or [])
+        self.cross_failed = cross_failed
+        self.calls = []
+        self.cross_calls = []
+        self.entity_names = {}
+
+    def get_graph_context(self, document_id, query, **kwargs):
+        self.calls.append((document_id, query, kwargs))
+        if document_id in self.failed_documents:
+            return {
+                "success": False,
+                "document_id": document_id,
+                "status": "failed",
+                "data": {},
+                "error": {
+                    "type": "GraphNotReady",
+                    "message": "graph unavailable",
+                },
+            }
+        entity_id = f"{document_id}:concept:alpha"
+        return {
+            "success": True,
+            "document_id": document_id,
+            "status": "ready",
+            "data": {
+                "entities": [{
+                    "id": entity_id,
+                    "type": "Concept",
+                    "name": self.entity_names.get(document_id, f"graph-{document_id}"),
+                }],
+                "relations": [],
+            },
+        }
+
+    def get_cross_document_entities(self, document_ids, query, **kwargs):
+        self.cross_calls.append((list(document_ids), query, kwargs))
+        if self.cross_failed:
+            return {
+                "success": False,
+                "status": "failed",
+                "data": {},
+                "error": {
+                    "type": "GraphUnavailable",
+                    "message": "graph unavailable",
+                },
+            }
+        return {
+            "success": True,
+            "status": "ready",
+            "data": {
+                "entities": [{
+                    "canonical_id": "canonical-alpha",
+                    "entity_type": "Concept",
+                    "normalized_name": "alpha",
+                    "name": "shared-alpha",
+                    "members": [
+                        {"document_id": document_ids[0], "id": "local-1"},
+                        {"document_id": document_ids[1], "id": "local-2"},
+                    ],
+                }],
+            },
+        }
+
+
 class RAGToolMultiDocumentTests(unittest.TestCase):
     def make_tool(self):
         tmpdir = tempfile.TemporaryDirectory()
@@ -162,6 +228,206 @@ class RAGToolMultiDocumentTests(unittest.TestCase):
         self.assertIn("## 共同点", output)
         self.assertIn("JSON", tool.llm.prompts[-1])
 
+    def test_compare_injects_selected_document_graph_context(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="compare alpha",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="auto",
+        )
+
+        prompt = tool.llm.prompts[-1]
+        self.assertIn("graph-doc-1", prompt)
+        self.assertIn("graph-doc-2", prompt)
+        self.assertNotIn("graph-doc-3", prompt)
+        self.assertEqual(
+            [call[0] for call in graph.calls],
+            ["doc-1", "doc-2"],
+        )
+        self.assertIn("G-", output)
+
+    def test_compare_injects_shared_canonical_entity_context(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="compare alpha",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="auto",
+        )
+
+        self.assertIn("shared-alpha", tool.llm.prompts[-1])
+        self.assertEqual(graph.cross_calls[0][0], ["doc-1", "doc-2"])
+        self.assertTrue(
+            any(
+                source.get("canonical_id") == "canonical-alpha"
+                for source in tool._last_action_data["graph_sources"]
+            )
+        )
+        self.assertIn("G-", output)
+
+    def test_compare_structured_output_accepts_canonical_graph_citation(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+        canonical_id = tool._graph_citation_id(
+            "doc-1|doc-2",
+            "canonical_entity",
+            "canonical-alpha",
+        )
+        value = {
+            "common_points": [{
+                "text": "shared graph concept",
+                "citations": [canonical_id],
+            }],
+            "differences": [],
+            "per_document_evidence": [],
+            "missing_information": [],
+        }
+
+        def generate(prompt, **kwargs):
+            tool.llm.prompts.append(str(prompt))
+            return json.dumps(value)
+
+        tool.llm.generate = generate
+        tool.execute(
+            "ask",
+            query="compare graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="auto",
+            structured_output=True,
+        )
+
+        self.assertEqual(tool._last_action_data["comparison"], value)
+        self.assertEqual(tool._last_action_data["comparison_format"], "structured")
+
+    def test_compare_required_shared_graph_failure_happens_before_llm(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService(cross_failed=True)
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="compare graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="required",
+        )
+
+        self.assertIn("GraphRAG", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_compare_graph_off_does_not_call_shared_graph_service(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        tool.execute(
+            "ask",
+            query="compare graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="off",
+        )
+
+        self.assertEqual(graph.cross_calls, [])
+
+    def test_compare_structured_output_accepts_graph_citations(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+        first_graph_id = tool._graph_citation_id(
+            "doc-1",
+            "entity",
+            "doc-1:concept:alpha",
+        )
+        second_graph_id = tool._graph_citation_id(
+            "doc-2",
+            "entity",
+            "doc-2:concept:alpha",
+        )
+        value = {
+            "common_points": [{
+                "text": "shared graph concept",
+                "citations": [first_graph_id, second_graph_id],
+            }],
+            "differences": [],
+            "per_document_evidence": [
+                {
+                    "document_id": "doc-1",
+                    "summary": "first graph",
+                    "citations": [first_graph_id],
+                },
+                {
+                    "document_id": "doc-2",
+                    "summary": "second graph",
+                    "citations": [second_graph_id],
+                },
+            ],
+            "missing_information": [],
+        }
+
+        def generate(prompt, **kwargs):
+            tool.llm.prompts.append(str(prompt))
+            return json.dumps(value)
+
+        tool.llm.generate = generate
+        tool.execute(
+            "ask",
+            query="compare graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="auto",
+            structured_output=True,
+        )
+
+        self.assertEqual(tool._last_action_data["comparison"], value)
+        self.assertEqual(
+            tool._last_action_data["comparison_format"],
+            "structured",
+        )
+
+    def test_compare_required_graph_failure_happens_before_llm(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService(failed_documents={"doc-2"})
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="compare graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="required",
+        )
+
+        self.assertIn("GraphRAG", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_compare_graph_off_does_not_call_graph_service(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="compare graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="compare",
+            graph_mode="off",
+        )
+
+        self.assertIn("RAG回答", output)
+        self.assertEqual(graph.calls, [])
+
     def test_compare_requires_at_least_two_documents(self):
         tool = self.make_tool()
 
@@ -209,6 +475,179 @@ class RAGToolMultiDocumentTests(unittest.TestCase):
         self.assertNotIn("alpha selected one", reduce_prompt)
         self.assertNotIn("alpha selected two", reduce_prompt)
         self.assertIn("ANSWER-3", output)
+
+    def test_summary_injects_per_document_graph_and_reduce_citations(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="summary graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+
+        map_prompts = tool.llm.prompts[:2]
+        self.assertTrue(
+            any(
+                "graph-doc-1" in prompt and "graph-doc-2" not in prompt
+                for prompt in map_prompts
+            )
+        )
+        self.assertTrue(
+            any(
+                "graph-doc-2" in prompt and "graph-doc-1" not in prompt
+                for prompt in map_prompts
+            )
+        )
+        first_graph_id = tool._graph_citation_id(
+            "doc-1",
+            "entity",
+            "doc-1:concept:alpha",
+        )
+        second_graph_id = tool._graph_citation_id(
+            "doc-2",
+            "entity",
+            "doc-2:concept:alpha",
+        )
+        self.assertIn(first_graph_id, tool.llm.prompts[-1])
+        self.assertIn(second_graph_id, tool.llm.prompts[-1])
+        self.assertIn("G-", output)
+
+    def test_summary_keeps_shared_entity_in_reduce_only(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="summary graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+
+        map_prompts = tool.llm.prompts[:2]
+        self.assertTrue(all("shared-alpha" not in prompt for prompt in map_prompts))
+        self.assertIn("shared-alpha", tool.llm.prompts[-1])
+        self.assertEqual(graph.cross_calls[0][0], ["doc-1", "doc-2"])
+        self.assertIn("shared-alpha", output)
+        self.assertTrue(
+            any(
+                source.get("canonical_id") == "canonical-alpha"
+                for source in tool._last_action_data["graph_sources"]
+            )
+        )
+
+    def test_summary_required_shared_graph_failure_happens_before_map_llm(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService(cross_failed=True)
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="summary graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="required",
+        )
+
+        self.assertIn("GraphRAG", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_summary_auto_shared_graph_failure_falls_back_to_vector_summaries(
+        self,
+    ):
+        tool = self.make_tool()
+        graph = FakeGraphContextService(cross_failed=True)
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="summary graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+
+        self.assertIn("ANSWER-3", output)
+        self.assertEqual(len(tool.llm.prompts), 3)
+        self.assertNotIn("shared-alpha", tool.llm.prompts[-1])
+
+    def test_summary_required_graph_failure_happens_before_map_llm(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService(failed_documents={"doc-2"})
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="summary graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="required",
+        )
+
+        self.assertIn("GraphRAG", output)
+        self.assertEqual(tool.llm.prompts, [])
+
+    def test_summary_auto_graph_failure_falls_back_to_vector_summaries(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService(failed_documents={"doc-2"})
+        tool.graph_service = graph
+
+        output = tool.execute(
+            "ask",
+            query="summary graph",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+
+        self.assertIn("RAG回答", output)
+        self.assertEqual(len(tool.llm.prompts), 3)
+        self.assertEqual(
+            [call[0] for call in graph.calls],
+            ["doc-1", "doc-2"],
+        )
+
+    def test_summary_cache_invalidates_when_graph_context_changes(self):
+        tool = self.make_tool()
+        graph = FakeGraphContextService()
+        tool.graph_service = graph
+
+        tool.execute(
+            "ask",
+            query="graph cache",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+        self.assertEqual(len(tool.llm.prompts), 3)
+
+        tool.execute(
+            "ask",
+            query="graph cache",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+        self.assertEqual(len(tool.llm.prompts), 4)
+        self.assertEqual(tool._last_action_data["summary_cache_hits"], 2)
+
+        graph.entity_names["doc-1"] = "graph-doc-1-updated"
+        tool.execute(
+            "ask",
+            query="graph cache",
+            document_ids=["doc-1", "doc-2"],
+            mode="summary",
+            graph_mode="auto",
+        )
+
+        self.assertEqual(len(tool.llm.prompts), 6)
+        self.assertEqual(tool._last_action_data["summary_cache_hits"], 1)
+        self.assertEqual(tool._last_action_data["summary_cache_misses"], 1)
 
     def test_summary_cache_reuses_unchanged_maps_and_invalidates_changed_document(self):
         tool = self.make_tool()
@@ -587,9 +1026,10 @@ class RAGToolMultiDocumentTests(unittest.TestCase):
         cache_path = Path(tmpdir.name) / "rag-cache.json"
 
         tool = RAGTool(rag_namespace="scoped", cache_path=str(cache_path))
-        self.addCleanup(tool.close)
-
-        self.assertEqual(tool._pipelines["scoped"].cache_path, cache_path)
+        try:
+            self.assertEqual(tool._pipelines["scoped"].cache_path, cache_path)
+        finally:
+            tool.close()
 
 
 if __name__ == "__main__":

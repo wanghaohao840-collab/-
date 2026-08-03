@@ -164,9 +164,9 @@ python_self_agent/
 └── docs/                             # 设计、计划和 Agent 工作流
 ```
 
-Neo4j 模块已经支持文档图谱构建、状态、恢复、查询、重试和删除。普通
-`ask` 问答支持向量结果与文档内图谱上下文的混合检索；跨文档实体合并、
-对比/摘要模式图增强和图谱 UI 仍是后续阶段。
+Neo4j 模块已经支持文档图谱构建、状态、恢复、查询、重试和删除。普通、
+联合、对比和摘要 `ask` 问答均支持向量结果与文档内图谱上下文的混合检索；
+对比和联合摘要还可使用跨文档规范实体，图谱 UI 仍是后续阶段。
 
 ## 安装
 
@@ -264,7 +264,7 @@ NEO4J_DATABASE=neo4j
 
 所有 action 都要求 `document_id`。完整图查询默认不返回 `Chunk.content`，只有显式设置 `include_chunk_content=true` 才返回正文。当前并发保护仅覆盖单进程/单 worker；多 worker 部署需要分布式锁后才能启用自动建图。
 
-普通 `ask` 支持 `graph_mode`：
+普通、联合、对比和摘要 `ask` 均支持 `graph_mode`：
 
 - `auto`（默认）：图谱 ready 时追加受限的一跳实体/关系上下文；图谱不可用
   时自动回退到原有向量 RAG。
@@ -273,8 +273,9 @@ NEO4J_DATABASE=neo4j
 
 图谱上下文使用稳定的 `G-*` 引用 ID，向量 Chunk 继续使用 `S-*`。可以通过
 `graph_node_limit` 和 `graph_relation_limit` 调整上限；图查询不会返回
-Chunk 正文。该融合目前只用于普通/联合问答，不改写 `compare` 和
-`summary` 模式。
+Chunk 正文。对比模式的结构化输出可以引用 `S-*` 或 `G-*`；摘要模式在
+逐文档 map 阶段加入该文档图谱，缓存键包含图上下文指纹，并在 reduce
+阶段只允许使用各单篇摘要明确列出的引用。
 
 ### 数据目录
 
@@ -420,13 +421,13 @@ powershell -ExecutionPolicy Bypass -File scripts\run_qdrant_integration.ps1
 - 多用户认证、会话与数据隔离；
 - 多文档联合问答、对比和总结；
 - 用户级并发写协调；
-- Neo4j 文档图谱构建、查询、恢复、重试、定向删除和普通问答混合检索；
+- Neo4j 文档图谱构建、查询、恢复、重试、定向删除及全问答模式混合检索；
 - 旧数据迁移和损坏数据恢复；
 - 较完整的单元、契约、集成和验收测试。
 
 后续可继续推进：
 
-- GraphRAG 对比/摘要融合、跨文档实体合并与图谱 UI；
+- GraphRAG 图谱可视化与实体人工复核 UI；
 - 批量导入、异步任务、上传进度和失败重试队列；
 - 文档命中高亮与引用一键复制；
 - 学习计划、间隔复习和知识掌握度；
@@ -439,3 +440,16 @@ powershell -ExecutionPolicy Bypass -File scripts\run_qdrant_integration.ps1
 开始修改前请阅读 `PROJECT_KNOWLEDGE.md`。当历史说明与当前仓库冲突时，以当前代码、测试、配置和运行结果为准。
 
 涉及 Superpowers 实施计划评审时，遵循 `docs/agent-workflow/README.md`。
+
+## GraphRAG 跨文档规范实体
+
+- GraphRAG 跨文档实体层：文档本地 `Concept`、`Person`、`KnowledgePoint`
+  通过 Neo4j `REFERS_TO` 连接到命名空间级 `CanonicalEntity`。
+- 规范实体唯一键为 `rag_namespace + entity_type + normalized_name`；只做
+  确定性的标准化名称匹配，不做模糊或 LLM 自动合并。
+- 替换/删除文档时只删除文档本地节点，并在同一事务中清理无引用的规范
+  实体；跨文档查询始终限定在显式 `document_ids` 内。
+- 对比问答会将共享实体加入主上下文；联合摘要只把共享实体加入 reduce
+  阶段，不会污染单文档 map 摘要。共享实体继续使用稳定的 `G-*` 引用。
+- 旧图即使尚未建立 `REFERS_TO`，查询也会按实体类型和标准化名称进行
+  只读分组，因此不要求破坏性迁移。

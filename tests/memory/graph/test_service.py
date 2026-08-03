@@ -46,6 +46,9 @@ class FakeStore:
         self.context = {"entities": [], "relations": []}
         self.context_error = None
         self.context_calls = []
+        self.cross_entities = []
+        self.cross_error = None
+        self.cross_calls = []
 
     def replace_document_graph(self, document_id, build_id, graph, **kwargs):
         if self.replace_error:
@@ -76,6 +79,12 @@ class FakeStore:
             raise self.context_error
         self.context_calls.append((document_id, kwargs))
         return dict(self.context)
+
+    def get_cross_document_entities(self, document_ids, **kwargs):
+        if self.cross_error:
+            raise self.cross_error
+        self.cross_calls.append((list(document_ids), kwargs))
+        return {"entities": list(self.cross_entities)}
 
     def delete_document(self, document_id, **kwargs):
         if self.delete_error:
@@ -285,6 +294,85 @@ def test_graph_context_failure_is_sanitized(tmp_path):
     assert result["success"] is False
     assert result["error"]["type"] == "RuntimeError"
     assert "password" not in result["error"]["message"]
+
+
+def test_cross_document_entities_requires_all_documents_ready(tmp_path):
+    store = FakeStore()
+    store.cross_entities = [{"canonical_id": "c1", "members": []}]
+    service = make_service(tmp_path, store=store)
+    service.state_repository.upsert("doc-1", status="ready", build_id="b1")
+
+    not_ready = service.get_cross_document_entities(
+        ["doc-1", "doc-2"],
+        "Neo4j",
+    )
+
+    assert not_ready["success"] is False
+    assert not_ready["error"]["type"] == "GraphNotReady"
+    assert store.cross_calls == []
+
+
+def test_cross_document_entities_delegates_normalized_terms_and_scope(tmp_path):
+    store = FakeStore()
+    store.cross_entities = [{"canonical_id": "c1", "members": []}]
+    service = make_service(tmp_path, store=store)
+    for document_id in ("doc-1", "doc-2"):
+        service.state_repository.upsert(
+            document_id,
+            status="ready",
+            build_id="b1",
+        )
+
+    result = service.get_cross_document_entities(
+        ["doc-2", "doc-1", "doc-2"],
+        "Neo4j 鏁版嵁搴?",
+        entity_limit=4,
+        evidence_limit=9,
+    )
+
+    assert result["success"] is True
+    assert result["data"]["entities"] == store.cross_entities
+    assert result["data"]["query_terms"][0] == "neo4j"
+    assert store.cross_calls == [
+        (
+            ["doc-2", "doc-1"],
+            {
+                "query_terms": result["data"]["query_terms"],
+                "rag_namespace": "default",
+                "entity_limit": 4,
+                "evidence_limit": 9,
+            },
+        )
+    ]
+
+
+def test_cross_document_entities_rejects_invalid_scope_and_sanitizes_failure(
+    tmp_path,
+):
+    store = FakeStore()
+    store.cross_error = RuntimeError(
+        "neo4j://user:password@secret-host unavailable"
+    )
+    service = make_service(tmp_path, store=store)
+    for document_id in ("doc-1", "doc-2"):
+        service.state_repository.upsert(
+            document_id,
+            status="ready",
+            build_id="b1",
+        )
+
+    invalid = service.get_cross_document_entities(["doc-1"], "Neo4j")
+    failed = service.get_cross_document_entities(
+        ["doc-1", "doc-2"],
+        "Neo4j",
+    )
+
+    assert invalid["success"] is False
+    assert invalid["error"]["type"] == "ValueError"
+    assert failed["success"] is False
+    assert failed["error"]["type"] == "RuntimeError"
+    assert "password" not in failed["error"]["message"]
+    assert "secret-host" not in failed["error"]["message"]
 
 
 def test_delete_failure_marks_cleanup_pending(tmp_path):

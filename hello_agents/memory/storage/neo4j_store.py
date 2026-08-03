@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from threading import Lock
 from typing import Any, Dict, Iterable, Optional
 
@@ -23,6 +24,11 @@ class Neo4jGraphStore:
         "knowledge_points": ("KnowledgePoint", "knowledge_point_id"),
         "persons": ("Person", "person_id"),
     }
+    CANONICAL_ENTITY_COLLECTIONS = (
+        ("concepts", "Concept", "concept_id"),
+        ("knowledge_points", "KnowledgePoint", "knowledge_point_id"),
+        ("persons", "Person", "person_id"),
+    )
     RELATION_TYPES = frozenset(
         {
             "HAS_CHAPTER",
@@ -77,6 +83,9 @@ class Neo4jGraphStore:
         "CREATE INDEX graph_person_scope IF NOT EXISTS "
         "FOR (n:Person) ON "
         "(n.rag_namespace, n.document_id, n.normalized_name)",
+        "CREATE CONSTRAINT graph_canonical_entity IF NOT EXISTS "
+        "FOR (n:CanonicalEntity) REQUIRE "
+        "(n.rag_namespace, n.entity_type, n.normalized_name) IS UNIQUE",
     )
 
     def __init__(
@@ -101,6 +110,7 @@ class Neo4jGraphStore:
                 raise Neo4jConfigError(
                     "The neo4j package is required for graph storage"
                 )
+            created_driver = None
             try:
                 created_driver = GraphDatabase.driver(
                     uri,
@@ -108,6 +118,11 @@ class Neo4jGraphStore:
                 )
                 created_driver.verify_connectivity()
             except Exception as error:
+                if created_driver is not None:
+                    try:
+                        created_driver.close()
+                    except Exception:
+                        pass
                 raise Neo4jConfigError(
                     f"Neo4j connection failed: {error.__class__.__name__}"
                 ) from error
@@ -172,6 +187,19 @@ class Neo4jGraphStore:
         if not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         return limit
+
+    @staticmethod
+    def _canonical_id(
+        rag_namespace: str,
+        entity_type: str,
+        normalized_name: str,
+    ) -> str:
+        digest = hashlib.sha256(
+            f"{rag_namespace}\0{entity_type}\0{normalized_name}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        return digest[:24]
 
     @staticmethod
     def _records(result: Any) -> list[dict[str, Any]]:
@@ -275,6 +303,64 @@ class Neo4jGraphStore:
                     rag_namespace=rag_namespace,
                     rows=rows,
                 )
+
+            canonical_rows = []
+            for (
+                collection,
+                entity_type,
+                id_key,
+            ) in self.CANONICAL_ENTITY_COLLECTIONS:
+                for value in graph.get(collection, []) or []:
+                    properties = dict(value)
+                    normalized_name = str(
+                        properties.get("normalized_name") or ""
+                    ).strip().lower()
+                    graph_id = str(properties.get(id_key) or "").strip()
+                    if not normalized_name or not graph_id:
+                        continue
+                    canonical_rows.append(
+                        {
+                            "graph_id": graph_id,
+                            "entity_type": entity_type,
+                            "normalized_name": normalized_name,
+                            "name": str(
+                                properties.get("name")
+                                or properties.get("title")
+                                or normalized_name
+                            ).strip(),
+                            "canonical_id": self._canonical_id(
+                                rag_namespace,
+                                entity_type,
+                                normalized_name,
+                            ),
+                        }
+                    )
+            if canonical_rows:
+                tx.run(
+                    "/* GRAPH_LINK_CANONICAL */ "
+                    "UNWIND $rows AS row "
+                    "MATCH (local {rag_namespace: $rag_namespace, "
+                    "document_id: $document_id, graph_id: row.graph_id}) "
+                    "WHERE row.entity_type IN labels(local) "
+                    "MERGE (canonical:CanonicalEntity {"
+                    "rag_namespace: $rag_namespace, "
+                    "entity_type: row.entity_type, "
+                    "normalized_name: row.normalized_name}) "
+                    "ON CREATE SET canonical.canonical_id = row.canonical_id "
+                    "SET canonical.name = coalesce(canonical.name, row.name) "
+                    "MERGE (local)-[:REFERS_TO]->(canonical)",
+                    document_id=document_id,
+                    rag_namespace=rag_namespace,
+                    rows=canonical_rows,
+                )
+            tx.run(
+                "/* GRAPH_CLEAN_CANONICAL */ "
+                "MATCH (canonical:CanonicalEntity {"
+                "rag_namespace: $rag_namespace}) "
+                "WHERE NOT ()-[:REFERS_TO]->(canonical) "
+                "DELETE canonical",
+                rag_namespace=rag_namespace,
+            )
 
             tx.run(
                 "/* GRAPH_MARK_READY */ "
@@ -545,6 +631,117 @@ class Neo4jGraphStore:
             "relations": list(relations.values())[:relation_limit],
         }
 
+    def get_cross_document_entities(
+        self,
+        document_ids: Iterable[str],
+        *,
+        query_terms: Iterable[str],
+        rag_namespace: str = "default",
+        entity_limit: int = 12,
+        evidence_limit: int = 40,
+    ) -> Dict[str, Any]:
+        """Return bounded exact-name entities shared by selected documents."""
+
+        rag_namespace = self._require_namespace(rag_namespace)
+        selected_ids = []
+        for value in document_ids:
+            document_id = str(value or "").strip()
+            if not document_id:
+                raise ValueError("document_id is required")
+            if document_id not in selected_ids:
+                selected_ids.append(document_id)
+        if not 2 <= len(selected_ids) <= 10:
+            raise ValueError("document_ids must contain between 2 and 10 items")
+        entity_limit = self._limit(entity_limit)
+        evidence_limit = self._limit(evidence_limit)
+        terms = []
+        for value in query_terms:
+            term = str(value or "").strip().lower()
+            if term and term not in terms:
+                terms.append(term)
+        if not terms:
+            return {"entities": []}
+
+        query = (
+            "/* GRAPH_QUERY_CROSS_DOCUMENT_ENTITIES */ "
+            "MATCH (local) "
+            "WHERE local.rag_namespace = $rag_namespace "
+            "AND local.document_id IN $document_ids "
+            "AND any(label IN labels(local) WHERE label IN $entity_labels) "
+            "AND trim(coalesce(local.normalized_name, '')) <> '' "
+            "AND any(term IN $query_terms WHERE "
+            "toLower(coalesce(local.normalized_name, '')) CONTAINS term "
+            "OR toLower(coalesce(local.name, '')) CONTAINS term "
+            "OR toLower(coalesce(local.title, '')) CONTAINS term) "
+            "WITH local ORDER BY local.document_id, local.graph_id "
+            "WITH head([label IN labels(local) WHERE label IN $entity_labels]) "
+            "AS entity_type, toLower(trim(local.normalized_name)) "
+            "AS normalized_name, collect(local) AS members "
+            "WITH entity_type, normalized_name, members, "
+            "reduce(ids = [], member IN members | "
+            "CASE WHEN member.document_id IN ids THEN ids "
+            "ELSE ids + member.document_id END) AS document_ids "
+            "WHERE size(document_ids) >= 2 "
+            "OPTIONAL MATCH (canonical:CanonicalEntity {"
+            "rag_namespace: $rag_namespace, entity_type: entity_type, "
+            "normalized_name: normalized_name}) "
+            "RETURN coalesce(canonical.canonical_id, "
+            "entity_type + ':' + normalized_name) AS canonical_id, "
+            "entity_type, normalized_name, "
+            "coalesce(canonical.name, members[0].name, "
+            "members[0].title, normalized_name) AS name, "
+            "[member IN members[..$evidence_limit] | {"
+            "document_id: member.document_id, id: member.graph_id, "
+            "type: entity_type, name: coalesce(member.name, member.title), "
+            "properties: properties(member)}] AS members "
+            "ORDER BY entity_type, normalized_name "
+            "LIMIT $entity_limit"
+        )
+        with self._driver.session(database=self.database) as session:
+            rows = session.execute_read(
+                lambda tx: self._records(
+                    tx.run(
+                        query,
+                        document_ids=selected_ids,
+                        rag_namespace=rag_namespace,
+                        query_terms=terms,
+                        entity_labels=[
+                            "Concept",
+                            "KnowledgePoint",
+                            "Person",
+                        ],
+                        entity_limit=entity_limit,
+                        evidence_limit=evidence_limit,
+                    )
+                )
+            )
+
+        entities = []
+        for row in rows[:entity_limit]:
+            entity = dict(row)
+            members = []
+            for member in entity.get("members") or []:
+                clean_member = dict(member)
+                properties = dict(clean_member.get("properties") or {})
+                properties.pop("content", None)
+                clean_member["properties"] = properties
+                members.append(clean_member)
+            members.sort(
+                key=lambda item: (
+                    str(item.get("document_id") or ""),
+                    str(item.get("id") or ""),
+                )
+            )
+            entity["members"] = members[:evidence_limit]
+            entities.append(entity)
+        entities.sort(
+            key=lambda item: (
+                str(item.get("entity_type") or ""),
+                str(item.get("normalized_name") or ""),
+            )
+        )
+        return {"entities": entities[:entity_limit]}
+
     def get_chapters(
         self,
         document_id: str,
@@ -681,6 +878,14 @@ class Neo4jGraphStore:
                 "MATCH (n {rag_namespace: $rag_namespace, "
                 "document_id: $document_id}) DETACH DELETE n",
                 document_id=document_id,
+                rag_namespace=rag_namespace,
+            )
+            tx.run(
+                "/* GRAPH_CLEAN_CANONICAL */ "
+                "MATCH (canonical:CanonicalEntity {"
+                "rag_namespace: $rag_namespace}) "
+                "WHERE NOT ()-[:REFERS_TO]->(canonical) "
+                "DELETE canonical",
                 rag_namespace=rag_namespace,
             )
             return counts

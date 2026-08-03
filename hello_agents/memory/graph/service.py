@@ -5,7 +5,7 @@ import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from hello_agents.memory.graph.contracts import graph_response
 from hello_agents.memory.graph.extractor import GraphExtractionError
@@ -446,6 +446,50 @@ class KnowledgeGraphService:
             )
         except Exception as error:
             return self._error(str(document_id or ""), "ready", error)
+
+    def get_cross_document_entities(
+        self,
+        document_ids: Iterable[str],
+        query: str,
+        *,
+        entity_limit: int = 12,
+        evidence_limit: int = 40,
+    ) -> dict[str, Any]:
+        """Return exact-name entities shared by ready selected documents."""
+
+        selected_ids: list[str] = []
+        try:
+            for value in document_ids:
+                document_id = self._document_id(value)
+                if document_id not in selected_ids:
+                    selected_ids.append(document_id)
+            if not 2 <= len(selected_ids) <= 10:
+                raise ValueError(
+                    "document_ids must contain between 2 and 10 items"
+                )
+            for document_id in selected_ids:
+                _, unavailable = self._ready_state(document_id)
+                if unavailable:
+                    return unavailable
+            query_terms = self._graph_query_terms(query)
+            result = self.store.get_cross_document_entities(
+                selected_ids,
+                query_terms=query_terms,
+                rag_namespace=self.rag_namespace,
+                entity_limit=entity_limit,
+                evidence_limit=evidence_limit,
+            )
+            return graph_response(
+                success=True,
+                document_id=",".join(selected_ids),
+                status="ready",
+                data={
+                    "entities": list(result.get("entities") or []),
+                    "query_terms": query_terms,
+                },
+            )
+        except Exception as error:
+            return self._error(",".join(selected_ids), "ready", error)
 
     def get_document_graph(
         self,

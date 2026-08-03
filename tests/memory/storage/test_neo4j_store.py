@@ -6,6 +6,7 @@ from hello_agents.memory.storage.neo4j_store import (
     Neo4jConfigError,
     Neo4jGraphStore,
 )
+from hello_agents.memory.storage import neo4j_store
 
 
 class FakeResult:
@@ -129,6 +130,36 @@ def test_requires_complete_configuration_without_injected_driver():
         Neo4jGraphStore(uri=None, username="neo4j", password=None)
 
 
+def test_failed_connectivity_closes_the_created_driver(monkeypatch):
+    class FailingDriver:
+        def __init__(self):
+            self.closed = False
+
+        def verify_connectivity(self):
+            raise RuntimeError("offline")
+
+        def close(self):
+            self.closed = True
+
+    driver = FailingDriver()
+
+    class FakeGraphDatabase:
+        @staticmethod
+        def driver(*args, **kwargs):
+            return driver
+
+    monkeypatch.setattr(neo4j_store, "GraphDatabase", FakeGraphDatabase)
+
+    with pytest.raises(Neo4jConfigError, match="connection failed"):
+        Neo4jGraphStore(
+            uri="neo4j://localhost:7687",
+            username="neo4j",
+            password="wrong",
+        )
+
+    assert driver.closed is True
+
+
 def test_rejects_empty_namespace_before_a_graph_operation():
     store = Neo4jGraphStore(driver=RecordingDriver())
 
@@ -165,6 +196,22 @@ def test_schema_initialization_is_idempotent_per_instance():
     assert sum(len(tx.calls) for tx in driver.transactions) == first_count
 
 
+def test_schema_initialization_includes_canonical_entity_uniqueness():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(driver=driver)
+
+    store.initialize_schema()
+
+    queries = [query for tx in driver.transactions for query, _ in tx.calls]
+    canonical = next(
+        query for query in queries if "graph_canonical_entity" in query
+    )
+    assert "CanonicalEntity" in canonical
+    assert "rag_namespace" in canonical
+    assert "entity_type" in canonical
+    assert "normalized_name" in canonical
+
+
 def test_replace_document_graph_uses_one_transaction_and_scoped_parameters():
     driver = RecordingDriver()
     store = Neo4jGraphStore(driver=driver)
@@ -186,6 +233,35 @@ def test_replace_document_graph_uses_one_transaction_and_scoped_parameters():
         if "document_id" in query
     )
     assert all("安全文档" not in query for query, _ in write_tx.calls)
+
+
+def test_replace_links_canonical_entities_and_cleans_namespace_orphans():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(driver=driver)
+
+    store.replace_document_graph(
+        "doc-1",
+        "build-1",
+        sample_graph(),
+        rag_namespace="tenant-a",
+    )
+
+    write_tx = driver.transactions[-1]
+    link_query, link_params = next(
+        call for call in write_tx.calls if "GRAPH_LINK_CANONICAL" in call[0]
+    )
+    cleanup_query, cleanup_params = next(
+        call for call in write_tx.calls if "GRAPH_CLEAN_CANONICAL" in call[0]
+    )
+    assert "REFERS_TO" in link_query
+    assert link_params["rag_namespace"] == "tenant-a"
+    assert link_params["document_id"] == "doc-1"
+    assert len(link_params["rows"]) == 1
+    assert link_params["rows"][0]["graph_id"] == "concept-1"
+    assert link_params["rows"][0]["entity_type"] == "Concept"
+    assert len(link_params["rows"][0]["canonical_id"]) == 24
+    assert "document_id" not in cleanup_query
+    assert cleanup_params == {"rag_namespace": "tenant-a"}
 
 
 def test_replace_failure_propagates_without_a_second_write_transaction():
@@ -349,6 +425,105 @@ def test_graph_context_is_scoped_parameterized_and_bounded():
     assert parameters["query_terms"] == ["neo4j", "alice"]
     assert parameters["node_limit"] == 2
     assert parameters["relation_limit"] == 3
+
+
+def test_cross_document_entities_are_scoped_bounded_and_sanitized():
+    driver = RecordingDriver(
+        responses={
+            "GRAPH_QUERY_CROSS_DOCUMENT_ENTITIES": [
+                {
+                    "canonical_id": "canonical-neo4j",
+                    "entity_type": "Concept",
+                    "normalized_name": "neo4j",
+                    "name": "Neo4j",
+                    "members": [
+                        {
+                            "document_id": "doc-2",
+                            "id": "doc-2:concept:neo4j",
+                            "type": "Concept",
+                            "name": "Neo4j",
+                            "properties": {
+                                "description": "Graph database",
+                                "content": "must-not-leak",
+                            },
+                        },
+                        {
+                            "document_id": "doc-1",
+                            "id": "doc-1:concept:neo4j",
+                            "type": "Concept",
+                            "name": "Neo4j",
+                            "properties": {},
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+    store = Neo4jGraphStore(driver=driver)
+
+    result = store.get_cross_document_entities(
+        ["doc-2", "doc-1", "doc-2"],
+        query_terms=["Neo4j", "neo4j", ""],
+        rag_namespace="tenant-a",
+        entity_limit=3,
+        evidence_limit=5,
+    )
+
+    assert result["entities"][0]["canonical_id"] == "canonical-neo4j"
+    assert [
+        member["document_id"]
+        for member in result["entities"][0]["members"]
+    ] == ["doc-1", "doc-2"]
+    assert "content" not in result["entities"][0]["members"][1]["properties"]
+    query, parameters = next(
+        call
+        for tx in driver.transactions
+        for call in tx.calls
+        if "GRAPH_QUERY_CROSS_DOCUMENT_ENTITIES" in call[0]
+    )
+    assert "neo4j" not in query.lower().replace("canonicalentity", "")
+    assert parameters == {
+        "document_ids": ["doc-2", "doc-1"],
+        "rag_namespace": "tenant-a",
+        "query_terms": ["neo4j"],
+        "entity_labels": ["Concept", "KnowledgePoint", "Person"],
+        "entity_limit": 3,
+        "evidence_limit": 5,
+    }
+
+
+@pytest.mark.parametrize(
+    "document_ids, message",
+    [
+        (["doc-1"], "between 2 and 10"),
+        ([f"doc-{index}" for index in range(11)], "between 2 and 10"),
+        (["doc-1", ""], "document_id"),
+    ],
+)
+def test_cross_document_entities_validate_document_scope(document_ids, message):
+    store = Neo4jGraphStore(driver=RecordingDriver())
+
+    with pytest.raises(ValueError, match=message):
+        store.get_cross_document_entities(
+            document_ids,
+            query_terms=["neo4j"],
+        )
+
+
+def test_delete_cleans_only_namespace_canonical_orphans():
+    driver = RecordingDriver()
+    store = Neo4jGraphStore(driver=driver)
+
+    store.delete_document("doc-1", rag_namespace="tenant-a")
+
+    write_tx = driver.transactions[-1]
+    cleanup_query, cleanup_params = next(
+        call for call in write_tx.calls if "GRAPH_CLEAN_CANONICAL" in call[0]
+    )
+    assert "CanonicalEntity" in cleanup_query
+    assert "REFERS_TO" in cleanup_query
+    assert "$rag_namespace" in cleanup_query
+    assert cleanup_params == {"rag_namespace": "tenant-a"}
 
 
 def test_namespace_is_part_of_every_document_scope():

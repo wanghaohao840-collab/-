@@ -124,6 +124,8 @@ class RAGTool(Tool):
         query: str,
         limit: int,
         results: List[Dict[str, Any]],
+        graph_mode: str = "off",
+        graph_context: Optional[Dict[str, Any]] = None,
     ) -> str:
         revision_parts = []
         for result in results:
@@ -144,6 +146,8 @@ class RAGTool(Tool):
             "limit": int(limit),
             "prompt_version": self.SUMMARY_CACHE_PROMPT_VERSION,
             "revision": revision_parts,
+            "graph_mode": str(graph_mode),
+            "graph_context": graph_context or {},
         }
         return hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -1409,6 +1413,9 @@ class RAGTool(Tool):
                 limit=limit,
                 min_score=min_score,
                 structured_output=bool(kwargs.get("structured_output", False)),
+                graph_mode=graph_mode,
+                graph_node_limit=graph_node_limit,
+                graph_relation_limit=graph_relation_limit,
                 **retrieval_kwargs,
             )
 
@@ -1420,6 +1427,9 @@ class RAGTool(Tool):
                 limit=limit,
                 progress_callback=kwargs.get("progress_callback"),
                 cancel_event=kwargs.get("cancel_event"),
+                graph_mode=graph_mode,
+                graph_node_limit=graph_node_limit,
+                graph_relation_limit=graph_relation_limit,
                 **retrieval_kwargs,
             )
 
@@ -1570,9 +1580,64 @@ class RAGTool(Tool):
                         "relations": list(data.get("relations") or []),
                     }
                 )
+            elif mode == "required":
+                return [], (
+                    "鉂?GraphRAG 图谱不可用: "
+                    f"GraphContextEmpty ({document_id})"
+                )
         if mode == "required" and not contexts:
             return [], "鉂?GraphRAG required 但没有可用图谱上下文"
         return contexts, None
+
+    def _cross_document_graph_context(
+        self,
+        document_ids: List[str],
+        *,
+        query: str,
+        mode: str,
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        if mode == "off" or len(document_ids) < 2:
+            return [], None
+        service = getattr(self, "graph_service", None)
+        getter = getattr(service, "get_cross_document_entities", None)
+        if not callable(getter):
+            if mode == "required":
+                return [], (
+                    "GraphRAG required: cross-document graph service unavailable"
+                )
+            return [], None
+        try:
+            result = getter(
+                list(document_ids),
+                query,
+                entity_limit=12,
+                evidence_limit=40,
+            )
+        except Exception as error:
+            if mode == "required":
+                return [], (
+                    "GraphRAG cross-document query failed: "
+                    f"{error.__class__.__name__}"
+                )
+            return [], None
+        if not result or not result.get("success"):
+            if mode == "required":
+                error = (result or {}).get("error") or {}
+                return [], (
+                    "GraphRAG cross-document context unavailable: "
+                    f"{error.get('type') or (result or {}).get('status') or 'unknown'}"
+                )
+            return [], None
+        entities = list((result.get("data") or {}).get("entities") or [])
+        if not entities:
+            return [], None
+        return [
+            {
+                "kind": "cross_document",
+                "document_ids": list(document_ids),
+                "entities": entities,
+            }
+        ], None
 
     @staticmethod
     def _graph_citation_id(
@@ -1592,6 +1657,41 @@ class RAGTool(Tool):
         sources: List[Dict[str, Any]] = []
         seen = set()
         for context in contexts:
+            if context.get("kind") == "cross_document":
+                document_ids = [
+                    str(value)
+                    for value in context.get("document_ids") or []
+                    if str(value)
+                ]
+                scope_id = "|".join(sorted(document_ids))
+                for entity in context.get("entities") or []:
+                    graph_id = str(
+                        entity.get("canonical_id")
+                        or entity.get("normalized_name")
+                        or ""
+                    )
+                    if not graph_id:
+                        continue
+                    citation_id = self._graph_citation_id(
+                        scope_id,
+                        "canonical_entity",
+                        graph_id,
+                    )
+                    if citation_id in seen:
+                        continue
+                    seen.add(citation_id)
+                    sources.append(
+                        {
+                            "citation_id": citation_id,
+                            "document_id": ", ".join(document_ids),
+                            "document_ids": document_ids,
+                            "kind": "canonical_entity",
+                            "type": entity.get("entity_type") or entity.get("type"),
+                            "name": entity.get("name") or graph_id,
+                            "canonical_id": entity.get("canonical_id"),
+                        }
+                    )
+                continue
             document_id = str(context.get("document_id") or "")
             for entity in context.get("entities") or []:
                 graph_id = str(entity.get("id") or "")
@@ -1650,6 +1750,37 @@ class RAGTool(Tool):
         blocks = ["图谱上下文（仅作为补充证据）："]
         for context in contexts:
             document_id = str(context.get("document_id") or "")
+            if context.get("kind") == "cross_document":
+                document_ids = [
+                    str(value)
+                    for value in context.get("document_ids") or []
+                    if str(value)
+                ]
+                scope_label = ", ".join(document_ids)
+                for entity in context.get("entities") or []:
+                    graph_id = str(
+                        entity.get("canonical_id")
+                        or entity.get("normalized_name")
+                        or ""
+                    )
+                    if not graph_id:
+                        continue
+                    citation = self._graph_citation_id(
+                        "|".join(sorted(document_ids)),
+                        "canonical_entity",
+                        graph_id,
+                    )
+                    members = ", ".join(
+                        str(member.get("document_id") or "")
+                        for member in entity.get("members") or []
+                        if member.get("document_id")
+                    )
+                    blocks.append(
+                        f"[{citation}] cross-document entity | {scope_label} | "
+                        f"{entity.get('entity_type') or entity.get('type')}: "
+                        f"{entity.get('name') or graph_id} | members: {members}"
+                    )
+                continue
             entity_names = {
                 str(entity.get("id")): (
                     entity.get("name") or entity.get("id")
@@ -1876,6 +2007,9 @@ class RAGTool(Tool):
         limit: int,
         min_score: float,
         structured_output: bool = False,
+        graph_mode: str = "auto",
+        graph_node_limit: int = 8,
+        graph_relation_limit: int = 16,
         **search_kwargs,
     ) -> str:
         results: List[Dict[str, Any]] = []
@@ -1928,6 +2062,36 @@ class RAGTool(Tool):
             )
         except ContextCapacityError:
             return self._capacity_error()
+        graph_contexts, graph_error = self._graph_context_for_documents(
+            document_ids,
+            query=query,
+            mode=graph_mode,
+            node_limit=graph_node_limit,
+            relation_limit=graph_relation_limit,
+        )
+        if graph_error:
+            return graph_error
+        shared_graph_contexts, graph_error = self._cross_document_graph_context(
+            document_ids,
+            query=query,
+            mode=graph_mode,
+        )
+        if graph_error:
+            return graph_error
+        all_graph_contexts = graph_contexts + shared_graph_contexts
+        context = self._append_graph_context(
+            context,
+            self._format_graph_context(all_graph_contexts),
+            token_budget=budget,
+        )
+        graph_sources = self._graph_sources(all_graph_contexts)
+        action_data = dict(getattr(self, "_last_action_data", {}) or {})
+        action_data.update(
+            graph_mode=graph_mode,
+            graph_documents=list(document_ids),
+            graph_context_count=len(graph_sources),
+        )
+        self._last_action_data = action_data
         prompt = f"""请基于资料对所选文档进行对比分析。
 
 用户问题：
@@ -1961,6 +2125,7 @@ class RAGTool(Tool):
   "missing_information": [{"document_id": "...", "note": "..."}]
 }
 所有 document_id 必须来自所选文档，所有 citations 必须来自资料中的稳定引用 ID。
+citations 可以使用向量资料的 S-* ID 或图谱资料的 G-* ID。
 """
         try:
             answer = self._generate(prompt)
@@ -1971,6 +2136,9 @@ class RAGTool(Tool):
                 item.get("citation_id") or self._citation_id(item)
                 for item in used_results
             }
+            allowed_citation_ids.update(
+                source["citation_id"] for source in graph_sources
+            )
             comparison = parse_structured_comparison(
                 answer,
                 allowed_citation_ids=allowed_citation_ids,
@@ -1989,7 +2157,12 @@ class RAGTool(Tool):
                     comparison_format="markdown_fallback",
                 )
             self._last_action_data = action_data
-        return self._format_answer(answer, used_results, truncated=truncated)
+        return self._format_answer(
+            answer,
+            used_results,
+            truncated=truncated,
+            graph_sources=graph_sources,
+        )
 
     def _ask_multi_summary(
         self,
@@ -1999,6 +2172,9 @@ class RAGTool(Tool):
         limit: int,
         progress_callback: Any = None,
         cancel_event: Any = None,
+        graph_mode: str = "auto",
+        graph_node_limit: int = 8,
+        graph_relation_limit: int = 16,
         **search_kwargs,
     ) -> str:
         total_documents = len(document_ids)
@@ -2022,6 +2198,26 @@ class RAGTool(Tool):
 
         if is_cancelled():
             return "⏹️ 联合总结已取消"
+        graph_contexts, graph_error = self._graph_context_for_documents(
+            document_ids,
+            query=query,
+            mode=graph_mode,
+            node_limit=graph_node_limit,
+            relation_limit=graph_relation_limit,
+        )
+        if graph_error:
+            return graph_error
+        shared_graph_contexts, graph_error = self._cross_document_graph_context(
+            document_ids,
+            query=query,
+            mode=graph_mode,
+        )
+        if graph_error:
+            return graph_error
+        graph_context_by_document = {
+            str(context.get("document_id") or ""): context
+            for context in graph_contexts
+        }
         emit_progress("mapping", 0)
 
         def build_document_summary(doc_id: str) -> Dict[str, Any]:
@@ -2058,6 +2254,8 @@ class RAGTool(Tool):
                 query=query,
                 limit=max(limit, 12),
                 results=doc_results,
+                graph_mode=graph_mode,
+                graph_context=graph_context_by_document.get(doc_id),
             )
             cached = self._get_cached_document_summary(cache_key)
             if cached is not None:
@@ -2076,6 +2274,18 @@ class RAGTool(Tool):
             context, sources, truncated = self._build_context(
                 prepared, token_budget=budget, return_details=True
             )
+            document_graph_context = graph_context_by_document.get(doc_id)
+            document_graph_contexts = (
+                [document_graph_context]
+                if document_graph_context is not None
+                else []
+            )
+            context = self._append_graph_context(
+                context,
+                self._format_graph_context(document_graph_contexts),
+                token_budget=budget,
+            )
+            graph_sources = self._graph_sources(document_graph_contexts)
             if is_cancelled():
                 return {"document_id": doc_id, "status": "cancelled"}
             summary = self._generate(
@@ -2099,8 +2309,12 @@ class RAGTool(Tool):
                 ),
                 "status": "ok",
                 "summary": summary,
-                "source_refs": [source["citation_id"] for source in sources],
+                "source_refs": (
+                    [source["citation_id"] for source in sources]
+                    + [source["citation_id"] for source in graph_sources]
+                ),
                 "sources": sources,
+                "graph_sources": graph_sources,
                 "truncated": truncated,
                 "error": None,
                 "cache_hit": False,
@@ -2155,6 +2369,7 @@ class RAGTool(Tool):
             )
             return f"🔍 所选文档没有可用于联合总结的内容\n{details}"
 
+        shared_graph_sources = self._graph_sources(shared_graph_contexts)
         self._last_action_data = {
             "summary_documents": len(mapped),
             "summary_cache_hits": sum(
@@ -2163,15 +2378,22 @@ class RAGTool(Tool):
             "summary_cache_misses": sum(
                 1 for item in mapped if not item.get("cache_hit")
             ),
+            "graph_mode": graph_mode,
+            "graph_documents": list(document_ids),
+            "graph_context_count": len(shared_graph_sources) + sum(
+                len(item.get("graph_sources") or []) for item in mapped
+            ),
         }
 
         missing_text = "\n".join(
             f"- {doc_id}: {reason}" for doc_id, reason in failures.items()
         ) or "无"
         all_sources: List[Dict[str, Any]] = []
+        all_graph_sources: List[Dict[str, Any]] = list(shared_graph_sources)
         summary_parts = []
         for item in mapped:
             all_sources.extend(item["sources"])
+            all_graph_sources.extend(item.get("graph_sources") or [])
             allowed = ", ".join(
                 f"[{source_ref}]" for source_ref in item["source_refs"]
             )
@@ -2189,6 +2411,11 @@ class RAGTool(Tool):
             )
             summary_context, reduce_truncated = self._fit_summary_context(
                 summary_parts, reduce_budget
+            )
+            summary_context = self._append_graph_context(
+                summary_context,
+                self._format_graph_context(shared_graph_contexts),
+                token_budget=reduce_budget,
             )
             if is_cancelled():
                 return "⏹️ 联合总结已取消"
@@ -2226,7 +2453,12 @@ class RAGTool(Tool):
             return self._capacity_error()
         truncated = reduce_truncated or any(item["truncated"] for item in mapped)
         emit_progress("completed", total_documents)
-        return self._format_answer(answer, all_sources, truncated=truncated)
+        return self._format_answer(
+            answer,
+            all_sources,
+            truncated=truncated,
+            graph_sources=all_graph_sources,
+        )
 
     def _fit_summary_context(
         self,

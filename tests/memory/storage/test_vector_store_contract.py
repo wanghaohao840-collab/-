@@ -1,9 +1,12 @@
+from datetime import datetime
+
 import pytest
 
 from hello_agents.memory.rag.errors import RAGCollectionError
 from hello_agents.memory.storage.vector_store import (
     InMemoryVectorStore,
     VectorPoint,
+    VectorRange,
     VectorStore,
 )
 
@@ -56,3 +59,42 @@ def test_vector_store_rejects_collection_dimension_changes(store):
 
     with pytest.raises(RAGCollectionError, match="expected 3"):
         store.ensure_collection("documents", dimension=3)
+
+
+def test_in_memory_store_supports_numeric_and_datetime_ranges(store):
+    store.ensure_collection("episodes", dimension=2)
+    store.upsert(
+        "episodes",
+        [
+            VectorPoint(
+                "old",
+                [1.0, 0.0],
+                {"importance": 0.9, "timestamp": "2026-01-01T00:00:00"},
+            ),
+            VectorPoint(
+                "target",
+                [1.0, 0.0],
+                {"importance": 0.8, "timestamp": "2026-07-01T00:00:00"},
+            ),
+            VectorPoint(
+                "low",
+                [1.0, 0.0],
+                {"importance": 0.2, "timestamp": "2026-07-01T00:00:00"},
+            ),
+        ],
+    )
+
+    hits = store.search(
+        "episodes",
+        [1.0, 0.0],
+        filters={
+            "importance": VectorRange(gte=0.5),
+            "timestamp": VectorRange(
+                gte=datetime.fromisoformat("2026-06-01T00:00:00"),
+                lte=datetime.fromisoformat("2026-08-01T00:00:00"),
+            ),
+        },
+        limit=10,
+    )
+
+    assert [hit.id for hit in hits] == ["target"]

@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date, datetime
 from threading import RLock
 from typing import Any, Iterable, Mapping, Optional, Protocol, runtime_checkable
 
@@ -19,7 +20,33 @@ from hello_agents.memory.rag.errors import (
 
 
 VectorFilter = Mapping[str, Any]
-_SUPPORTED_PAYLOAD_INDEX_SCHEMAS = {"keyword", "integer"}
+_SUPPORTED_PAYLOAD_INDEX_SCHEMAS = {"keyword", "integer", "float", "datetime"}
+
+
+@dataclass(frozen=True)
+class VectorRange:
+    lt: Any = None
+    lte: Any = None
+    gt: Any = None
+    gte: Any = None
+
+    def bounds(self) -> dict[str, Any]:
+        return {
+            name: value
+            for name, value in (
+                ("lt", self.lt),
+                ("lte", self.lte),
+                ("gt", self.gt),
+                ("gte", self.gte),
+            )
+            if value is not None
+        }
+
+    def uses_datetime(self) -> bool:
+        return any(
+            isinstance(value, (date, datetime))
+            for value in self.bounds().values()
+        )
 
 
 @dataclass(frozen=True)
@@ -257,12 +284,48 @@ class InMemoryVectorStore:
             return True
         for key, expected in filters.items():
             actual = point.id if key == "_id" else point.payload.get(key)
-            if isinstance(expected, (list, tuple, set, frozenset)):
+            if isinstance(expected, VectorRange):
+                if not self._matches_range(actual, expected):
+                    return False
+            elif isinstance(expected, (list, tuple, set, frozenset)):
                 if actual not in expected:
                     return False
             elif actual != expected:
                 return False
         return True
+
+    @staticmethod
+    def _matches_range(actual: Any, expected: VectorRange) -> bool:
+        if actual is None:
+            return False
+        if expected.uses_datetime() and isinstance(actual, str):
+            try:
+                actual = datetime.fromisoformat(actual.replace("Z", "+00:00"))
+            except ValueError:
+                return False
+        bounds = expected.bounds()
+        if (
+            isinstance(actual, datetime)
+            and bounds
+            and all(
+                isinstance(bound, date) and not isinstance(bound, datetime)
+                for bound in bounds.values()
+            )
+        ):
+            actual = actual.date()
+        try:
+            for operator, bound in bounds.items():
+                if operator == "lt" and not actual < bound:
+                    return False
+                if operator == "lte" and not actual <= bound:
+                    return False
+                if operator == "gt" and not actual > bound:
+                    return False
+                if operator == "gte" and not actual >= bound:
+                    return False
+            return True
+        except TypeError:
+            return False
 
     @staticmethod
     def _select_payload(
@@ -556,6 +619,22 @@ class QdrantVectorStore:
         conditions = []
         for key, value in filters.items():
             if key == "_id":
+                continue
+            if isinstance(value, VectorRange):
+                bounds = value.bounds()
+                if self.models:
+                    range_type = (
+                        self.models.DatetimeRange
+                        if value.uses_datetime()
+                        else self.models.Range
+                    )
+                    condition = self.models.FieldCondition(
+                        key=key,
+                        range=range_type(**bounds),
+                    )
+                else:
+                    condition = _Object(key=key, range=_Object(**bounds))
+                conditions.append(condition)
                 continue
             if isinstance(value, (list, tuple, set, frozenset)):
                 match = self.models.MatchAny(any=list(value)) if self.models else _Object(any=list(value))

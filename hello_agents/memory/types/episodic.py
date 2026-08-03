@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Set
 from hello_agents.memory.base import MemoryConfig, MemoryItem, Episode
 from hello_agents.memory.embedding import create_embedding_model_with_fallback
 from hello_agents.memory.storage.document_store import SQLiteDocumentStore
-from hello_agents.memory.storage.vector_store import InMemoryVectorStore
+from hello_agents.memory.storage.qdrant_store import QdrantConnectionManager
+from hello_agents.memory.storage.vector_store import VectorPoint, VectorRange, VectorStore
 
 
 class EpisodicMemory:
@@ -27,15 +28,37 @@ class EpisodicMemory:
 
         self.doc_store = SQLiteDocumentStore(config.database_path)
 
-        self.vector_store = storage_backend or InMemoryVectorStore(
-            collection_name=getattr(config, "qdrant_collection", "hello_agents_vectors"),
-            dimension=getattr(config, "qdrant_vector_size", 384),
+        self.vector_collection = getattr(
+            config, "qdrant_collection", "hello_agents_vectors"
+        )
+        self.vector_store: VectorStore = storage_backend or QdrantConnectionManager.get_instance(
+            qdrant_url=getattr(config, "qdrant_url", None),
+            qdrant_api_key=getattr(config, "qdrant_api_key", None),
+            collection_name=self.vector_collection,
+            vector_size=getattr(config, "qdrant_vector_size", 384),
+            tenant_id=getattr(config, "tenant_id", None),
+            rag_namespace=getattr(config, "rag_namespace", None),
+        )
+        self.vector_store.ensure_collection(
+            self.vector_collection,
+            getattr(config, "qdrant_vector_size", 384),
+        )
+        self.vector_store.ensure_payload_indexes(
+            self.vector_collection,
+            {
+                "memory_type": "keyword",
+                "user_id": "keyword",
+                "session_id": "keyword",
+                "importance": "float",
+                "timestamp": "datetime",
+            },
         )
 
         self.embedder = create_embedding_model_with_fallback()
 
         self.sessions: Dict[str, List[str]] = {}
         self._episodes: Dict[str, Episode] = {}
+        self._normalized_timestamp_users: Set[str] = set()
 
     def close(self) -> None:
         if hasattr(self, "doc_store") and self.doc_store is not None:
@@ -48,7 +71,7 @@ class EpisodicMemory:
         episode = Episode(
             episode_id=memory_item.id,
             session_id=memory_item.metadata.get("session_id", "default"),
-            timestamp=memory_item.timestamp,
+            timestamp=self._canonical_timestamp(memory_item.timestamp),
             content=memory_item.content,
             context={
                 **memory_item.metadata,
@@ -88,7 +111,11 @@ class EpisodicMemory:
         hits = self._vector_search(
             query=query,
             limit=max(limit * 5, 20),
-            user_id=kwargs.get("user_id")
+            user_id=kwargs.get("user_id"),
+            session_id=kwargs.get("session_id"),
+            min_importance=kwargs.get("min_importance", 0.0),
+            start_time=kwargs.get("start_time"),
+            end_time=kwargs.get("end_time"),
         )
 
         results = []
@@ -133,8 +160,11 @@ class EpisodicMemory:
             if not should_forget:
                 keep[episode_id] = episode
 
+        removed_ids = sorted(previous_ids - set(keep))
+        if removed_ids:
+            self._delete_episode_ids(removed_ids)
+
         self._episodes = keep
-        self.vector_store.delete_vectors(list(previous_ids - set(self._episodes)))
 
         self.sessions = {}
         for episode in self._episodes.values():
@@ -145,9 +175,48 @@ class EpisodicMemory:
     def clear(self) -> None:
         """清空情景记忆"""
 
+        episode_ids = list(self._episodes)
+        if episode_ids:
+            self._delete_episode_ids(episode_ids)
         self.sessions.clear()
         self._episodes.clear()
-        self.vector_store.clear()
+
+    def _delete_episode_ids(self, episode_ids: List[str]) -> None:
+        """Delete both durable copies, restoring SQLite if cleanup is interrupted."""
+
+        snapshots = {}
+        for episode_id in episode_ids:
+            document = self.doc_store.get_document(episode_id)
+            if document is not None:
+                snapshots[episode_id] = document
+
+        try:
+            for episode_id in episode_ids:
+                self.doc_store.delete_document(episode_id)
+
+            self.vector_store.delete_by_filter(
+                self.vector_collection,
+                {"_id": episode_ids},
+            )
+        except Exception as cleanup_error:
+            rollback_errors = []
+            for episode_id, document in snapshots.items():
+                try:
+                    self.doc_store.add_document(
+                        doc_id=episode_id,
+                        content=document["content"],
+                        metadata=document["metadata"],
+                    )
+                except Exception as rollback_error:
+                    rollback_errors.append(f"{episode_id}: {rollback_error}")
+
+            if rollback_errors:
+                details = "; ".join(rollback_errors)
+                raise RuntimeError(
+                    "Episodic cleanup failed and SQLite rollback was incomplete: "
+                    f"{details}"
+                ) from cleanup_error
+            raise
 
     def count(self) -> int:
         """返回情景记忆数量"""
@@ -188,10 +257,9 @@ class EpisodicMemory:
 
             embedding = [float(x) for x in embedding]
 
-            self.vector_store.add_vectors(
-                vectors=[embedding],
-                metadata=[metadata],
-                ids=[episode.episode_id]
+            self.vector_store.upsert(
+                self.vector_collection,
+                [VectorPoint(episode.episode_id, embedding, metadata)],
             )
 
         except Exception as e:
@@ -242,7 +310,11 @@ class EpisodicMemory:
         self,
         query: str,
         limit: int = 20,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        min_importance: float = 0.0,
+        start_time: Any = None,
+        end_time: Any = None,
     ) -> List[Dict[str, Any]]:
         """向量检索"""
 
@@ -251,7 +323,21 @@ class EpisodicMemory:
         if user_id:
             where["user_id"] = user_id
 
+        if session_id:
+            where["session_id"] = session_id
+
+        where["importance"] = VectorRange(gte=float(min_importance))
+
+        if start_time or end_time:
+            where["timestamp"] = VectorRange(
+                gte=self._parse_timestamp(start_time) if start_time else None,
+                lte=self._parse_timestamp(end_time) if end_time else None,
+            )
+
         try:
+            if user_id and (start_time or end_time):
+                self._normalize_remote_timestamps(user_id)
+
             query_vector = self.embedder.encode(query)
 
             if hasattr(query_vector, "tolist"):
@@ -262,19 +348,58 @@ class EpisodicMemory:
 
             query_vector = [float(x) for x in query_vector]
 
-            hits = self.vector_store.search_similar(
-                query_vector=query_vector,
+            hits = self.vector_store.search(
+                self.vector_collection,
+                query_vector,
+                filters=where,
                 limit=limit,
-                where=where
             )
 
             if hits:
-                return hits
+                return [
+                    {
+                        "id": hit.id,
+                        "score": hit.score,
+                        "metadata": hit.payload,
+                    }
+                    for hit in hits
+                ]
 
         except Exception as e:
             print(f"[WARNING] Qdrant 情景记忆检索失败，改用关键词兜底: {e}")
 
         return self._fallback_keyword_search(query, limit, user_id)
+
+    def _normalize_remote_timestamps(self, user_id: str) -> None:
+        """Normalize recognized legacy timestamps for one user's episodic points."""
+
+        if user_id in self._normalized_timestamp_users:
+            return
+
+        points = self.vector_store.scroll(
+            self.vector_collection,
+            filters={"memory_type": "episodic", "user_id": user_id},
+            with_vectors=True,
+        )
+        updates = []
+        for point in points:
+            timestamp = point.payload.get("timestamp")
+            parsed = self._try_parse_timestamp(timestamp)
+            if parsed is None:
+                continue
+
+            canonical = parsed.isoformat()
+            if timestamp == canonical:
+                continue
+
+            payload = dict(point.payload)
+            payload["timestamp"] = canonical
+            updates.append(VectorPoint(point.id, point.vector, payload))
+
+        if updates:
+            self.vector_store.upsert(self.vector_collection, updates)
+
+        self._normalized_timestamp_users.add(user_id)
 
     def _fallback_keyword_search(
         self,
@@ -431,13 +556,32 @@ class EpisodicMemory:
     def _parse_timestamp(self, timestamp: Any) -> datetime:
         """解析时间戳"""
 
+        return self._try_parse_timestamp(timestamp) or datetime.now()
+
+    def _canonical_timestamp(self, timestamp: Any) -> str:
+        return (self._try_parse_timestamp(timestamp) or datetime.now()).isoformat()
+
+    def _try_parse_timestamp(self, timestamp: Any) -> Optional[datetime]:
         if isinstance(timestamp, datetime):
             return timestamp
 
         if not timestamp:
-            return datetime.now()
+            return None
 
+        value = str(timestamp)
         try:
-            return datetime.fromisoformat(str(timestamp))
-        except Exception:
-            return datetime.now()
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+
+        for timestamp_format in (
+            "%Y/%m/%d",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+        ):
+            try:
+                return datetime.strptime(value, timestamp_format)
+            except ValueError:
+                continue
+
+        return None

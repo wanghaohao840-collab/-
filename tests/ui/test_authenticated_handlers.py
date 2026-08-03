@@ -10,6 +10,7 @@ Covers packet 04 acceptance criteria:
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 import gradio as gr
 import pytest
@@ -52,6 +53,9 @@ def _require_raises_gr_error(handler, *args, match=None):
 
 STATE_CHANGING_HANDLERS = [
     ("upload_document",  lambda token: (token, None)),
+    ("submit_import_batch", lambda token: (token, [])),
+    ("retry_import_task", lambda token: (token, "task-id")),
+    ("retry_import_batch_failures", lambda token: (token, "batch-id")),
     ("add_note",         lambda token: (token, "test note", "concept")),
     ("clear_all_notes",  lambda token: (token,)),
     ("ask_pdf",          lambda token: (token, "what is this?", None, "auto")),
@@ -70,6 +74,29 @@ STATE_CHANGING_HANDLERS = [
     ("generate_report",  lambda token: (token,)),
     ("recall_memory",    lambda token: (token, "keyword")),
     ("show_stats",       lambda token: (token,)),
+]
+
+
+AUTHENTICATED_READ_HANDLERS = [
+    ("refresh_import_batches", lambda token: (token,)),
+    ("refresh_import_batch", lambda token: (token, "batch-id")),
+    (
+        "select_import_task",
+        lambda token: (token, "batch-id", SimpleNamespace(index=(0, 0))),
+    ),
+]
+
+AUTHENTICATED_IMPORT_HANDLERS = [
+    ("upload_document", lambda token: (token, None)),
+    ("submit_import_batch", lambda token: (token, [])),
+    ("refresh_import_batches", lambda token: (token,)),
+    ("refresh_import_batch", lambda token: (token, "batch-id")),
+    (
+        "select_import_task",
+        lambda token: (token, "batch-id", SimpleNamespace(index=(0, 0))),
+    ),
+    ("retry_import_task", lambda token: (token, "task-id")),
+    ("retry_import_batch_failures", lambda token: (token, "batch-id")),
 ]
 
 
@@ -121,6 +148,18 @@ class TestHandlerRejectsForgedToken:
         _require_raises_gr_error(handler, *args,
                                  match=["log out", "expired", "log in"])
 
+    @pytest.mark.parametrize("name,args_fn", AUTHENTICATED_READ_HANDLERS)
+    def test_read_handler_rejects_forged_token(self, name, args_fn, tmp_path,
+                                                monkeypatch):
+        isolated = _make_isolated_registry(tmp_path)
+        monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
+
+        _require_raises_gr_error(
+            _get_handler(name),
+            *args_fn("forged-token-never-registered"),
+            match=["log out", "expired", "log in"],
+        )
+
 
 class TestHandlerRejectsExpiredToken:
     """Every state-changing handler rejects an expired token without
@@ -138,6 +177,21 @@ class TestHandlerRejectsExpiredToken:
         args = args_fn(token)
         _require_raises_gr_error(handler, *args,
                                  match=["log out", "expired", "log in"])
+
+    @pytest.mark.parametrize("name,args_fn", AUTHENTICATED_READ_HANDLERS)
+    def test_read_handler_rejects_expired_token(self, name, args_fn, tmp_path,
+                                                 monkeypatch):
+        isolated = _make_isolated_registry(
+            tmp_path, idle_timeout=timedelta(seconds=-1),
+        )
+        token = isolated.register("ReadAuthTest", "correct horse battery")
+        monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
+
+        _require_raises_gr_error(
+            _get_handler(name),
+            *args_fn(token),
+            match=["log out", "expired", "log in"],
+        )
 
 
 class TestRejectedTokenNoStateChange:
@@ -192,3 +246,39 @@ class TestRejectedTokenNoStateChange:
         assert history_path.read_bytes() == original_bytes, (
             "History was modified by expired-token handler call"
         )
+
+    @pytest.mark.parametrize("name,args_fn", AUTHENTICATED_IMPORT_HANDLERS)
+    @pytest.mark.parametrize("token_kind", ["forged", "expired"])
+    def test_rejected_import_handler_changes_no_persistent_state(
+        self, name, args_fn, token_kind, tmp_path, monkeypatch,
+    ):
+        isolated = _make_isolated_registry(tmp_path)
+        token = isolated.register("ImportAuthTest", "correct horse battery")
+        session = isolated.get_session(token)
+        paths = isolated.storage.ensure_user_dirs(session.user_id)
+        session.assistant.add_note("unchanged", concept="authorization")
+
+        if token_kind == "forged":
+            rejected_token = "forged-token"
+        else:
+            isolated.idle_timeout = timedelta(seconds=-1)
+            rejected_token = token
+
+        def snapshot():
+            return {
+                str(path.relative_to(tmp_path)): path.read_bytes()
+                for path in tmp_path.rglob("*")
+                if path.is_file()
+            }
+
+        before = snapshot()
+        monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
+
+        _require_raises_gr_error(
+            _get_handler(name),
+            *args_fn(rejected_token),
+            match=["log out", "expired", "log in"],
+        )
+
+        assert snapshot() == before
+        assert not any(paths.imports.iterdir())
