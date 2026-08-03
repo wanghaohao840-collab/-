@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import gradio as gr
 import pytest
@@ -129,6 +130,23 @@ def test_retry_handler_passes_only_current_session_token(monkeypatch):
     module.retry_import_task("token-a", "task-a")
 
     assert service.calls == [("retry_task", "token-a", "task-a")]
+
+
+def test_selected_row_resolves_to_server_owned_task_id(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    task_id = module.select_import_task(
+        "token-a",
+        "batch-a",
+        SimpleNamespace(index=(0, 0)),
+    )
+
+    assert task_id == "task-a"
+    assert service.calls == [("get_batch", "token-a", "batch-a")]
 
 
 def test_empty_poll_does_not_query_service(monkeypatch):
