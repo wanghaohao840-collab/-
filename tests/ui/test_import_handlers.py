@@ -216,7 +216,13 @@ def test_initialize_services_is_idempotent_without_starting_workers(monkeypatch)
 
     calls = []
     storage = object()
-    registry = SimpleNamespace(storage=storage, runtime_registry=object())
+    injected = []
+    registry = SimpleNamespace(
+        storage=storage,
+        runtime_registry=SimpleNamespace(
+            set_import_task_service=lambda service: injected.append(service)
+        ),
+    )
     pool = SimpleNamespace(start=lambda: calls.append("start"), stop=lambda: None)
     monkeypatch.setattr(module, "session_registry", None)
     monkeypatch.setattr(module, "legacy_migration", None)
@@ -237,6 +243,7 @@ def test_initialize_services_is_idempotent_without_starting_workers(monkeypatch)
     assert [call for call in calls if call == "start"] == []
     assert len([call for call in calls if isinstance(call, tuple)]) == 1
     assert module.import_worker_pool is pool
+    assert injected == [module.import_service]
 
 
 def test_script_worker_startup_is_idempotent(monkeypatch):

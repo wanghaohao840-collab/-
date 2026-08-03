@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
-class ActiveImportRepository:
+class ActiveImportService:
     def __init__(self, active=True):
         self.active = active
         self.calls = []
@@ -14,10 +14,10 @@ class ActiveImportRepository:
 
 
 def test_clear_all_documents_refuses_while_user_has_active_imports(monkeypatch):
-    repository = ActiveImportRepository()
+    service = ActiveImportService()
     assistant = object.__new__(PDFLearningAssistant)
     assistant.user_id = "user-a"
-    assistant.runtime = SimpleNamespace(import_task_repository=repository)
+    assistant.runtime = SimpleNamespace(import_task_service=service)
     monkeypatch.setattr(
         assistant,
         "_clear_documents_coordinated",
@@ -27,4 +27,4 @@ def test_clear_all_documents_refuses_while_user_has_active_imports(monkeypatch):
     result = assistant.clear_all_documents()
 
     assert "imports are active" in result
-    assert repository.calls == ["user-a"]
+    assert service.calls == ["user-a"]

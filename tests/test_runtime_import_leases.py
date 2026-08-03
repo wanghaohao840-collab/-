@@ -77,3 +77,16 @@ def test_two_sessions_release_the_runtime_only_after_both_logout(tmp_path):
     sessions.logout(second_token)
 
     assert sessions.runtime_registry.has_runtime(runtime.user_id) is False
+
+
+def test_import_service_injection_updates_existing_and_future_runtimes(tmp_path):
+    registry = make_registry(tmp_path)
+    existing = registry.get_or_create("user-a")
+    service = object()
+
+    registry.set_import_task_service(service)
+
+    assert existing.import_task_service is service
+    assert registry.get_or_create("user-b").import_task_service is service
+    registry.set_import_task_service(service)
+    assert existing.import_task_service is service

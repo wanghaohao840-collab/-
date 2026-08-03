@@ -28,7 +28,7 @@ class UserRuntime:
     recovery: RecoveryService
     active_session_count: int = 0
     active_background_count: int = 0
-    import_task_repository: object | None = None
+    import_task_service: object | None = None
 
     def close(self) -> None:
         close = getattr(self.rag_tool, "close", None)
@@ -45,7 +45,20 @@ class UserRuntimeRegistry:
         self.storage = storage
         self._runtimes: dict[str, UserRuntime] = {}
         self._lock = RLock()
-        self.import_task_repository: object | None = None
+        self.import_task_service: object | None = None
+
+    def set_import_task_service(self, service: object | None) -> None:
+        """Inject the optional durable-import service into all user runtimes.
+
+        The UI creates its service after the session registry.  Updating both
+        future and already-created runtimes keeps destructive-operation guards
+        correct for sessions established during application initialization.
+        """
+
+        with self._lock:
+            self.import_task_service = service
+            for runtime in self._runtimes.values():
+                runtime.import_task_service = service
 
     def get_or_create(self, user_id: str) -> UserRuntime:
         with self._lock:
@@ -94,7 +107,7 @@ class UserRuntimeRegistry:
                 history=history_repo,
                 reports=ReportService(self.db_path, self.storage),
                 recovery=recovery,
-                import_task_repository=self.import_task_repository,
+                import_task_service=self.import_task_service,
             )
             self._runtimes[user_id] = runtime
             return runtime

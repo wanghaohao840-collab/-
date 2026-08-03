@@ -7,6 +7,7 @@
 - 用户注册、登录、退出和会话过期管理；
 - 用户级文档、RAG、Memory、历史和报告数据隔离；
 - PDF、TXT、Markdown（`.md`）和 Word（`.docx`）导入；
+- 持久化批量异步导入、阶段进度、失败重试和重启恢复；
 - 单文档及多文档联合问答、对比分析和联合总结；
 - JSON 本地 RAG 与 Qdrant RAG 后端切换；
 - 文档检索、PDF 页码来源、相关度和可复制引用；
@@ -41,6 +42,27 @@
 导入流程会生成独立的 `document_id`，保存用户原始文件，切分 Chunk、生成嵌入并写入当前 RAG 后端。支持刷新列表、切换文档、删除所选文档和清空当前用户的全部文档。
 
 > 存储层已预留 `.markdown` 扩展名，但当前 Gradio 上传控件和 RAG 解析入口尚未完整贯通该扩展名，因此端到端支持列表以表格为准。
+
+### Durable batch imports
+
+The upload panel accepts up to 20 PDF, TXT, Markdown, or DOCX files in one
+batch. Each file may be at most 100 MiB and a batch may be at most 500 MiB.
+The server stages each source and stores its task state in SQLite, so an
+accepted import continues after logout or browser close.
+
+- Imports are serial for one user and run for at most four users in parallel.
+- Progress reports the durable stages: staging, parsing, chunking, embedding,
+  RAG persistence, and committing.
+- Transient failures retry after 2, 10, and 30 seconds. Failed files can be
+  retried individually or as all failed entries in a batch.
+- On restart, a running task with its staged source resumes; a missing staged
+  source becomes a failed task. Failed staged files are retained for retry,
+  while successful imports remove their staging copy.
+- Clearing all documents is unavailable while that user has queued, running,
+  or retry-wait import tasks.
+
+The first version intentionally has no cancellation, priority scheduling, or
+distributed workers.
 
 ### 多文档问答
 
@@ -175,7 +197,7 @@ Neo4j 模块已经支持文档图谱构建、状态、恢复、查询、重试�
 ```powershell
 cd D:\python_self_agent
 python -m venv venv
-.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m pip install "gradio==6.19.0" -r requirements.txt
 ```
 
 后续启动和测试均使用 `venv\Scripts\python.exe`，避免系统 Python、Anaconda
@@ -183,7 +205,7 @@ python -m venv venv
 
 主要依赖：
 
-- Gradio
+- Gradio 6.19.0 (`gradio==6.19.0`)
 - OpenAI Python SDK
 - pypdf
 - python-docx
@@ -428,7 +450,6 @@ powershell -ExecutionPolicy Bypass -File scripts\run_qdrant_integration.ps1
 后续可继续推进：
 
 - GraphRAG 图谱可视化与实体人工复核 UI；
-- 批量导入、异步任务、上传进度和失败重试队列；
 - 文档命中高亮与引用一键复制；
 - 学习计划、间隔复习和知识掌握度；
 - 自动生成知识卡片与练习题；

@@ -62,6 +62,7 @@ def initialize_app_services() -> None:
         session_registry.storage,
         import_worker_pool,
     )
+    session_registry.runtime_registry.set_import_task_service(import_service)
 
 
 def _require_assistant(session_token):
