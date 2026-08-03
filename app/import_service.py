@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -53,53 +54,55 @@ class ImportTaskService:
         files: Iterable[Any],
         progress: Callable[..., Any] | None = None,
     ) -> ImportBatchSummary:
-        user_id = self._user_id(session_token)
+        session = self._session(session_token)
+        user_id = str(session.user_id)
         pending = [self._inspect_file(item) for item in (files or [])]
         validate_batch_sizes([item.size_bytes for item in pending], self.limits)
 
         batch_id = str(uuid.uuid4())
         batch_dir: Path | None = None
         creates: list[ImportTaskCreate] = []
-        try:
-            for index, item in enumerate(pending, start=1):
-                target = self.storage.staged_import_path(
-                    user_id,
-                    batch_id,
-                    item.task_id,
-                    item.suffix,
-                )
-                batch_dir = target.parent
-                shutil.copyfile(item.source, target)
-                creates.append(
-                    ImportTaskCreate(
-                        task_id=item.task_id,
-                        batch_id=batch_id,
-                        user_id=user_id,
-                        document_id=item.document_id,
-                        original_name=item.original_name,
-                        file_suffix=item.suffix,
-                        size_bytes=item.size_bytes,
-                        staged_relative_path=str(
-                            target.relative_to(self.storage.user_paths(user_id).root)
-                        ),
+        with self._runtime_lock(session):
+            try:
+                for index, item in enumerate(pending, start=1):
+                    target = self.storage.staged_import_path(
+                        user_id,
+                        batch_id,
+                        item.task_id,
+                        item.suffix,
                     )
-                )
-                if progress is not None:
-                    progress(
-                        (index, len(pending)),
-                        desc=f"Staging document {index} of {len(pending)}",
+                    batch_dir = target.parent
+                    shutil.copyfile(item.source, target)
+                    creates.append(
+                        ImportTaskCreate(
+                            task_id=item.task_id,
+                            batch_id=batch_id,
+                            user_id=user_id,
+                            document_id=item.document_id,
+                            original_name=item.original_name,
+                            file_suffix=item.suffix,
+                            size_bytes=item.size_bytes,
+                            staged_relative_path=str(
+                                target.relative_to(self.storage.user_paths(user_id).root)
+                            ),
+                        )
                     )
-        except Exception:
-            if batch_dir is not None:
-                shutil.rmtree(batch_dir, ignore_errors=True)
-            raise ValueError("could not stage uploaded files") from None
+                    if progress is not None:
+                        progress(
+                            (index, len(pending)),
+                            desc=f"Staging document {index} of {len(pending)}",
+                        )
+            except Exception:
+                if batch_dir is not None:
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                raise ValueError("could not stage uploaded files") from None
 
-        try:
-            summary = self.repository.create_batch(user_id, creates)
-        except Exception:
-            if batch_dir is not None:
-                shutil.rmtree(batch_dir, ignore_errors=True)
-            raise
+            try:
+                summary = self.repository.create_batch(user_id, creates)
+            except Exception:
+                if batch_dir is not None:
+                    shutil.rmtree(batch_dir, ignore_errors=True)
+                raise
 
         self.worker_pool.notify()
         return summary
@@ -116,9 +119,11 @@ class ImportTaskService:
         return summary
 
     def retry_task(self, session_token: str, task_id: str) -> ImportBatchSummary:
-        user_id = self._user_id(session_token)
-        task = self.repository.retry_task(user_id, task_id)
-        summary = self.repository.get_batch(user_id, task.batch_id)
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            task = self.repository.retry_task(user_id, task_id)
+            summary = self.repository.get_batch(user_id, task.batch_id)
         if summary is None:  # pragma: no cover - guarded by the task foreign key
             raise KeyError("import batch was not found")
         self.worker_pool.notify()
@@ -127,11 +132,13 @@ class ImportTaskService:
     def retry_failed_in_batch(
         self, session_token: str, batch_id: str
     ) -> ImportBatchSummary:
-        user_id = self._user_id(session_token)
-        if self.repository.get_batch(user_id, batch_id) is None:
-            raise KeyError("import batch was not found")
-        changed = self.repository.retry_failed_in_batch(user_id, batch_id)
-        summary = self.repository.get_batch(user_id, batch_id)
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            if self.repository.get_batch(user_id, batch_id) is None:
+                raise KeyError("import batch was not found")
+            changed = self.repository.retry_failed_in_batch(user_id, batch_id)
+            summary = self.repository.get_batch(user_id, batch_id)
         if changed:
             self.worker_pool.notify()
         return summary
@@ -159,4 +166,13 @@ class ImportTaskService:
         )
 
     def _user_id(self, session_token: str) -> str:
-        return str(self.session_registry.get_session(session_token).user_id)
+        return str(self._session(session_token).user_id)
+
+    def _session(self, session_token: str) -> Any:
+        return self.session_registry.get_session(session_token)
+
+    @staticmethod
+    def _runtime_lock(session: Any):
+        runtime = getattr(session, "runtime", None)
+        lock = getattr(runtime, "lock", None)
+        return lock if lock is not None else nullcontext()

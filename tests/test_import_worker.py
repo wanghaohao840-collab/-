@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -303,6 +304,25 @@ def test_structured_error_code_is_whitelisted_before_persistence(tmp_path):
     assert "secret" not in task.error_summary
 
 
+def test_persisted_error_summary_redacts_common_credential_formats(tmp_path):
+    _, repository, _, _, clock, user_id, task_id = make_runner(tmp_path)
+    claimed = claim(repository, clock)
+    repository.mark_failed(
+        user_id,
+        claimed.task_id,
+        "unexpected_error",
+        "backend rejected password: p@ss token=tok Authorization: Bearer bearer "
+        'url=https://alice:secret@host.local/api json={"client_secret":"json-secret"}',
+        now=clock.iso(),
+    )
+
+    task = repository.get_task(user_id, task_id)
+    assert task is not None
+    assert "backend rejected" in task.error_summary
+    for secret in ("p@ss", "token=tok", "Bearer bearer", "alice:secret", "json-secret"):
+        assert secret not in task.error_summary
+
+
 @pytest.mark.parametrize(
     ("error_code", "retryable"),
     [
@@ -338,6 +358,20 @@ class BlockingRunner:
         self.release.wait(timeout=5)
 
 
+class CrashingRunner:
+    def run(self, _task):
+        raise RuntimeError("runner token=private-token")
+
+
+class TerminalThenCrashRunner:
+    def __init__(self, repository):
+        self.repository = repository
+
+    def run(self, task):
+        self.repository.mark_succeeded(task.user_id, task.task_id)
+        raise RuntimeError("crashed after success")
+
+
 def wait_for(predicate, timeout=3):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -345,6 +379,125 @@ def wait_for(predicate, timeout=3):
             return
         time.sleep(0.01)
     raise AssertionError("condition was not met before timeout")
+
+
+def test_worker_pool_marks_crashed_runner_task_failed_and_stays_alive(tmp_path):
+    _, repository, storage, runtimes, _, user_id, task_id = make_runner(tmp_path)
+    pool = ImportWorkerPool(
+        repository, runtimes, storage, runner=CrashingRunner(), worker_count=1
+    )
+
+    pool.start()
+    try:
+        wait_for(lambda: repository.get_task(user_id, task_id).status == "failed")
+        task = repository.get_task(user_id, task_id)
+        assert task.error_code == "unexpected_error"
+        assert "private-token" not in task.error_summary
+        assert pool._worker_threads[0].is_alive()
+    finally:
+        pool.stop(wait=True)
+
+
+def test_worker_pool_preserves_terminal_transition_before_runner_crash(tmp_path):
+    _, repository, storage, runtimes, _, user_id, task_id = make_runner(tmp_path)
+    pool = ImportWorkerPool(
+        repository,
+        runtimes,
+        storage,
+        runner=TerminalThenCrashRunner(repository),
+        worker_count=1,
+    )
+
+    pool.start()
+    try:
+        wait_for(lambda: repository.get_task(user_id, task_id).status == "succeeded")
+        task = repository.get_task(user_id, task_id)
+        assert task.error_code is None
+        assert task.error_summary is None
+    finally:
+        pool.stop(wait=True)
+
+
+def test_worker_pool_retries_busy_failure_transition(tmp_path, monkeypatch):
+    _, repository, storage, runtimes, _, user_id, task_id = make_runner(tmp_path)
+    calls = 0
+    original_mark_failed = repository.mark_failed
+
+    def busy_then_mark_failed(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return original_mark_failed(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "mark_failed", busy_then_mark_failed)
+    pool = ImportWorkerPool(
+        repository, runtimes, storage, runner=CrashingRunner(), worker_count=1
+    )
+
+    pool.start()
+    try:
+        wait_for(lambda: repository.get_task(user_id, task_id).status == "failed")
+        assert calls == 3
+    finally:
+        pool.stop(wait=True)
+
+
+def test_worker_pool_recovers_first_terminal_write_failure_and_runs_next_task(
+    tmp_path, monkeypatch
+):
+    runner, repository, storage, runtimes, _, user_id, first_task_id = make_runner(
+        tmp_path, failures=[ValueError("corrupt document")]
+    )
+    second_batch_id = str(uuid.uuid4())
+    second_task_id = str(uuid.uuid4())
+    second_staged = storage.staged_import_path(
+        user_id, second_batch_id, second_task_id, ".md"
+    )
+    second_staged.write_bytes(b"second")
+    repository.create_batch(
+        user_id,
+        [
+            ImportTaskCreate(
+                task_id=second_task_id,
+                batch_id=second_batch_id,
+                user_id=user_id,
+                document_id=str(uuid.uuid4()),
+                original_name="second.md",
+                file_suffix=".md",
+                size_bytes=6,
+                staged_relative_path=str(
+                    second_staged.relative_to(storage.user_paths(user_id).root)
+                ),
+            )
+        ],
+    )
+    original_mark_failed = repository.mark_failed
+    failed_once = False
+
+    def fail_first_terminal_write(*args, **kwargs):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise OSError("terminal state store unavailable")
+        return original_mark_failed(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "mark_failed", fail_first_terminal_write)
+    pool = ImportWorkerPool(
+        repository, runtimes, storage, runner=runner, worker_count=1
+    )
+
+    pool.start()
+    try:
+        wait_for(
+            lambda: repository.get_task(user_id, second_task_id).status == "succeeded"
+        )
+    finally:
+        pool.stop(wait=True)
+
+    assert failed_once is True
+    assert repository.get_task(user_id, first_task_id).status == "failed"
+    assert repository.get_task(user_id, second_task_id).status == "succeeded"
 
 
 def test_worker_pool_starts_four_non_daemon_workers_and_serializes_each_user(tmp_path):

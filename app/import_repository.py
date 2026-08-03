@@ -14,6 +14,7 @@ from app.import_models import (
     ImportTaskRecord,
 )
 from app.storage import UserStorage
+from hello_agents.memory.rag.errors import sanitize_error_message
 
 
 class InvalidImportTransition(ValueError):
@@ -224,6 +225,7 @@ class ImportTaskRepository:
         now: str | None = None,
     ) -> ImportTaskRecord:
         timestamp = now or _utc_now()
+        error_summary = sanitize_error_message(error_summary)[:500]
         return self._transition_update(
             user_id,
             task_id,
@@ -243,6 +245,7 @@ class ImportTaskRepository:
         now: str | None = None,
     ) -> ImportTaskRecord:
         timestamp = now or _utc_now()
+        error_summary = sanitize_error_message(error_summary)[:500]
         return self._transition_update(
             user_id,
             task_id,

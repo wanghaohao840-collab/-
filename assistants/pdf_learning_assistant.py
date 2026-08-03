@@ -870,12 +870,14 @@ class PDFLearningAssistant:
         """清空全部 PDF：清空 RAG 知识库 + 清理学习历史中的文档和问答记录 + 重置当前 PDF"""
 
         runtime = getattr(self, "runtime", None)
-        import_task_service = getattr(runtime, "import_task_service", None)
-        if import_task_service is not None and import_task_service.has_active_tasks(
-            self.user_id
-        ):
-            return "Cannot clear documents while imports are active; wait for them to finish."
-        return self._clear_documents_coordinated()
+        runtime_lock = getattr(runtime, "lock", None)
+        with runtime_lock or self._write_lock:
+            import_task_service = getattr(runtime, "import_task_service", None)
+            if import_task_service is not None and import_task_service.has_active_tasks(
+                self.user_id
+            ):
+                return "Cannot clear documents while imports are active; wait for them to finish."
+            return self._clear_documents_coordinated()
 
     def _delete_document_coordinated(self, document_id: str) -> str:
         with self._write_lock:

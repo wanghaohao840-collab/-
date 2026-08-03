@@ -5,12 +5,13 @@ import queue
 import shutil
 import sqlite3
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from app.import_models import ImportTaskRecord
-from app.import_repository import ImportTaskRepository
+from app.import_repository import ImportTaskRepository, InvalidImportTransition
 from app.storage import UserStorage
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 from hello_agents.memory.rag.errors import (
@@ -27,6 +28,7 @@ from hello_agents.memory.rag.errors import (
 
 logger = logging.getLogger(__name__)
 _RETRY_DELAYS = (2, 10, 30)
+_RUNNER_FAILURE_RETRY_DELAYS = (0.02, 0.05, 0.1)
 _STOP = object()
 _SAFE_STRUCTURED_ERROR_CODES = {
     "document_invalid",
@@ -400,6 +402,7 @@ class ImportWorkerPool:
                     self.runner.run(task)
                 except Exception:
                     logger.exception("import task runner failed unexpectedly")
+                    self._record_runner_failure(task)
                 finally:
                     with self._condition:
                         self._blocked_user_ids.discard(task.user_id)
@@ -409,8 +412,62 @@ class ImportWorkerPool:
             finally:
                 self._task_queue.task_done()
 
+    def _record_runner_failure(self, task: ImportTaskRecord) -> None:
+        """Finish a task only when its runner left it in ``running``."""
+
+        for delay in (*_RUNNER_FAILURE_RETRY_DELAYS, None):
+            try:
+                current = self.repository.get_task(task.user_id, task.task_id)
+                if current is None or current.status != "running":
+                    return
+                self.repository.mark_failed(
+                    task.user_id,
+                    task.task_id,
+                    "unexpected_error",
+                    "Import worker failed unexpectedly",
+                )
+                return
+            except sqlite3.OperationalError as error:
+                if not _is_sqlite_busy(error):
+                    logger.exception("could not record import runner failure")
+                    return
+                if delay is not None:
+                    time.sleep(delay)
+            except InvalidImportTransition:
+                return
+            except Exception:
+                logger.exception("could not record import runner failure")
+                return
+
+        # If a transient writer lock survives all failure writes, release the
+        # claim so a later worker can process it rather than stranding it in
+        # ``running`` until an application restart.
+        for delay in (*_RUNNER_FAILURE_RETRY_DELAYS, None):
+            try:
+                current = self.repository.get_task(task.user_id, task.task_id)
+                if current is None or current.status != "running":
+                    return
+                self.repository.release_claim(task.user_id, task.task_id)
+                return
+            except sqlite3.OperationalError as error:
+                if not _is_sqlite_busy(error):
+                    logger.exception("could not release crashed import task")
+                    return
+                if delay is not None:
+                    time.sleep(delay)
+            except InvalidImportTransition:
+                return
+            except Exception:
+                logger.exception("could not release crashed import task")
+                return
+        logger.error("import task remains running after worker failure")
+
 
 def _as_utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _is_sqlite_busy(error: sqlite3.OperationalError) -> bool:
+    return any(marker in str(error).lower() for marker in ("locked", "busy"))

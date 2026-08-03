@@ -59,6 +59,10 @@ _SECRET_QUERY_KEYS = {
     "access_token",
     "authorization",
     "auth",
+    "password",
+    "passwd",
+    "secret",
+    "client_secret",
 }
 
 
@@ -81,19 +85,26 @@ def sanitize_qdrant_url(url: str) -> str:
 
 def sanitize_error_message(message: object, secrets: tuple[str, ...] = ()) -> str:
     text = str(message or "")
-    for key in _SECRET_QUERY_KEYS:
-        text = re.sub(
-            rf"({re.escape(key)}=)([^&\s]+)",
-            rf"\1***",
-            text,
-            flags=re.IGNORECASE,
-        )
     text = re.sub(
-        r"(Authorization:\s*)(?:Bearer\s+)?([^\s,;]+)",
+        r"([a-z][a-z0-9+.-]*://)(?:[^/@\s]+@)",
+        r"\1***@",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(Authorization\s*[:=]\s*)(?:Bearer\s+)?([^\s,;]+)",
         r"\1***",
         text,
         flags=re.IGNORECASE,
     )
+    text = re.sub(r"\b(Bearer\s+)([^\s,;]+)", r"\1***", text, flags=re.IGNORECASE)
+    for key in _SECRET_QUERY_KEYS:
+        text = re.sub(
+            rf"((?:[\"']?{re.escape(key)}[\"']?)\s*[=:]\s*[\"']?)([^\"'&,;\s}}\]]+)",
+            rf"\1***",
+            text,
+            flags=re.IGNORECASE,
+        )
     for secret in secrets:
         if secret:
             text = text.replace(str(secret), "***")
