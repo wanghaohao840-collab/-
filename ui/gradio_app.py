@@ -25,34 +25,50 @@ from ui.launch_config import load_launch_config
 
 
 DATA_ROOT = Path(os.getenv("PDF_ASSISTANT_DATA_DIR", PROJECT_ROOT / "data")).resolve()
-initialize_database(DATA_ROOT / "app.db")
-session_registry = SessionRegistry(
-    db_path=DATA_ROOT / "app.db",
-    storage=UserStorage(DATA_ROOT),
-)
-legacy_migration = LegacyMigrationService(
-    DATA_ROOT / "app.db", session_registry.storage, PROJECT_ROOT
-)
-
-import_repository = ImportTaskRepository(DATA_ROOT / "app.db")
-import_worker_pool = ImportWorkerPool(
-    import_repository,
-    session_registry.runtime_registry,
-    session_registry.storage,
-)
+session_registry = None
+legacy_migration = None
+import_repository = None
+import_worker_pool = None
 _import_workers_started = False
-import_service = ImportTaskService(
-    session_registry,
-    import_repository,
-    session_registry.storage,
-    import_worker_pool,
-)
+import_service = None
 
-UPLOAD_DIR = DATA_ROOT / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+def initialize_app_services() -> None:
+    """Create persistent services for the supported script entry point."""
+
+    global session_registry, legacy_migration, import_repository
+    global import_worker_pool, import_service
+    if session_registry is not None:
+        return
+
+    database_path = DATA_ROOT / "app.db"
+    initialize_database(database_path)
+    session_registry = SessionRegistry(
+        db_path=database_path,
+        storage=UserStorage(DATA_ROOT),
+    )
+    legacy_migration = LegacyMigrationService(
+        database_path, session_registry.storage, PROJECT_ROOT
+    )
+    import_repository = ImportTaskRepository(database_path)
+    import_worker_pool = ImportWorkerPool(
+        import_repository,
+        session_registry.runtime_registry,
+        session_registry.storage,
+    )
+    import_service = ImportTaskService(
+        session_registry,
+        import_repository,
+        session_registry.storage,
+        import_worker_pool,
+    )
 
 
 def _require_assistant(session_token):
+    if not session_token:
+        raise gr.Error("Please log in first")
+    if session_registry is None:
+        raise gr.Error("Application services are not initialized")
     try:
         return session_registry.get_assistant(session_token)
     except InvalidSessionError as exc:
@@ -60,6 +76,10 @@ def _require_assistant(session_token):
 
 
 def _require_session(session_token):
+    if not session_token:
+        raise gr.Error("Please log in first")
+    if session_registry is None:
+        raise gr.Error("Application services are not initialized")
     try:
         return session_registry.get_session(session_token)
     except InvalidSessionError as exc:
@@ -77,6 +97,8 @@ def start_import_workers() -> None:
     global _import_workers_started
     if _import_workers_started:
         return
+    if import_worker_pool is None:
+        raise RuntimeError("Import workers have not been initialized")
     import_worker_pool.start()
     atexit.register(import_worker_pool.stop)
     _import_workers_started = True
@@ -128,6 +150,7 @@ def login_user(username, password):
 
 
 def logout_user(session_token):
+    _require_session(session_token)
     session_registry.logout(session_token)
     empty_ask, empty_search = _empty_dropdowns()
     return "", "Logged out", empty_ask, empty_search
@@ -180,10 +203,20 @@ def _format_import_timestamp(value):
 
 
 def _format_import_error(task) -> str:
+    private_values = (
+        task.user_id,
+        task.staged_relative_path,
+        task.document_id,
+        task.task_id,
+        task.batch_id,
+    )
     safe = sanitize_error_message(
         task.error_summary or "",
-        secrets=(task.user_id, task.staged_relative_path),
+        secrets=private_values,
     )
+    for value in private_values:
+        if value:
+            safe = safe.replace(str(value), "[redacted]")
     safe = _SECRET_ASSIGNMENT_RE.sub("[已脱敏]", safe)
     safe = _WINDOWS_PATH_RE.sub("[路径已脱敏]", safe)
     safe = _UNIX_PATH_RE.sub("[路径已脱敏]", safe)
@@ -192,7 +225,7 @@ def _format_import_error(task) -> str:
 
 def format_batch_summary(summary: ImportBatchSummary) -> str:
     return (
-        f"批次 `{summary.batch_id}`\n\n"
+        "批量导入进度\n\n"
         f"总数：{summary.total}　排队：{summary.queued}　执行中：{summary.running}　"
         f"等待重试：{summary.retry_wait}　成功：{summary.succeeded}　失败：{summary.failed}"
     )
@@ -268,13 +301,15 @@ def refresh_import_batches(session_token):
 
 
 def clear_import_ui():
-    return gr.update(choices=[], value=None), "", []
+    return gr.update(choices=[], value=None), "", [], ""
 
 
 def refresh_import_batch(session_token, batch_id):
-    if not session_token or not batch_id:
+    if not session_token:
         return "", []
     _require_session(session_token)
+    if not batch_id:
+        return "", []
     try:
         summary = import_service.get_batch(session_token, batch_id)
     except KeyError as exc:
@@ -288,9 +323,11 @@ def refresh_import_batch(session_token, batch_id):
 def select_import_task(session_token, batch_id, evt: gr.SelectData):
     """Resolve a selected failed row to its server-owned opaque task ID."""
 
-    if not session_token or not batch_id:
+    if not session_token:
         return ""
     _require_session(session_token)
+    if not batch_id:
+        return ""
     try:
         summary = import_service.get_batch(session_token, batch_id)
     except KeyError as exc:
@@ -823,6 +860,7 @@ def restore_memory(session_token, backup_id):
     return f"{'✅' if result.success else '❌'} {result.message}"
 
 if __name__ == "__main__":
+    initialize_app_services()
     start_import_workers()
 
 
@@ -852,10 +890,6 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
 
         submit_import_btn = gr.Button("提交导入")
 
-        upload_output = gr.Textbox(
-            label="文档导入结果",
-            lines=6
-        )
         import_batch_dropdown = gr.Dropdown(
             label="最近批次",
             choices=[],
@@ -867,6 +901,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             datatype=["str", "str", "str", "number", "number", "str", "str"],
             interactive=False,
         )
+        submitted_import_batch_id = gr.State("")
         selected_import_task_id = gr.State("")
         with gr.Row():
             retry_selected_btn = gr.Button("重试所选失败项")
@@ -1355,7 +1390,12 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         ).then(
             fn=clear_import_ui,
             inputs=None,
-            outputs=[import_batch_dropdown, import_summary, import_tasks],
+            outputs=[
+                import_batch_dropdown,
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+            ],
             queue=False,
         )
 
@@ -1363,7 +1403,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             fn=submit_import_batch,
             inputs=[session_token, import_files],
             outputs=[
-                upload_output,
+                submitted_import_batch_id,
                 import_summary,
                 import_tasks,
                 doc_dropdown_ask,

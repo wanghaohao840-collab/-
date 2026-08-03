@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import gradio as gr
@@ -29,7 +32,11 @@ def _task(**changes):
         max_auto_retries=3,
         next_attempt_at=None,
         error_code="document_invalid",
-        error_summary=r"D:\data\users\user-id-must-not-render\imports\a.md api_key=secret",
+        error_summary=(
+            r"D:\data\users\user-id-must-not-render\imports\a.md "
+            "api_key=secret details={user-id-must-not-render,document-a,"
+            "task-a,batch-a}"
+        ),
         created_at="2026-08-01T00:00:00Z",
         started_at="2026-08-01T00:00:01Z",
         finished_at="2026-08-01T00:00:02Z",
@@ -98,6 +105,9 @@ def test_task_table_and_summary_do_not_render_private_fields():
     rendered = repr(format_task_table(_summary())) + format_batch_summary(_summary())
 
     assert "user-id-must-not-render" not in rendered
+    assert "document-a" not in rendered
+    assert "task-a" not in rendered
+    assert "batch-a" not in rendered
     assert r"D:\data\users" not in rendered
     assert "secret" not in rendered
     assert "api_key" not in rendered
@@ -149,11 +159,54 @@ def test_selected_row_resolves_to_server_owned_task_id(monkeypatch):
     assert service.calls == [("get_batch", "token-a", "batch-a")]
 
 
-def test_module_import_does_not_start_background_workers():
+def test_plain_module_import_creates_no_data_or_workers(tmp_path):
+    data_root = tmp_path / "not-created"
+    environment = os.environ | {"PDF_ASSISTANT_DATA_DIR": str(data_root)}
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import ui.gradio_app as app; print(type(app.demo).__name__)",
+        ],
+        cwd=Path(__file__).parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "Blocks"
+    assert not data_root.exists()
+
+
+def test_initialize_services_is_idempotent_without_starting_workers(monkeypatch):
     import ui.gradio_app as module
 
-    assert module.import_worker_pool._worker_threads == []
-    assert module.import_worker_pool._scheduler_thread is None
+    calls = []
+    storage = object()
+    registry = SimpleNamespace(storage=storage, runtime_registry=object())
+    pool = SimpleNamespace(start=lambda: calls.append("start"), stop=lambda: None)
+    monkeypatch.setattr(module, "session_registry", None)
+    monkeypatch.setattr(module, "legacy_migration", None)
+    monkeypatch.setattr(module, "import_repository", None)
+    monkeypatch.setattr(module, "import_worker_pool", None)
+    monkeypatch.setattr(module, "import_service", None)
+    monkeypatch.setattr(module, "initialize_database", lambda path: calls.append(("db", path)))
+    monkeypatch.setattr(module, "UserStorage", lambda root: storage)
+    monkeypatch.setattr(module, "SessionRegistry", lambda **kwargs: registry)
+    monkeypatch.setattr(module, "LegacyMigrationService", lambda *args: object())
+    monkeypatch.setattr(module, "ImportTaskRepository", lambda path: object())
+    monkeypatch.setattr(module, "ImportWorkerPool", lambda *args: pool)
+    monkeypatch.setattr(module, "ImportTaskService", lambda *args: object())
+
+    module.initialize_app_services()
+    module.initialize_app_services()
+
+    assert [call for call in calls if call == "start"] == []
+    assert len([call for call in calls if isinstance(call, tuple)]) == 1
+    assert module.import_worker_pool is pool
 
 
 def test_script_worker_startup_is_idempotent(monkeypatch):
@@ -161,13 +214,27 @@ def test_script_worker_startup_is_idempotent(monkeypatch):
 
     calls = []
     monkeypatch.setattr(module, "_import_workers_started", False)
-    monkeypatch.setattr(module.import_worker_pool, "start", lambda: calls.append("start"))
+    pool = SimpleNamespace(start=lambda: calls.append("start"), stop=lambda: None)
+    monkeypatch.setattr(module, "import_worker_pool", pool)
     monkeypatch.setattr(module.atexit, "register", lambda callback: calls.append(callback))
 
     module.start_import_workers()
     module.start_import_workers()
 
-    assert calls == ["start", module.import_worker_pool.stop]
+    assert calls == ["start", pool.stop]
+
+
+def test_submit_batch_id_is_bound_to_hidden_state():
+    import ui.gradio_app as module
+
+    binding = next(
+        block_fn
+        for block_fn in module.demo.fns.values()
+        if block_fn.fn is module.submit_import_batch
+    )
+
+    assert len(binding.outputs) == 4
+    assert binding.outputs[0].__class__.__name__ == "State"
 
 
 def test_empty_poll_does_not_query_service(monkeypatch):
@@ -177,6 +244,31 @@ def test_empty_poll_does_not_query_service(monkeypatch):
     monkeypatch.setattr(module, "import_service", service)
 
     assert module.refresh_import_batch("", "batch-a") == ("", [])
+    assert service.calls == []
+
+
+@pytest.mark.parametrize(
+    "handler,args",
+    [
+        ("refresh_import_batch", ("token-a", "")),
+        (
+            "select_import_task",
+            ("token-a", "", SimpleNamespace(index=(0, 0))),
+        ),
+    ],
+)
+def test_missing_batch_authenticates_nonblank_token_without_query(
+    monkeypatch, handler, args,
+):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    checked = []
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: checked.append(token))
+
+    assert getattr(module, handler)(*args) in [("", []), ""]
+    assert checked == ["token-a"]
     assert service.calls == []
 
 
@@ -192,6 +284,21 @@ def test_empty_batch_list_refresh_does_not_query_service(monkeypatch):
     assert summary == ""
     assert rows == []
     assert service.calls == []
+
+
+def test_logout_clear_chain_resets_selected_import_task_state():
+    import ui.gradio_app as module
+
+    clear_binding = next(
+        block_fn
+        for block_fn in module.demo.fns.values()
+        if block_fn.fn is module.clear_import_ui
+    )
+
+    assert module.clear_import_ui()[-1] == ""
+    assert len(clear_binding.outputs) == 4
+    assert clear_binding.outputs[-1].__class__.__name__ == "State"
+    assert clear_binding.outputs[-1].value == ""
 
 
 def test_upload_document_delegates_single_file_after_authentication(monkeypatch):

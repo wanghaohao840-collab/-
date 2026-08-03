@@ -80,9 +80,14 @@ STATE_CHANGING_HANDLERS = [
 AUTHENTICATED_READ_HANDLERS = [
     ("refresh_import_batches", lambda token: (token,)),
     ("refresh_import_batch", lambda token: (token, "batch-id")),
+    ("refresh_import_batch", lambda token: (token, "")),
     (
         "select_import_task",
         lambda token: (token, "batch-id", SimpleNamespace(index=(0, 0))),
+    ),
+    (
+        "select_import_task",
+        lambda token: (token, "", SimpleNamespace(index=(0, 0))),
     ),
 ]
 
@@ -91,9 +96,14 @@ AUTHENTICATED_IMPORT_HANDLERS = [
     ("submit_import_batch", lambda token: (token, [])),
     ("refresh_import_batches", lambda token: (token,)),
     ("refresh_import_batch", lambda token: (token, "batch-id")),
+    ("refresh_import_batch", lambda token: (token, "")),
     (
         "select_import_task",
         lambda token: (token, "batch-id", SimpleNamespace(index=(0, 0))),
+    ),
+    (
+        "select_import_task",
+        lambda token: (token, "", SimpleNamespace(index=(0, 0))),
     ),
     ("retry_import_task", lambda token: (token, "task-id")),
     ("retry_import_batch_failures", lambda token: (token, "batch-id")),
