@@ -113,6 +113,36 @@ def test_task_table_and_summary_do_not_render_private_fields():
     assert "api_key" not in rendered
 
 
+@pytest.mark.parametrize(
+    ("error_text", "raw_values"),
+    [
+        ("password=correct-horse", ("correct-horse",)),
+        ('{"passwd": "open-sesame"}', ("open-sesame",)),
+        ("pwd: letmein", ("letmein",)),
+        ("secret=shh client_secret: client-value", ("shh", "client-value")),
+        ("credential: credential-value", ("credential-value",)),
+        ("Authorization: Bearer auth-token", ("auth-token",)),
+        ("Bearer standalone-token", ("standalone-token",)),
+        (
+            "https://alice:correct-horse@example.test/import",
+            ("alice", "correct-horse"),
+        ),
+    ],
+)
+def test_task_error_redacts_credentials_without_hiding_safe_text(error_text, raw_values):
+    from ui.gradio_app import _format_import_error
+
+    rendered = _format_import_error(
+        _task(error_summary=f"Import notes.md failed: {error_text}; retry later")
+    )
+
+    assert "Import notes.md failed" in rendered
+    assert "retry later" in rendered
+    assert len(rendered) <= 500
+    for value in raw_values:
+        assert value not in rendered
+
+
 def test_task_table_localizes_status_stage_and_retry_time():
     from ui.gradio_app import format_task_table
 

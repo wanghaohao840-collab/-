@@ -183,8 +183,19 @@ _IMPORT_STAGE_LABELS = {
     "succeeded": "已完成",
     "failed": "失败",
 }
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(?:api_key|apikey|access_token|authorization|auth|token|key)\s*[=:]\s*[^\s,;]+"
+_CREDENTIAL_ASSIGNMENT_RE = re.compile(
+    r"""(?ix)
+    ["']?(?:api[_-]?key|access[_-]?token|authorization|auth|token|key|
+    password|passwd|pwd|secret|client[_-]?secret|credential)["']?
+    \s*[=:]\s*
+    (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]\r\n]+)
+    """
+)
+_BEARER_CREDENTIAL_RE = re.compile(
+    r"(?i)\b(?:authorization\s*:\s*)?bearer\s+[^\s,;}\]\r\n]+"
+)
+_URL_USERINFO_RE = re.compile(
+    r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@"
 )
 _WINDOWS_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\s'\"]+")
 _UNIX_PATH_RE = re.compile(r"(?<!\w)/(?:[^/\s'\"]+/)+[^\s'\"]*")
@@ -217,7 +228,9 @@ def _format_import_error(task) -> str:
     for value in private_values:
         if value:
             safe = safe.replace(str(value), "[redacted]")
-    safe = _SECRET_ASSIGNMENT_RE.sub("[已脱敏]", safe)
+    safe = _URL_USERINFO_RE.sub(r"\1[credentials-redacted]@", safe)
+    safe = _BEARER_CREDENTIAL_RE.sub("[credentials-redacted]", safe)
+    safe = _CREDENTIAL_ASSIGNMENT_RE.sub("[credentials-redacted]", safe)
     safe = _WINDOWS_PATH_RE.sub("[路径已脱敏]", safe)
     safe = _UNIX_PATH_RE.sub("[路径已脱敏]", safe)
     return safe[:500]
