@@ -326,8 +326,23 @@ def test_four_transient_attempts_fail_then_batch_retry_resets_automatic_count(tm
     batch = app.service.submit_batch(token, [app.upload("retry.md", b"A")])
     FakeAssistant.outcomes = [RAGConnectionError("temporary")] * 4
 
-    for delay in (2, 10, 30):
+    for expected_auto_retry_count, delay in enumerate((2, 10, 30), start=1):
+        attempt_started_at = app.clock()
         app.run_one()
+        waiting = _task(app, user_id, batch.batch_id)
+        assert (
+            waiting.status,
+            waiting.auto_retry_count,
+            waiting.total_attempt_count,
+            waiting.next_attempt_at,
+        ) == (
+            "retry_wait",
+            expected_auto_retry_count,
+            expected_auto_retry_count,
+            (attempt_started_at + timedelta(seconds=delay))
+            .isoformat()
+            .replace("+00:00", "Z"),
+        )
         app.clock.advance(delay)
     app.run_one()
 
@@ -342,14 +357,25 @@ def test_four_transient_attempts_fail_then_batch_retry_resets_automatic_count(tm
 
     retried = app.service.retry_failed_in_batch(token, batch.batch_id)
     reset = retried.tasks[0]
-    assert (reset.status, reset.auto_retry_count, reset.manual_retry_count) == (
-        "queued", 0, 1,
+    assert (
+        reset.status,
+        reset.auto_retry_count,
+        reset.manual_retry_count,
+        reset.total_attempt_count,
+        reset.next_attempt_at,
+    ) == (
+        "queued", 0, 1, 4, None,
     )
 
     app.run_one()
 
     completed = _task(app, user_id, batch.batch_id)
-    assert completed.status == "succeeded"
+    assert (
+        completed.status,
+        completed.auto_retry_count,
+        completed.manual_retry_count,
+        completed.total_attempt_count,
+    ) == ("succeeded", 0, 1, 5)
     assert formal.read_bytes() == b"A"
     assert not staged.exists()
     stages = [
