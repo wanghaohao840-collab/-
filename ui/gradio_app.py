@@ -69,7 +69,7 @@ def _require_assistant(session_token):
     if not session_token:
         raise gr.Error("Please log in first")
     if session_registry is None:
-        raise gr.Error("Application services are not initialized")
+        raise gr.Error("Application services are not initialized; please log in again")
     try:
         return session_registry.get_assistant(session_token)
     except InvalidSessionError as exc:
@@ -80,7 +80,7 @@ def _require_session(session_token):
     if not session_token:
         raise gr.Error("Please log in first")
     if session_registry is None:
-        raise gr.Error("Application services are not initialized")
+        raise gr.Error("Application services are not initialized; please log in again")
     try:
         return session_registry.get_session(session_token)
     except InvalidSessionError as exc:
