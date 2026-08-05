@@ -9,12 +9,35 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.auth import AuthError
 from app.session import InvalidCsrfTokenError, InvalidSessionError
 
 
 logger = logging.getLogger(__name__)
+
+
+class UnexpectedExceptionBoundary:
+    """Consume unexpected HTTP exceptions before the hosting server sees them."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            await self.app(scope, receive, send)
+        except Exception:
+            response = _unexpected_error_response()
+            await response(scope, receive, send)
 
 
 def error_response(
@@ -118,6 +141,10 @@ async def handle_unexpected_error(
     _request: Request,
     _exc: Exception,
 ) -> JSONResponse:
+    return _unexpected_error_response()
+
+
+def _unexpected_error_response() -> JSONResponse:
     request_id = secrets.token_urlsafe(12)
     logger.error("Unhandled API request; request_id=%s", request_id)
     return error_response(

@@ -243,20 +243,27 @@ def test_secure_cookie_flag_comes_from_environment(services, monkeypatch):
 
 
 def test_unexpected_error_returns_generic_envelope_and_logs_no_secrets(
-    client,
+    services,
     caplog,
 ):
-    caplog.set_level(logging.ERROR, logger="api.errors")
+    caplog.set_level(logging.ERROR)
 
-    response = client.post(
-        "/api/v1/auth/login",
-        json={"username": "explode", "password": "do-not-log-password"},
-    )
+    with TestClient(create_api_app(services)) as default_client:
+        response = default_client.post(
+            "/api/v1/auth/login",
+            json={"username": "explode", "password": "do-not-log-password"},
+        )
 
     assert_error_envelope(response, status=500, code="internal_error")
     assert "do-not-log-password" not in response.text
     assert "do-not-log-password" not in caplog.text
     assert "C:\\private\\users" not in caplog.text
+    error_records = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert len(error_records) == 1
+    assert error_records[0].name == "api.errors"
+    assert error_records[0].getMessage().startswith(
+        "Unhandled API request; request_id="
+    )
 
 
 def test_unknown_route_uses_common_error_envelope(client):

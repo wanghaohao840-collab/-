@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from api.config import ApiConfig
-from api.errors import register_error_handlers
+from api.errors import UnexpectedExceptionBoundary, register_error_handlers
 from api.routes.auth import router as auth_router
 from app.bootstrap import ApplicationServices, get_application_services
 
@@ -26,6 +26,7 @@ def create_api_app(services: ApplicationServices | None = None) -> FastAPI:
             resolved_services.stop()
 
     api_app = FastAPI(lifespan=lifespan)
+    api_app.add_middleware(UnexpectedExceptionBoundary)
 
     @api_app.get("/healthz")
     def healthz() -> dict[str, str]:
