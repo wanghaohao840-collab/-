@@ -32,6 +32,7 @@ class ApplicationServices:
     import_worker_pool: ImportWorkerPool
     import_service: ImportTaskService
     _started: bool = field(default=False, init=False, repr=False)
+    _lifecycle_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     @classmethod
     def create(cls, data_root: Path | None = None) -> "ApplicationServices":
@@ -71,16 +72,18 @@ class ApplicationServices:
         )
 
     def start(self) -> None:
-        if self._started:
-            return
-        self.import_worker_pool.start()
-        self._started = True
+        with self._lifecycle_lock:
+            if self._started:
+                return
+            self.import_worker_pool.start()
+            self._started = True
 
     def stop(self) -> None:
-        if not self._started:
-            return
-        self.import_worker_pool.stop()
-        self._started = False
+        with self._lifecycle_lock:
+            if not self._started:
+                return
+            self.import_worker_pool.stop()
+            self._started = False
 
 
 _application_services: ApplicationServices | None = None
