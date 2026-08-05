@@ -10,6 +10,7 @@ __pycache__/
 .pytest-tmp-*/
 /.pytest-*/
 .superpowers/
+.worktrees/
 .idea/
 
 .runtime/
