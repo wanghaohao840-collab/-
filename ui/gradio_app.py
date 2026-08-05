@@ -1,7 +1,5 @@
-import os
 import json
 import sys
-import atexit
 import re
 from datetime import datetime
 from pathlib import Path
@@ -12,57 +10,33 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from assistants.document_selection import primary_document_label
-from app.database import initialize_database
-from app.session import InvalidSessionError, SessionRegistry
-from app.storage import UserStorage
+from app.bootstrap import ApplicationServices, get_application_services
+from app.session import InvalidSessionError
 from app.import_models import ImportBatchSummary
-from app.import_repository import ImportTaskRepository
-from app.import_service import ImportTaskService
-from app.import_worker import ImportWorkerPool
 from hello_agents.memory.rag.errors import sanitize_error_message
-from app.migration import LegacyMigrationService
 from ui.launch_config import load_launch_config
 
 
-DATA_ROOT = Path(os.getenv("PDF_ASSISTANT_DATA_DIR", PROJECT_ROOT / "data")).resolve()
+services = None
 session_registry = None
 legacy_migration = None
 import_repository = None
 import_worker_pool = None
-_import_workers_started = False
 import_service = None
 
 
-def initialize_app_services() -> None:
+def initialize_app_services() -> ApplicationServices:
     """Create persistent services for the supported script entry point."""
 
-    global session_registry, legacy_migration, import_repository
+    global services, session_registry, legacy_migration, import_repository
     global import_worker_pool, import_service
-    if session_registry is not None:
-        return
-
-    database_path = DATA_ROOT / "app.db"
-    initialize_database(database_path)
-    session_registry = SessionRegistry(
-        db_path=database_path,
-        storage=UserStorage(DATA_ROOT),
-    )
-    legacy_migration = LegacyMigrationService(
-        database_path, session_registry.storage, PROJECT_ROOT
-    )
-    import_repository = ImportTaskRepository(database_path)
-    import_worker_pool = ImportWorkerPool(
-        import_repository,
-        session_registry.runtime_registry,
-        session_registry.storage,
-    )
-    import_service = ImportTaskService(
-        session_registry,
-        import_repository,
-        session_registry.storage,
-        import_worker_pool,
-    )
-    session_registry.runtime_registry.set_import_task_service(import_service)
+    services = get_application_services()
+    session_registry = services.session_registry
+    legacy_migration = services.legacy_migration
+    import_repository = services.import_repository
+    import_worker_pool = services.import_worker_pool
+    import_service = services.import_service
+    return services
 
 
 def _require_assistant(session_token):
@@ -92,21 +66,10 @@ def _require_session(session_token):
 
 
 def start_import_workers() -> None:
-    """Start the script-owned import workers exactly once.
+    """Start the shared import workers for the script entry point."""
 
-    Importing this module intentionally only constructs the pool.  The
-    supported ``python ui/gradio_app.py`` entry point starts it below, after
-    the application module has loaded, and registers its matching shutdown.
-    """
-
-    global _import_workers_started
-    if _import_workers_started:
-        return
-    if import_worker_pool is None:
-        raise RuntimeError("Import workers have not been initialized")
-    import_worker_pool.start()
-    atexit.register(import_worker_pool.stop)
-    _import_workers_started = True
+    initialize_app_services()
+    services.start()
 
 
 def _empty_dropdowns():
@@ -1539,13 +1502,12 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
 def launch_app() -> None:
     """Run the supported script lifecycle and always stop import workers."""
 
-    initialize_app_services()
+    application_services = initialize_app_services()
     try:
         start_import_workers()
         demo.launch(**load_launch_config().as_gradio_kwargs())
     finally:
-        if import_worker_pool is not None:
-            import_worker_pool.stop(wait=True)
+        application_services.stop()
 
 
 if __name__ == "__main__":
