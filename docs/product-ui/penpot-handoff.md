@@ -69,14 +69,14 @@ The six exports were generated directly from these boards at their original dime
 
 - Desktop (`≥1200 px`): fixed 248 px sidebar, 64 px top bar, and content capped at 1200 px.
 - Tablet (`768–1199 px`): 72 px compact rail and on-demand drawer. Use two columns only while each remains at least 320 px.
-- Mobile (`≤767 px`): one content column, 64 px bottom navigation, and controls with a minimum 44 px target.
+- Mobile (`≤767 px`): one content column, 64 px bottom navigation, and controls with a minimum 44 px target. The linked Login/Register remember rows read back at `220 × 44`, PasswordField visibility controls at `44 × 44`, and Mobile AppShell `/legacy` actions at `140 × 44`.
 - Desktop navigation: 概览、文档库、智能问答、文献检索、学习笔记、学习洞察.
 - Mobile navigation: 概览、文档、问答、检索、更多. The 更多 drawer contains 学习笔记、学习洞察、账户、退出登录.
 - Unmigrated capability copy: “该能力正在迁移到新版界面，可暂时前往旧版使用。” The secondary action routes to `/legacy`.
 
 ## Keyboard, focus, and accessibility
 
-Keyboard order follows visual reading order: skip link → primary navigation → top-bar actions → page heading → main controls → secondary actions. Drawers move focus to their first actionable element, trap `Tab` and `Shift+Tab` while open, close on `Escape`, and return focus to the trigger. Dialogs follow the same focus trap and return pattern. A single visible page heading is used per route; body text and controls target WCAG AA contrast. Statuses include explicit text and/or icons.
+Keyboard order follows visual reading order: skip link → primary navigation → top-bar actions → page heading → main controls → secondary actions. Drawers move focus to their first actionable element, trap `Tab` and `Shift+Tab` while open, close on `Escape`, and return focus to the trigger. Dialogs follow the same focus trap and return pattern. A single visible page heading is used per route. All ordinary 12–16 px copy and control labels were scanned across the seven pages and bind to `color.text.primary` on the approved light backgrounds; the remaining WCAG AA failure count is zero. The approved `color.text.secondary` value remains `#71847C` but is not used for ordinary small text. Statuses include explicit text and/or icons.
 
 ## Typography and rendering notes
 
