@@ -88,6 +88,11 @@ font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif
 
 The seven Penpot text styles preserve the approved size and line-height pairs. Browser font metrics and antialiasing can differ slightly from the cloud canvas, so visual comparisons should prioritize alignment, wrapping, and hierarchy over subpixel glyph rasterization.
 
+## Deliberate browser differences
+
+- The Desktop, Tablet, and Mobile AppShell reference boards contain illustrative overview metrics, recent-document names, reading progress, and continue-learning content. The Task 4 React routes intentionally do not reproduce those samples: all six product routes render only their real page heading and the approved migration empty state, so the empty-state card occupies the first content slot and the lower canvas remains open. This preserves the no-fabricated-data boundary until the corresponding product slices are implemented.
+- Navigation blocks use the approved token geometry and state styling without importing an unapproved icon asset set. The visible text labels and `aria-current="page"` remain the authoritative destination and active-state signals.
+
 ## Token and implementation boundaries
 
 Penpot tokens are published only through `Penpot → design/tokens/zhiyan.tokens.json → generated CSS`; code must not write values back to Penpot. Penpot 2.17.1 rejects `/` in native token names and does not accept a negative shadow spread, so native effect tokens are named `shadow.surface` and `shadow.overlay`. The Foundations page still presents the approved library labels `Shadow/Surface` and `Shadow/Overlay`; the normalized snapshot records the actual zero-spread native values.

@@ -5,7 +5,7 @@
 html {
   color: var(--color-text-primary);
   background: var(--color-canvas);
-  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
 body {
