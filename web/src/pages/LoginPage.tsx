@@ -90,7 +90,15 @@ export function LoginPage() {
             {auth.isLoginPending ? "登录中…" : "登录"}
           </button>
         </form>
-        <p className="auth-switch">还没有账号？ <Link to="/register">创建账号</Link></p>
+        <p className="auth-switch">
+          还没有账号？{" "}
+          <Link
+            to="/register"
+            state={intendedPath ? { from: intendedPath } : undefined}
+          >
+            创建账号
+          </Link>
+        </p>
       </section>
     </main>
   );

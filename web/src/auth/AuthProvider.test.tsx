@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import {
   createMemoryRouter,
@@ -14,10 +14,21 @@ import {
   resolveAuthDestination,
   useAuth,
 } from "./AuthProvider";
+import { ProtectedRoute } from "./ProtectedRoute";
 import { LoginPage } from "../pages/LoginPage";
 import { RegisterPage } from "../pages/RegisterPage";
 
 const fetchMock = vi.fn<typeof fetch>();
+const SESSION_QUERY_KEY = ["auth", "session"] as const;
+let latestProtectedRequest: Promise<unknown> | undefined;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -57,6 +68,16 @@ function StatusHarness() {
       <button type="button" onClick={() => void auth.logout()}>
         退出测试
       </button>
+      <button
+        type="button"
+        onClick={() => {
+          latestProtectedRequest = auth
+            .request("/api/v1/documents")
+            .catch((reason: unknown) => reason);
+        }}
+      >
+        加载受保护资源
+      </button>
       <button type="button" onClick={() => navigate(-1)}>
         返回
       </button>
@@ -64,10 +85,27 @@ function StatusHarness() {
   );
 }
 
-function renderApp(initialEntry = "/login", intendedPath?: string) {
-  const queryClient = new QueryClient({
+function OverviewHarness() {
+  const auth = useAuth();
+  return (
+    <main>
+      <h1>学习概览</h1>
+      {auth.status === "authenticated" ? <p>{auth.username}</p> : null}
+    </main>
+  );
+}
+
+function createTestQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+}
+
+function renderApp(
+  initialEntry = "/login",
+  intendedPath?: string,
+  queryClient = createTestQueryClient(),
+) {
   const router = createMemoryRouter(
     [
       {
@@ -82,8 +120,13 @@ function renderApp(initialEntry = "/login", intendedPath?: string) {
           { path: "/login", element: <LoginPage /> },
           { path: "/register", element: <RegisterPage /> },
           { path: "/status", element: <StatusHarness /> },
-          { path: "/documents", element: <h1>文档空间</h1> },
-          { path: "/overview", element: <h1>学习概览</h1> },
+          {
+            element: <ProtectedRoute />,
+            children: [
+              { path: "/documents", element: <h1>文档空间</h1> },
+              { path: "/overview", element: <OverviewHarness /> },
+            ],
+          },
         ],
       },
     ],
@@ -104,6 +147,7 @@ describe("AuthProvider", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     fetchMock.mockReset();
+    latestProtectedRequest = undefined;
   });
 
   it.each(["//external.example", "/\\external.example", "/login", "/register"])(
@@ -274,14 +318,60 @@ describe("AuthProvider", () => {
     expect(router.state.historyAction).toBe("REPLACE");
   });
 
-  it("logs out with CSRF, clears memory, and replaces history", async () => {
+  it("preserves the complete protected target through login and registration", async () => {
+    fetchMock
+      .mockResolvedValueOnce(unauthorized())
+      .mockResolvedValueOnce(
+        jsonResponse({ username: "new_reader", csrf_token: "register-csrf" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const router = renderApp("/documents?sort=recent#page-3");
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole("heading", { name: "登录" })).toBeVisible();
+    await user.click(screen.getByRole("link", { name: "创建账号" }));
+
+    expect(await screen.findByRole("heading", { name: "注册" })).toBeVisible();
+    expect(router.state.location.state).toEqual({
+      from: "/documents?sort=recent#page-3",
+    });
+    await user.type(screen.getByLabelText("用户名"), "new_reader");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery");
+    await user.click(screen.getByRole("button", { name: "注册" }));
+
+    expect(await screen.findByRole("heading", { name: "文档空间" })).toBeVisible();
+    expect(router.state.location.pathname).toBe("/documents");
+    expect(router.state.location.search).toBe("?sort=recent");
+    expect(router.state.location.hash).toBe("#page-3");
+    expect(router.state.historyAction).toBe("REPLACE");
+  });
+
+  it("preserves the intended target through the registration-to-login link", async () => {
+    fetchMock.mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    const router = renderApp(
+      "/register",
+      "/documents?sort=oldest#page-8",
+    );
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("link", { name: "返回登录" }));
+
+    expect(await screen.findByRole("heading", { name: "登录" })).toBeVisible();
+    expect(router.state.location.state).toEqual({
+      from: "/documents?sort=oldest#page-8",
+    });
+  });
+
+  it("logs out with CSRF, removes cached session data, and cannot restore it after remount", async () => {
     fetchMock
       .mockResolvedValueOnce(
         jsonResponse({ username: "reader", csrf_token: "logout-csrf" }),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
-    const router = renderApp("/status");
+    const queryClient = createTestQueryClient();
+    const router = renderApp("/status", undefined, queryClient);
     const user = userEvent.setup();
 
     expect(await screen.findByText("reader")).toBeVisible();
@@ -294,5 +384,54 @@ describe("AuthProvider", () => {
     expect(new Headers(logoutCall?.[1]?.headers).get("X-CSRF-Token")).toBe(
       "logout-csrf",
     );
+    expect(queryClient.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
+
+    cleanup();
+    fetchMock.mockResolvedValueOnce(unauthorized());
+    renderApp("/status", undefined, queryClient);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("auth-status")).toHaveTextContent("anonymous");
+    });
+    expect(screen.queryByText("reader")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("ignores a delayed 401 from the previous session after logout and re-login", async () => {
+    const oldUnauthorized = deferred<Response>();
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ username: "old_reader", csrf_token: "old-csrf" }),
+      )
+      .mockReturnValueOnce(oldUnauthorized.promise)
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        jsonResponse({ username: "new_reader", csrf_token: "new-csrf" }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const queryClient = createTestQueryClient();
+    const router = renderApp("/status", undefined, queryClient);
+    const user = userEvent.setup();
+
+    expect(await screen.findByText("old_reader")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "加载受保护资源" }));
+    expect(latestProtectedRequest).toBeDefined();
+    await user.click(screen.getByRole("button", { name: "退出测试" }));
+    await user.type(await screen.findByLabelText("用户名"), "new_reader");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByText("new_reader")).toBeVisible();
+    await act(async () => {
+      oldUnauthorized.resolve(unauthorized());
+      await latestProtectedRequest;
+    });
+
+    expect(router.state.location.pathname).toBe("/overview");
+    expect(screen.getByText("new_reader")).toBeVisible();
+    expect(queryClient.getQueryData(SESSION_QUERY_KEY)).toEqual({
+      username: "new_reader",
+      csrf_token: "new-csrf",
+    });
   });
 });

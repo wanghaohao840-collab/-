@@ -90,7 +90,15 @@ export function RegisterPage() {
             {auth.isRegisterPending ? "注册中…" : "注册"}
           </button>
         </form>
-        <p className="auth-switch">已有账号？ <Link to="/login">返回登录</Link></p>
+        <p className="auth-switch">
+          已有账号？{" "}
+          <Link
+            to="/login"
+            state={intendedPath ? { from: intendedPath } : undefined}
+          >
+            返回登录
+          </Link>
+        </p>
       </section>
     </main>
   );

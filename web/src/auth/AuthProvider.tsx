@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -72,6 +73,7 @@ export function resolveAuthDestination(intendedPath?: string): string {
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const [state, setState] = useState<AuthState>({ status: "loading" });
+  const authGenerationRef = useRef(0);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -90,6 +92,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return;
     }
     if (sessionQuery.isSuccess) {
+      authGenerationRef.current += 1;
       setState(authenticatedState(sessionQuery.data));
     } else if (sessionQuery.isError) {
       setState({ status: "anonymous" });
@@ -98,6 +101,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const finishAuthentication = useCallback(
     (session: SessionResponse, intendedPath?: string) => {
+      authGenerationRef.current += 1;
       queryClient.setQueryData(SESSION_QUERY_KEY, session);
       setState(authenticatedState(session));
       navigate(resolveAuthDestination(intendedPath), { replace: true });
@@ -143,6 +147,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
     [finishAuthentication, registerMutation],
   );
 
+  const clearCachedSession = useCallback(() => {
+    void queryClient.cancelQueries({ queryKey: SESSION_QUERY_KEY, exact: true });
+    queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY, exact: true });
+  }, [queryClient]);
+
   const logoutMutation = useMutation({
     mutationFn: async () => {
       if (state.status !== "authenticated") {
@@ -156,30 +165,40 @@ export function AuthProvider({ children }: PropsWithChildren) {
   });
 
   const logout = useCallback(async () => {
+    authGenerationRef.current += 1;
     try {
       await logoutMutation.mutateAsync();
     } finally {
-      await queryClient.cancelQueries({ queryKey: SESSION_QUERY_KEY });
+      clearCachedSession();
       setState({ status: "anonymous" });
       navigate("/login", { replace: true });
     }
-  }, [logoutMutation, navigate, queryClient]);
+  }, [clearCachedSession, logoutMutation, navigate]);
 
-  const handleUnauthorized = useCallback(() => {
-    void queryClient.cancelQueries({ queryKey: SESSION_QUERY_KEY });
-    setState({ status: "anonymous" });
-    const from = `${location.pathname}${location.search}${location.hash}`;
-    navigate("/login", { replace: true, state: { from } });
-  }, [location.hash, location.pathname, location.search, navigate, queryClient]);
+  const handleUnauthorized = useCallback(
+    (requestGeneration: number) => {
+      if (requestGeneration !== authGenerationRef.current) {
+        return;
+      }
 
+      authGenerationRef.current += 1;
+      clearCachedSession();
+      setState({ status: "anonymous" });
+      const from = `${location.pathname}${location.search}${location.hash}`;
+      navigate("/login", { replace: true, state: { from } });
+    },
+    [clearCachedSession, location.hash, location.pathname, location.search, navigate],
+  );
+
+  const requestGeneration = authGenerationRef.current;
   const request = useCallback(
     <T,>(input: string, options: ApiRequestOptions = {}) =>
       apiRequest<T>(input, {
         ...options,
         csrfToken: state.status === "authenticated" ? state.csrfToken : undefined,
-        onUnauthorized: handleUnauthorized,
+        onUnauthorized: () => handleUnauthorized(requestGeneration),
       }),
-    [handleUnauthorized, state],
+    [handleUnauthorized, requestGeneration, state],
   );
 
   const value = useMemo<AuthContextValue>(
