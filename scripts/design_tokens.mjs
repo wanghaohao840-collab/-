@@ -7,7 +7,7 @@ const dimensionUnits = ["px", "rem", "%"];
 function formatDimension(value) {
   if (
     value &&
-    typeof value.value === "number" &&
+    Number.isFinite(value.value) &&
     dimensionUnits.includes(value.unit)
   ) {
     return `${value.value}${value.unit}`;

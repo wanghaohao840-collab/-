@@ -62,6 +62,21 @@ test("rejects invalid dimension units and unknown types with token paths", () =>
   );
 });
 
+test("rejects non-finite dimensions and shadow fields with token paths", () => {
+  for (const value of [NaN, Infinity, -Infinity]) {
+    assert.throws(
+      () => renderCss({ space: { invalid: token("dimension", { value, unit: "px" }) } }),
+      /Unsupported or invalid token: space\.invalid/,
+    );
+  }
+  for (const field of ["offsetX", "offsetY", "blur", "spread"]) {
+    assert.throws(
+      () => renderCss({ shadow: { invalid: shadow({ [field]: { value: NaN, unit: "px" } }) } }),
+      /Unsupported or invalid token: shadow\.invalid/,
+    );
+  }
+});
+
 test("rejects tokens that are missing $value with their path", () => {
   assert.throws(
     () => renderCss({ color: { missing: { $type: "color" } } }),
