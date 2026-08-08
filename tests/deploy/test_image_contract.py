@@ -16,9 +16,23 @@ def test_dockerfile_uses_pinned_python_and_non_root_user():
 def test_dockerfile_builds_and_copies_the_react_distribution():
     source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
+    package_copy = source.index("COPY web/package.json web/package-lock.json ./")
+    install = source.index("RUN npm ci")
+    source_copy = source.index("COPY web/src ./src")
+    assert package_copy < install < source_copy
     assert "RUN npm ci" in source
     assert "RUN npm run build" in source
     assert "COPY --from=web-build /web/dist /app/web/dist" in source
+    assert "COPY web/ ./" not in source
+
+
+def test_final_image_copies_only_runtime_source_and_built_web_assets():
+    source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY . /app" not in source
+    for package in ("api", "app", "assistants", "hello_agents", "ui"):
+        assert f"COPY {package}/ /app/{package}/" in source
+    assert "COPY server.py /app/server.py" in source
 
 
 def test_entrypoint_runs_one_uvicorn_worker_without_gradio_launch():
@@ -43,6 +57,21 @@ def test_dockerignore_excludes_runtime_data_and_secrets():
     source = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 
     for pattern in (".env", ".env.*", "deploy-data/", "backups/", ".git/"):
+        assert pattern in source
+
+
+def test_dockerignore_excludes_host_builds_and_reviewer_scratch():
+    source = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    for pattern in (
+        "web/node_modules/",
+        "web/dist/",
+        ".pytest-tmp*/",
+        ".runtime/",
+        ".superpowers/",
+        "reports/",
+        "traces/",
+    ):
         assert pattern in source
 
 

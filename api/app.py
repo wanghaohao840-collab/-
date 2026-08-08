@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import RLock
+from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, Response
@@ -22,14 +24,39 @@ from app.bootstrap import ApplicationServices, get_application_services
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def create_api_app(services: ApplicationServices | None = None) -> FastAPI:
+class _ApplicationServicesBinding:
+    """Resolve default services once, when the application lifespan starts."""
+
+    def __init__(self, services: ApplicationServices | None = None) -> None:
+        self._services = services
+        self._lock = RLock()
+
+    def resolve(self) -> ApplicationServices:
+        with self._lock:
+            if self._services is None:
+                self._services = get_application_services()
+            return self._services
+
+    def get_resolved(self) -> ApplicationServices:
+        if self._services is None:
+            raise RuntimeError("Application services are not initialized")
+        return self._services
+
+
+def create_api_app(
+    services: ApplicationServices | None = None,
+    *,
+    _services_binding: _ApplicationServicesBinding | None = None,
+) -> FastAPI:
     config = ApiConfig.from_environment()
+    services_binding = _services_binding or _ApplicationServicesBinding(services)
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
-        resolved_services = services or get_application_services()
+        resolved_services = services_binding.resolve()
         fastapi_app.state.services = resolved_services
-        fastapi_app.state.api_config = config
+        for consumer in fastapi_app.state.service_consumers:
+            consumer(resolved_services)
         resolved_services.start()
         try:
             yield
@@ -37,6 +64,12 @@ def create_api_app(services: ApplicationServices | None = None) -> FastAPI:
             resolved_services.stop()
 
     api_app = FastAPI(lifespan=lifespan)
+    api_app.state.api_config = config
+    api_app.state.service_consumers: list[
+        Callable[[ApplicationServices], None]
+    ] = []
+    if services is not None:
+        api_app.state.services = services
     api_app.add_middleware(UnexpectedExceptionBoundary)
 
     @api_app.get("/healthz")
@@ -81,8 +114,11 @@ def create_application(
 ) -> FastAPI:
     """Compose the JSON API, legacy Gradio UI, assets, and React SPA."""
 
-    resolved_services = services or get_application_services()
-    application = create_api_app(resolved_services)
+    services_binding = _ApplicationServicesBinding(services)
+    application = create_api_app(
+        services,
+        _services_binding=services_binding,
+    )
 
     if legacy_app is None:
         import gradio as gr
@@ -91,13 +127,24 @@ def create_application(
 
         application = gr.mount_gradio_app(
             application,
-            create_gradio_app(resolved_services),
+            create_gradio_app(
+                services,
+                _service_provider=services_binding.get_resolved,
+            ),
             path="/legacy",
         )
     else:
         legacy_state = getattr(legacy_app, "state", None)
         if legacy_state is not None:
-            legacy_state.services = resolved_services
+            if services is not None:
+                legacy_state.services = services
+            application.state.service_consumers.append(
+                lambda resolved_services: setattr(
+                    legacy_state,
+                    "services",
+                    resolved_services,
+                )
+            )
         application.mount("/legacy", legacy_app)
 
     resolved_dist = Path(dist_dir or PROJECT_ROOT / "web" / "dist").resolve()

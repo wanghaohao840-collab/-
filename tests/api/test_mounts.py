@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from inspect import unwrap
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -10,9 +15,10 @@ from tests.api.test_auth_routes import FakeServices, FakeSessionRegistry
 
 
 class FakeLegacyApp:
-    def __init__(self, expected_services: FakeServices) -> None:
+    def __init__(self, expected_services: FakeServices | None = None) -> None:
         self.expected_services = expected_services
         self.requests: list[tuple[str, str]] = []
+        self.state = SimpleNamespace()
 
     async def __call__(self, scope, receive, send) -> None:
         assert scope["type"] == "http"
@@ -21,7 +27,8 @@ class FakeLegacyApp:
             {
                 "legacy": True,
                 "shared_services": (
-                    scope["app"].state.services is self.expected_services
+                    self.expected_services is None
+                    or scope["app"].state.services is self.expected_services
                 ),
             }
         ).encode("utf-8")
@@ -58,6 +65,9 @@ def test_unified_routes_preserve_precedence_and_share_one_lifespan(tmp_path):
         legacy_app=legacy,
         dist_dir=_fake_dist(tmp_path),
     )
+
+    assert application.state.services is services
+    assert legacy.state.services is services
 
     with TestClient(application) as client:
         assert services.start_calls == 1
@@ -159,38 +169,156 @@ def test_missing_dist_is_explicit_without_swallowing_api_or_legacy(tmp_path):
     assert services.stop_calls == 1
 
 
-def test_gradio_factory_binds_services_without_starting_workers(monkeypatch):
-    from ui import gradio_app
+class _FactoryAssistant:
+    def __init__(self, label: str) -> None:
+        self.current_document_id = f"{label}-document"
+        self._label = label
 
-    lifecycle_calls: list[str] = []
-    application_services = SimpleNamespace(
-        session_registry=object(),
+    def get_documents(self) -> list[str]:
+        return [f"{self._label}.txt | {self.current_document_id}"]
+
+
+class _FactoryRegistry:
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.tokens: dict[str, _FactoryAssistant] = {}
+
+    def register(self, username: str, _password: str) -> str:
+        token = f"{self.label}:{username}"
+        self.tokens[token] = _FactoryAssistant(self.label)
+        return token
+
+    def get_session(self, token: str):
+        if token not in self.tokens:
+            raise AssertionError(f"{self.label} received foreign token {token}")
+        return SimpleNamespace(username=token.split(":", 1)[1])
+
+    def get_assistant(self, token: str) -> _FactoryAssistant:
+        if token not in self.tokens:
+            raise AssertionError(f"{self.label} received foreign token {token}")
+        return self.tokens[token]
+
+
+def _factory_services(label: str, lifecycle_calls: list[str]):
+    return SimpleNamespace(
+        session_registry=_FactoryRegistry(label),
         legacy_migration=object(),
         import_repository=object(),
         import_worker_pool=object(),
         import_service=object(),
-        start=lambda: lifecycle_calls.append("start"),
-        stop=lambda: lifecycle_calls.append("stop"),
+        start=lambda: lifecycle_calls.append(f"{label}:start"),
+        stop=lambda: lifecycle_calls.append(f"{label}:stop"),
     )
-    for attribute in (
-        "services",
-        "session_registry",
-        "legacy_migration",
-        "import_repository",
-        "import_worker_pool",
-        "import_service",
-    ):
-        monkeypatch.setattr(
-            gradio_app,
-            attribute,
-            getattr(gradio_app, attribute),
-        )
 
-    blocks = gradio_app.create_gradio_app(application_services)
 
-    assert blocks.__class__.__name__ == "Blocks"
-    assert gradio_app.services is application_services
-    assert gradio_app.session_registry is application_services.session_registry
-    assert gradio_app.import_worker_pool is application_services.import_worker_pool
-    assert gradio_app.import_service is application_services.import_service
+def _bound_handler(blocks, target):
+    return next(
+        block_fn.fn
+        for block_fn in blocks.fns.values()
+        if unwrap(block_fn.fn) is target
+    )
+
+
+def test_gradio_factory_isolates_two_live_apps_without_starting_workers():
+    from ui import gradio_app
+
+    lifecycle_calls: list[str] = []
+    services_a = _factory_services("A", lifecycle_calls)
+    services_b = _factory_services("B", lifecycle_calls)
+
+    blocks_a = gradio_app.create_gradio_app(services_a)
+    blocks_b = gradio_app.create_gradio_app(services_b)
+
+    assert blocks_a is not blocks_b
+    assert set(blocks_a.blocks.values()).isdisjoint(blocks_b.blocks.values())
+    register_a = _bound_handler(blocks_a, gradio_app.register_user)
+    register_b = _bound_handler(blocks_b, gradio_app.register_user)
+    refresh_a = _bound_handler(blocks_a, gradio_app.refresh_documents)
+    refresh_b = _bound_handler(blocks_b, gradio_app.refresh_documents)
+
+    token_a, status_a, *_ = register_a("alice", "password")
+    token_b, status_b, *_ = register_b("bob", "password")
+    assert (token_a, status_a) == ("A:alice", "Logged in as alice")
+    assert (token_b, status_b) == ("B:bob", "Logged in as bob")
+    assert refresh_b(token_b)["choices"] == ["B.txt | B-document"]
+    assert refresh_a(token_a)["choices"] == ["A.txt | A-document"]
     assert lifecycle_calls == []
+
+
+def test_default_services_resolve_once_in_lifespan_and_bind_api_and_legacy(
+    monkeypatch,
+    tmp_path,
+):
+    import api.app as api_app
+
+    lifecycle_calls: list[str] = []
+    services = _factory_services("default", lifecycle_calls)
+    resolution_calls: list[str] = []
+    legacy = FakeLegacyApp()
+    monkeypatch.setattr(
+        api_app,
+        "get_application_services",
+        lambda: resolution_calls.append("resolve") or services,
+    )
+
+    application = create_application(
+        legacy_app=legacy,
+        dist_dir=_fake_dist(tmp_path),
+    )
+
+    assert resolution_calls == []
+    assert not hasattr(application.state, "services")
+    assert not hasattr(legacy.state, "services")
+
+    with TestClient(application) as client:
+        assert resolution_calls == ["resolve"]
+        assert application.state.services is services
+        assert legacy.state.services is services
+        response = client.get("/legacy/")
+        assert response.status_code == 200
+        assert response.json()["shared_services"] is True
+        assert lifecycle_calls == ["default:start"]
+
+    assert lifecycle_calls == ["default:start", "default:stop"]
+
+
+def test_importing_server_does_not_create_db_and_honors_late_data_dir(tmp_path):
+    import_root = tmp_path / "import-root"
+    late_root = tmp_path / "late-root"
+    code = """
+import os
+from pathlib import Path
+from fastapi.testclient import TestClient
+
+import server
+
+import_root = Path(os.environ["IMPORT_DATA_ROOT"])
+late_root = Path(os.environ["LATE_DATA_ROOT"])
+assert not import_root.exists()
+assert not late_root.exists()
+os.environ["PDF_ASSISTANT_DATA_DIR"] = str(late_root)
+with TestClient(server.app):
+    assert server.app.state.services.data_root == late_root.resolve()
+    assert server.app.state.services.db_path == late_root.resolve() / "app.db"
+print("late-binding-ok")
+"""
+    environment = os.environ | {
+        "PDF_ASSISTANT_DATA_DIR": str(import_root),
+        "IMPORT_DATA_ROOT": str(import_root),
+        "LATE_DATA_ROOT": str(late_root),
+    }
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=45,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "late-binding-ok"
+    assert not import_root.exists()
+    assert (late_root / "app.db").is_file()
