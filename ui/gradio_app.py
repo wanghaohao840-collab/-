@@ -25,18 +25,23 @@ import_worker_pool = None
 import_service = None
 
 
-def initialize_app_services() -> ApplicationServices:
-    """Create persistent services for the supported script entry point."""
-
+def _bind_app_services(application_services: ApplicationServices) -> None:
     global services, session_registry, legacy_migration, import_repository
     global import_worker_pool, import_service
-    services = get_application_services()
+    services = application_services
     session_registry = services.session_registry
     legacy_migration = services.legacy_migration
     import_repository = services.import_repository
     import_worker_pool = services.import_worker_pool
     import_service = services.import_service
-    return services
+
+
+def initialize_app_services() -> ApplicationServices:
+    """Create persistent services for the supported script entry point."""
+
+    application_services = get_application_services()
+    _bind_app_services(application_services)
+    return application_services
 
 
 def _require_assistant(session_token):
@@ -878,7 +883,7 @@ def restore_memory(session_token, backup_id):
         return f"❌ Invalid backup: {exc}"
     return f"{'✅' if result.success else '❌'} {result.message}"
 
-with gr.Blocks(title="文档 智能学习助手") as demo:
+with gr.Blocks(title="文档 智能学习助手") as _demo:
     session_token = gr.State("")
     with gr.Tab("登录 / 注册"):
         username_input = gr.Textbox(label="用户名")
@@ -1497,6 +1502,19 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             inputs=[session_token, import_batch_dropdown],
             outputs=[import_summary, import_tasks, selected_import_task_id],
         )
+
+
+def create_gradio_app(
+    services: ApplicationServices | None = None,
+) -> gr.Blocks:
+    """Return the existing component tree bound to shared services."""
+
+    if services is not None:
+        _bind_app_services(services)
+    return _demo
+
+
+demo = create_gradio_app()
 
 
 def launch_app() -> None:

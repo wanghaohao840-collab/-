@@ -42,6 +42,24 @@ def test_app_runs_as_the_deployment_account():
     assert "APP_GID=1000" in env_source
 
 
+def test_app_uses_unified_runtime_port_and_persistent_data_directory():
+    source = COMPOSE.read_text(encoding="utf-8")
+    env_source = ENV_EXAMPLE.read_text(encoding="utf-8")
+    app_block = source.split("  app:", 1)[1].split("  qdrant:", 1)[0]
+
+    assert "PDF_ASSISTANT_DATA_DIR: /app/data" in app_block
+    assert 'APP_HOST: "0.0.0.0"' in app_block
+    assert 'APP_PORT: "${APP_PORT:-7860}"' in app_block
+    assert (
+        '"${APP_BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-7860}:'
+        '${APP_PORT:-7860}"'
+    ) in app_block
+    assert '"${DEPLOY_DATA_ROOT:-./deploy-data}/app:/app/data"' in app_block
+    assert "GRADIO_SERVER_NAME" not in app_block
+    assert "GRADIO_SERVER_PORT" not in app_block
+    assert "APP_HOST=0.0.0.0" in env_source
+
+
 def test_environment_template_contains_no_real_secret():
     source = ENV_EXAMPLE.read_text(encoding="utf-8")
 

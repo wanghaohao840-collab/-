@@ -7,8 +7,8 @@ from urllib.request import urlopen
 
 
 def main() -> int:
-    port = os.environ.get("GRADIO_SERVER_PORT", "7860")
-    url = f"http://127.0.0.1:{port}/"
+    port = os.environ.get("APP_PORT", "7860")
+    url = f"http://127.0.0.1:{port}/healthz"
     try:
         with urlopen(url, timeout=3) as response:
             if 200 <= response.status < 400:

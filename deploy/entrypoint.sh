@@ -13,7 +13,10 @@ if ! : > "$probe"; then
 fi
 rm -f "$probe"
 
-echo "Starting Gradio application on ${GRADIO_SERVER_NAME:-127.0.0.1}:${GRADIO_SERVER_PORT:-7860}"
+echo "Starting unified application on ${APP_HOST:-0.0.0.0}:${APP_PORT:-7860}"
 echo "Using data directory: $data_dir"
 echo "Using RAG backend: ${RAG_BACKEND:-json}"
-exec python ui/gradio_app.py
+exec python -m uvicorn server:app \
+  --host "${APP_HOST:-0.0.0.0}" \
+  --port "${APP_PORT:-7860}" \
+  --workers 1
