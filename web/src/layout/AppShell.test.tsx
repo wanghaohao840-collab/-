@@ -20,6 +20,17 @@ import { navigationItems } from "./navigation";
 
 const fetchMock = vi.fn<typeof fetch>();
 
+function getStyleRule(selector: string): CSSStyleDeclaration {
+  for (const sheet of document.styleSheets) {
+    for (const rule of sheet.cssRules) {
+      if (rule instanceof CSSStyleRule && rule.selectorText === selector) {
+        return rule.style;
+      }
+    }
+  }
+  throw new Error(`Missing CSS rule: ${selector}`);
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -42,6 +53,33 @@ function mockAuthenticatedSession() {
     }
     if (input === "/api/v1/auth/logout") {
       return Promise.resolve(new Response(null, { status: 204 }));
+    }
+    return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+}
+
+function mockAuthenticatedSessionWithLogoutFailure() {
+  fetchMock.mockImplementation((input) => {
+    if (input === "/api/v1/auth/session") {
+      return Promise.resolve(
+        jsonResponse({ username: "reader", csrf_token: "shell-csrf" }),
+      );
+    }
+    if (input === "/api/v1/auth/logout") {
+      return Promise.resolve(
+        jsonResponse(
+          {
+            error: {
+              code: "logout_unavailable",
+              message: "退出服务暂不可用",
+              retryable: true,
+              field_errors: {},
+            },
+          },
+          503,
+        ),
+      );
     }
     return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
   });
@@ -98,6 +136,7 @@ function renderProductionApp(initialEntry: string) {
 
 describe("AppShell", () => {
   afterEach(() => {
+    document.documentElement.style.fontSize = "";
     vi.unstubAllGlobals();
     fetchMock.mockReset();
   });
@@ -115,8 +154,9 @@ describe("AppShell", () => {
       ["/insights", "学习洞察"],
     ]);
 
-    const desktopNav = await screen.findByRole("navigation", { name: "主导航" });
-    expect(within(desktopNav).getAllByRole("link")).toHaveLength(6);
+    const desktopNav = await screen.findByLabelText("主导航");
+    expect(desktopNav).toHaveRole("navigation");
+    expect(within(desktopNav).getAllByRole("link", { hidden: true })).toHaveLength(6);
     const mobileNav = screen.getByRole("navigation", { name: "移动导航" });
     expect(within(mobileNav).getAllByRole("link")).toHaveLength(4);
     expect(within(mobileNav).getByRole("button", { name: "更多" })).toBeVisible();
@@ -126,11 +166,10 @@ describe("AppShell", () => {
     mockAuthenticatedSession();
     renderShell("/notes");
 
-    const desktopNav = await screen.findByRole("navigation", { name: "主导航" });
-    expect(within(desktopNav).getByRole("link", { name: "学习笔记" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    const desktopNav = await screen.findByLabelText("主导航");
+    expect(
+      within(desktopNav).getByRole("link", { name: "学习笔记", hidden: true }),
+    ).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("button", { name: "更多" })).toHaveAttribute(
       "aria-current",
       "page",
@@ -187,6 +226,28 @@ describe("AppShell", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("keeps a short-height drawer scrollable while keyboard users reach logout", async () => {
+    mockAuthenticatedSession();
+    vi.stubGlobal("innerHeight", 320);
+    document.documentElement.style.fontSize = "32px";
+    renderShell();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "更多" }));
+
+    const drawer = screen.getByRole("dialog", { name: "更多" });
+    expect(document.body).toHaveStyle({ overflow: "hidden" });
+    const drawerStyles = getStyleRule(".more-drawer");
+    expect(drawerStyles.overflowY).toBe("auto");
+    expect(drawerStyles.overscrollBehavior).toBe("contain");
+
+    await user.tab();
+    await user.tab();
+    await user.tab();
+
+    expect(within(drawer).getByRole("button", { name: "退出登录" })).toHaveFocus();
+  });
+
   it("logs out through the Task 3 authentication contract", async () => {
     mockAuthenticatedSession();
     const router = renderShell();
@@ -204,6 +265,40 @@ describe("AppShell", () => {
     );
   });
 
+  it("consumes a failed logout request while AuthProvider clears and redirects", async () => {
+    mockAuthenticatedSessionWithLogoutFailure();
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandled = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      unhandledRejections.push(event.reason);
+    };
+    window.addEventListener("unhandledrejection", recordUnhandled);
+    const router = renderShell();
+    const user = userEvent.setup();
+
+    try {
+      await user.click(await screen.findByRole("button", { name: "更多" }));
+      const drawer = screen.getByRole("dialog", { name: "更多" });
+      await user.click(within(drawer).getByRole("button", { name: "退出登录" }));
+
+      await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
+      expect(router.state.historyAction).toBe("REPLACE");
+      expect(screen.getByRole("heading", { name: "登录页" })).toBeVisible();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandledRejections).toEqual([]);
+
+      const logoutCall = fetchMock.mock.calls.find(
+        ([input]) => input === "/api/v1/auth/logout",
+      );
+      expect(logoutCall).toBeDefined();
+      expect(new Headers(logoutCall?.[1]?.headers).get("X-CSRF-Token")).toBe(
+        "shell-csrf",
+      );
+    } finally {
+      window.removeEventListener("unhandledrejection", recordUnhandled);
+    }
+  });
+
   it("offers only the exact migration copy and legacy action", async () => {
     mockAuthenticatedSession();
     renderShell("/documents");
@@ -216,6 +311,32 @@ describe("AppShell", () => {
     expect(screen.getByRole("link", { name: "前往旧版" })).toHaveAttribute(
       "href",
       "/legacy",
+    );
+  });
+
+  it("uses named shell variables for migration-state dimensions", async () => {
+    mockAuthenticatedSession();
+    renderShell("/documents");
+
+    await screen.findByRole("heading", { name: "文档库", level: 1 });
+    const rootStyles = getComputedStyle(document.documentElement);
+    expect(rootStyles.getPropertyValue("--shell-migration-card-min-height").trim()).toBe(
+      "236px",
+    );
+    expect(rootStyles.getPropertyValue("--shell-migration-copy-width").trim()).toBe(
+      "32rem",
+    );
+    expect(rootStyles.getPropertyValue("--shell-migration-action-min-width").trim()).toBe(
+      "140px",
+    );
+    expect(getStyleRule(".migration-state").minHeight).toBe(
+      "var(--shell-migration-card-min-height)",
+    );
+    expect(getStyleRule(".migration-state p").maxWidth).toBe(
+      "var(--shell-migration-copy-width)",
+    );
+    expect(getStyleRule(".migration-state__action").minWidth).toBe(
+      "var(--shell-migration-action-min-width)",
     );
   });
 
@@ -254,6 +375,35 @@ describe("shared Penpot component contracts", () => {
     expect(button).toHaveAttribute("name", "remove-document");
     expect(button).toHaveAttribute("aria-busy", "true");
     expect(button).toHaveClass("button--danger", "button--lg");
+  });
+
+  it("preserves caller aria-busy unless loading forces true", () => {
+    render(
+      <>
+        <Button aria-busy="true">调用方忙碌</Button>
+        <Button aria-busy="false">调用方空闲</Button>
+        <Button>未指定状态</Button>
+        <Button aria-busy="false" loading>
+          正在加载
+        </Button>
+      </>,
+    );
+
+    expect(screen.getByRole("button", { name: "调用方忙碌" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "调用方空闲" })).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "未指定状态" })).not.toHaveAttribute(
+      "aria-busy",
+    );
+    expect(screen.getByRole("button", { name: "正在加载" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
   });
 
   it("connects TextField label, guidance, errors, and native input props", () => {

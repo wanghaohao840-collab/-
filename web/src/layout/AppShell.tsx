@@ -25,7 +25,7 @@ export function AppShell() {
   }
 
   function logout() {
-    void auth.logout();
+    void auth.logout().catch(() => undefined);
   }
 
   function skipToMain(event: MouseEvent<HTMLAnchorElement>) {

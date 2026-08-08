@@ -7,6 +7,7 @@ export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 export function Button({
+  "aria-busy": ariaBusy,
   children,
   className,
   disabled,
@@ -31,7 +32,7 @@ export function Button({
       type={type ?? "button"}
       className={classes}
       disabled={disabled || loading}
-      aria-busy={loading || undefined}
+      aria-busy={loading ? true : ariaBusy}
       data-loading={loading || undefined}
     >
       {loading ? <span className="button__spinner" aria-hidden="true" /> : null}

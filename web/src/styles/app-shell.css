@@ -11,6 +11,9 @@
   --shell-text-lg: 1.25rem;
   --shell-text-xl: 1.75rem;
   --shell-content-narrow: 720px;
+  --shell-migration-card-min-height: 236px;
+  --shell-migration-copy-width: 32rem;
+  --shell-migration-action-min-width: 140px;
 }
 
 .button {
@@ -270,7 +273,7 @@
   display: grid;
   width: 100%;
   max-width: var(--shell-content-narrow);
-  min-height: 236px;
+  min-height: var(--shell-migration-card-min-height);
   margin-top: var(--space-6);
   padding: var(--space-5) var(--space-6);
   place-items: center;
@@ -294,7 +297,7 @@
 }
 
 .migration-state p {
-  max-width: 32rem;
+  max-width: var(--shell-migration-copy-width);
   margin: var(--space-0);
   line-height: 1.6;
 }
@@ -307,7 +310,7 @@
 
 .migration-state__action {
   display: inline-flex;
-  min-width: 140px;
+  min-width: var(--shell-migration-action-min-width);
   min-height: var(--shell-control-target);
   align-items: center;
   justify-content: center;
@@ -390,6 +393,8 @@
   left: var(--space-0);
   display: flex;
   max-height: calc(100dvh - var(--space-12));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--space-5) var(--space-4) var(--space-6);
   flex-direction: column;
   border-radius: var(--radius-lg) var(--radius-lg) var(--space-0) var(--space-0);
