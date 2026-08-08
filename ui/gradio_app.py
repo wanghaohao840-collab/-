@@ -1,4 +1,5 @@
 import json
+import inspect
 import sys
 import re
 from contextvars import ContextVar
@@ -102,10 +103,54 @@ def _bind_handler(
 ) -> Callable:
     """Bind one Gradio event handler to its owning application services."""
 
+    def activate_bindings():
+        bindings = _HandlerBindings.from_services(service_provider())
+        return _handler_bindings.set(bindings)
+
+    if inspect.isasyncgenfunction(handler):
+
+        @wraps(handler)
+        async def bound_async_generator(*args, **kwargs):
+            token = activate_bindings()
+            iterator = handler(*args, **kwargs)
+            try:
+                async for item in iterator:
+                    yield item
+            finally:
+                try:
+                    await iterator.aclose()
+                finally:
+                    _handler_bindings.reset(token)
+
+        return bound_async_generator
+
+    if inspect.iscoroutinefunction(handler):
+
+        @wraps(handler)
+        async def bound_coroutine(*args, **kwargs):
+            token = activate_bindings()
+            try:
+                return await handler(*args, **kwargs)
+            finally:
+                _handler_bindings.reset(token)
+
+        return bound_coroutine
+
+    if inspect.isgeneratorfunction(handler):
+
+        @wraps(handler)
+        def bound_generator(*args, **kwargs):
+            token = activate_bindings()
+            try:
+                return (yield from handler(*args, **kwargs))
+            finally:
+                _handler_bindings.reset(token)
+
+        return bound_generator
+
     @wraps(handler)
     def bound_handler(*args, **kwargs):
-        bindings = _HandlerBindings.from_services(service_provider())
-        token = _handler_bindings.set(bindings)
+        token = activate_bindings()
         try:
             return handler(*args, **kwargs)
         finally:
