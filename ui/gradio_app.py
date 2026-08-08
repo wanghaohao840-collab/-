@@ -111,16 +111,37 @@ def _bind_handler(
 
         @wraps(handler)
         async def bound_async_generator(*args, **kwargs):
-            token = activate_bindings()
             iterator = handler(*args, **kwargs)
-            try:
-                async for item in iterator:
-                    yield item
-            finally:
+            operation = "anext"
+            payload = None
+            while True:
+                token = activate_bindings()
                 try:
-                    await iterator.aclose()
+                    try:
+                        if operation == "anext":
+                            item = await anext(iterator)
+                        elif operation == "asend":
+                            item = await iterator.asend(payload)
+                        else:
+                            item = await iterator.athrow(payload)
+                    except StopAsyncIteration:
+                        return
                 finally:
                     _handler_bindings.reset(token)
+
+                try:
+                    payload = yield item
+                    operation = "asend"
+                except GeneratorExit:
+                    token = activate_bindings()
+                    try:
+                        await iterator.aclose()
+                    finally:
+                        _handler_bindings.reset(token)
+                    raise
+                except BaseException as exc:
+                    operation = "athrow"
+                    payload = exc
 
         return bound_async_generator
 
@@ -140,11 +161,37 @@ def _bind_handler(
 
         @wraps(handler)
         def bound_generator(*args, **kwargs):
-            token = activate_bindings()
-            try:
-                return (yield from handler(*args, **kwargs))
-            finally:
-                _handler_bindings.reset(token)
+            iterator = handler(*args, **kwargs)
+            operation = "next"
+            payload = None
+            while True:
+                token = activate_bindings()
+                try:
+                    try:
+                        if operation == "next":
+                            item = next(iterator)
+                        elif operation == "send":
+                            item = iterator.send(payload)
+                        else:
+                            item = iterator.throw(payload)
+                    except StopIteration as stopped:
+                        return stopped.value
+                finally:
+                    _handler_bindings.reset(token)
+
+                try:
+                    payload = yield item
+                    operation = "send"
+                except GeneratorExit:
+                    token = activate_bindings()
+                    try:
+                        iterator.close()
+                    finally:
+                        _handler_bindings.reset(token)
+                    raise
+                except BaseException as exc:
+                    operation = "throw"
+                    payload = exc
 
         return bound_generator
 

@@ -5,6 +5,7 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+from gradio.utils import SyncToAsyncIterator
 
 from ui import gradio_app
 
@@ -101,24 +102,34 @@ def test_coroutine_wrappers_isolate_interleaved_apps_and_reset_on_exception(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("termination", ["normal", "exception", "close"])
-def test_generator_wrapper_keeps_iteration_context_and_resets(
-    monkeypatch,
-    termination,
-):
+class _ProtocolSignal(Exception):
+    pass
+
+
+def test_generator_wrapper_scopes_next_send_throw_and_stop_value(monkeypatch):
     fallback_registry = object()
     bound_registry = object()
-    finalized: list[str] = []
+    finalized = []
     monkeypatch.setattr(gradio_app, "session_registry", fallback_registry)
 
-    def handler(mode: str):
+    def handler():
         try:
-            yield gradio_app._current_session_registry()
-            if mode == "exception":
-                raise RuntimeError("generator failure")
-            yield gradio_app._current_session_registry()
+            received = yield ("next", gradio_app._current_session_registry())
+            try:
+                yield (
+                    "send",
+                    received,
+                    gradio_app._current_session_registry(),
+                )
+            except _ProtocolSignal as exc:
+                yield (
+                    "throw",
+                    str(exc),
+                    gradio_app._current_session_registry(),
+                )
+            return "stop-value"
         finally:
-            finalized.append(mode)
+            finalized.append(gradio_app._current_session_registry())
 
     bound = gradio_app._bind_handler(
         handler,
@@ -127,43 +138,145 @@ def test_generator_wrapper_keeps_iteration_context_and_resets(
 
     assert inspect.isgeneratorfunction(bound)
     assert inspect.signature(bound) == inspect.signature(handler)
-    iterator = bound(termination)
+    iterator = bound()
     assert gradio_app._current_session_registry() is fallback_registry
-    assert next(iterator) is bound_registry
-    assert gradio_app._current_session_registry() is bound_registry
-
-    if termination == "normal":
-        assert next(iterator) is bound_registry
-        with pytest.raises(StopIteration):
+    caller_contexts = []
+    try:
+        assert next(iterator) == ("next", bound_registry)
+        caller_contexts.append(gradio_app._current_session_registry())
+        assert iterator.send("payload") == (
+            "send",
+            "payload",
+            bound_registry,
+        )
+        caller_contexts.append(gradio_app._current_session_registry())
+        assert iterator.throw(_ProtocolSignal("boom")) == (
+            "throw",
+            "boom",
+            bound_registry,
+        )
+        caller_contexts.append(gradio_app._current_session_registry())
+        with pytest.raises(StopIteration) as stopped:
             next(iterator)
-    elif termination == "exception":
-        with pytest.raises(RuntimeError, match="generator failure"):
-            next(iterator)
-    else:
+    finally:
         iterator.close()
 
     assert gradio_app._current_session_registry() is fallback_registry
-    assert finalized == [termination]
+    assert caller_contexts == [fallback_registry] * 3
+    assert stopped.value.value == "stop-value"
+    assert finalized == [bound_registry]
 
 
-@pytest.mark.parametrize("termination", ["normal", "exception", "aclose"])
-def test_async_generator_wrapper_keeps_iteration_context_and_resets(
+@pytest.mark.parametrize("termination", ["exception", "close"])
+def test_generator_wrapper_resets_after_exception_or_close(
     monkeypatch,
     termination,
 ):
     fallback_registry = object()
     bound_registry = object()
-    finalized: list[str] = []
+    finalized = []
     monkeypatch.setattr(gradio_app, "session_registry", fallback_registry)
 
-    async def handler(mode: str):
+    def handler():
         try:
             yield gradio_app._current_session_registry()
-            if mode == "exception":
-                raise RuntimeError("async generator failure")
-            yield gradio_app._current_session_registry()
+            raise RuntimeError("generator failure")
         finally:
-            finalized.append(mode)
+            finalized.append(gradio_app._current_session_registry())
+
+    bound = gradio_app._bind_handler(
+        handler,
+        lambda: _services(bound_registry),
+    )
+    iterator = bound()
+
+    assert next(iterator) is bound_registry
+    caller_context = gradio_app._current_session_registry()
+    if termination == "exception":
+        with pytest.raises(RuntimeError, match="generator failure"):
+            next(iterator)
+    else:
+        iterator.close()
+    assert gradio_app._current_session_registry() is fallback_registry
+    assert caller_context is fallback_registry
+    assert finalized == [bound_registry]
+
+
+def test_sync_generator_survives_gradio_cross_worker_iteration(monkeypatch):
+    fallback_registry = object()
+    bound_registry = object()
+    finalized = []
+    monkeypatch.setattr(gradio_app, "session_registry", fallback_registry)
+
+    def handler():
+        try:
+            for index in range(3):
+                yield index, gradio_app._current_session_registry()
+        finally:
+            finalized.append(gradio_app._current_session_registry())
+
+    bound = gradio_app._bind_handler(
+        handler,
+        lambda: _services(bound_registry),
+    )
+
+    async def scenario():
+        iterator = SyncToAsyncIterator(bound(), limiter=None)
+        try:
+            for index in range(3):
+                assert await anext(iterator) == (index, bound_registry)
+                assert (
+                    gradio_app._current_session_registry()
+                    is fallback_registry
+                )
+            with pytest.raises(StopAsyncIteration):
+                await anext(iterator)
+        finally:
+            await iterator.aclose()
+
+        assert gradio_app._current_session_registry() is fallback_registry
+        assert finalized == [bound_registry]
+
+    asyncio.run(scenario())
+
+
+async def _in_new_task(awaitable):
+    async def await_operation():
+        return await awaitable
+
+    return await asyncio.create_task(await_operation())
+
+
+def test_async_generator_scopes_cross_task_anext_asend_athrow_and_aclose(
+    monkeypatch,
+):
+    fallback_registry = object()
+    bound_registry = object()
+    operation_tasks = []
+    finalized = []
+    monkeypatch.setattr(gradio_app, "session_registry", fallback_registry)
+
+    async def handler():
+        try:
+            operation_tasks.append(asyncio.current_task())
+            received = yield ("anext", gradio_app._current_session_registry())
+            operation_tasks.append(asyncio.current_task())
+            try:
+                yield (
+                    "asend",
+                    received,
+                    gradio_app._current_session_registry(),
+                )
+            except _ProtocolSignal as exc:
+                operation_tasks.append(asyncio.current_task())
+                yield (
+                    "athrow",
+                    str(exc),
+                    gradio_app._current_session_registry(),
+                )
+        finally:
+            operation_tasks.append(asyncio.current_task())
+            finalized.append(gradio_app._current_session_registry())
 
     bound = gradio_app._bind_handler(
         handler,
@@ -174,22 +287,67 @@ def test_async_generator_wrapper_keeps_iteration_context_and_resets(
     assert inspect.signature(bound) == inspect.signature(handler)
 
     async def scenario():
-        iterator = bound(termination)
+        iterator = bound()
         assert gradio_app._current_session_registry() is fallback_registry
-        assert await anext(iterator) is bound_registry
-        assert gradio_app._current_session_registry() is bound_registry
+        assert await _in_new_task(anext(iterator)) == (
+            "anext",
+            bound_registry,
+        )
+        assert gradio_app._current_session_registry() is fallback_registry
+        assert await _in_new_task(iterator.asend("payload")) == (
+            "asend",
+            "payload",
+            bound_registry,
+        )
+        assert gradio_app._current_session_registry() is fallback_registry
+        assert await _in_new_task(iterator.athrow(_ProtocolSignal("boom"))) == (
+            "athrow",
+            "boom",
+            bound_registry,
+        )
+        assert gradio_app._current_session_registry() is fallback_registry
+        await _in_new_task(iterator.aclose())
+        assert gradio_app._current_session_registry() is fallback_registry
+        assert finalized == [bound_registry]
+        assert len(set(operation_tasks)) == 4
 
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("termination", ["normal", "exception"])
+def test_async_generator_resets_after_completion_or_exception(
+    monkeypatch,
+    termination,
+):
+    fallback_registry = object()
+    bound_registry = object()
+    finalized = []
+    monkeypatch.setattr(gradio_app, "session_registry", fallback_registry)
+
+    async def handler():
+        try:
+            yield gradio_app._current_session_registry()
+            if termination == "exception":
+                raise RuntimeError("async generator failure")
+        finally:
+            finalized.append(gradio_app._current_session_registry())
+
+    bound = gradio_app._bind_handler(
+        handler,
+        lambda: _services(bound_registry),
+    )
+
+    async def scenario():
+        iterator = bound()
+        assert await _in_new_task(anext(iterator)) is bound_registry
+        assert gradio_app._current_session_registry() is fallback_registry
         if termination == "normal":
-            assert await anext(iterator) is bound_registry
             with pytest.raises(StopAsyncIteration):
-                await anext(iterator)
-        elif termination == "exception":
-            with pytest.raises(RuntimeError, match="async generator failure"):
-                await anext(iterator)
+                await _in_new_task(anext(iterator))
         else:
-            await iterator.aclose()
-
+            with pytest.raises(RuntimeError, match="async generator failure"):
+                await _in_new_task(anext(iterator))
         assert gradio_app._current_session_registry() is fallback_registry
-        assert finalized == [termination]
+        assert finalized == [bound_registry]
 
     asyncio.run(scenario())
