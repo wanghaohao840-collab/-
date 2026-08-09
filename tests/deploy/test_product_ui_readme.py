@@ -21,3 +21,16 @@ def test_root_readme_documents_product_ui_workflow():
 
     for text in required_text:
         assert text in source
+
+
+def test_component_map_validation_installs_web_dependencies_first():
+    source = (ROOT / "docs" / "product-ui" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+    required_sequence = """Set-Location web
+npm ci
+Set-Location ..
+node --test tests/design/test_design_tokens.mjs tests/design/test_penpot_component_map.mjs"""
+
+    assert required_sequence in source

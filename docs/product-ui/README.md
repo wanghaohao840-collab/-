@@ -46,12 +46,17 @@ Penpot 是本产品 UI 的唯一视觉设计源。使用已登录的浏览器会
 ```powershell
 node scripts/design_tokens.mjs design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
 node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
+Set-Location web
+npm ci
+Set-Location ..
 node --test tests/design/test_design_tokens.mjs tests/design/test_penpot_component_map.mjs
 ```
 
-最后一条命令同时验证 DTCG、映射 schema、无密钥 URL、组件 ID 唯一性、代码文件
-存在性和 `verified` fresh-read 标记。映射只覆盖公开 React 组件契约，不改变
-Penpot 文件本身。
+组件映射测试从 `web/node_modules` 加载 lockfile 固定的 Ajv 依赖，因此首次检出或
+`web/package-lock.json` 变更后必须先运行紧邻测试命令的 `npm ci`。最后一条命令
+同时验证 DTCG、映射 schema、无密钥 URL、组件 ID 唯一性、代码文件存在性和
+`verified` fresh-read 标记。映射只覆盖公开 React 组件契约，不改变 Penpot 文件
+本身。
 
 ## 本地开发
 
@@ -65,12 +70,12 @@ Penpot 文件本身。
 
 ```powershell
 Set-Location web
-npm ci
 npm run dev
 ```
 
 Vite 将 `/api` 和 `/legacy` 代理到 `http://127.0.0.1:7860`。首次检出或 lockfile
-变更后运行 `npm ci`；普通前端迭代可直接运行 `npm run dev`。
+变更后的依赖安装已在上一节的验证准备中完成；普通前端迭代可直接运行
+`npm run dev`。
 
 ## 统一生产进程与 Docker
 
