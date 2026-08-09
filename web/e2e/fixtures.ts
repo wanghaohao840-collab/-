@@ -15,7 +15,15 @@ import {
 } from "./python-runtime";
 
 type WorkerFixtures = {
+  appServer: AppServer;
   appUrl: string;
+};
+
+export type AppServer = {
+  url: string;
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  restart: () => Promise<void>;
 };
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
@@ -79,7 +87,7 @@ async function stopProcess(process: ChildProcessWithoutNullStreams): Promise<voi
 }
 
 export const test = base.extend<object, WorkerFixtures>({
-  appUrl: [
+  appServer: [
     async ({ browserName }, use) => {
       if (browserName !== "chromium") {
         throw new Error(`Task 6 supports exactly one browser: received ${browserName}`);
@@ -97,34 +105,59 @@ export const test = base.extend<object, WorkerFixtures>({
       const port = await reservePort();
       const appUrl = `http://127.0.0.1:${port}`;
       const logs: string[] = [];
-      const process = spawn(
-        pythonExecutable,
-        [
-          "-m",
-          "uvicorn",
-          "server:app",
-          "--host",
-          "127.0.0.1",
-          "--port",
-          String(port),
-        ],
-        {
-          cwd: repositoryRoot,
-          env: {
-            ...withoutPythonOverrides(globalThis.process.env),
-            PDF_ASSISTANT_DATA_DIR: dataRoot,
-            PYTHONUNBUFFERED: "1",
+      let serverProcess: ChildProcessWithoutNullStreams | undefined;
+
+      const stop = async () => {
+        const ownedProcess = serverProcess;
+        serverProcess = undefined;
+        if (ownedProcess) {
+          await stopProcess(ownedProcess);
+        }
+      };
+      const start = async () => {
+        if (serverProcess?.exitCode === null) {
+          return;
+        }
+        logs.length = 0;
+        serverProcess = spawn(
+          pythonExecutable,
+          [
+            "-m",
+            "uvicorn",
+            "server:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            String(port),
+          ],
+          {
+            cwd: repositoryRoot,
+            env: {
+              ...withoutPythonOverrides(globalThis.process.env),
+              PDF_ASSISTANT_DATA_DIR: dataRoot,
+              PYTHONUNBUFFERED: "1",
+            },
           },
-        },
-      );
-      process.stdout.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
-      process.stderr.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+        );
+        serverProcess.stdout.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+        serverProcess.stderr.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+        try {
+          await waitForServer(serverProcess, appUrl, logs);
+        } catch (error) {
+          await stop();
+          throw error;
+        }
+      };
+      const restart = async () => {
+        await stop();
+        await start();
+      };
 
       try {
-        await waitForServer(process, appUrl, logs);
-        await use(appUrl);
+        await start();
+        await use({ url: appUrl, start, stop, restart });
       } finally {
-        await stopProcess(process);
+        await stop();
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
         rmSync(dataRoot, {
           force: true,
@@ -135,6 +168,12 @@ export const test = base.extend<object, WorkerFixtures>({
       }
     },
     { scope: "worker", timeout: 60_000 },
+  ],
+  appUrl: [
+    async ({ appServer }, use) => {
+      await use(appServer.url);
+    },
+    { scope: "worker" },
   ],
 });
 

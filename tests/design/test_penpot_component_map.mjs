@@ -1,15 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { isAbsolute, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const requireFromWeb = createRequire(
+  resolve(repositoryRoot, "web/package.json"),
+);
+const Ajv2020 = requireFromWeb("ajv/dist/2020").default;
+const addFormats = requireFromWeb("ajv-formats").default;
 const mappingPath = resolve(repositoryRoot, "docs/product-ui/penpot-component-map.json");
 const schemaPath = resolve(
   repositoryRoot,
   "docs/product-ui/penpot-component-map.schema.json",
 );
+const schema = readJson(schemaPath);
+const schemaValidator = new Ajv2020({ allErrors: true });
+addFormats(schemaValidator);
+const validateMapping = schemaValidator.compile(schema);
 
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
@@ -19,6 +29,46 @@ function assertNonEmptyString(value, label) {
   assert.equal(typeof value, "string", `${label} must be a string`);
   assert.ok(value.trim(), `${label} must not be empty`);
 }
+
+function assertCanonicalRepositoryFile(codeFile) {
+  assert.equal(isAbsolute(codeFile), false, "codeFile must be repository-relative");
+  assert.equal(codeFile, posix.normalize(codeFile), "codeFile must be canonical");
+  assert.equal(codeFile.split("/").includes(".."), false, "codeFile must not traverse");
+  const resolved = resolve(repositoryRoot, codeFile);
+  const repositoryRelative = relative(repositoryRoot, resolved);
+  assert.ok(
+    repositoryRelative && !repositoryRelative.startsWith(`..${sep}`) && repositoryRelative !== "..",
+    "codeFile must stay within the repository root",
+  );
+  const realRepositoryRoot = realpathSync(repositoryRoot);
+  const realCodeFile = realpathSync(resolved);
+  const realRelative = relative(realRepositoryRoot, realCodeFile);
+  assert.ok(
+    realRelative && !realRelative.startsWith(`..${sep}`) && realRelative !== "..",
+    "codeFile must resolve within the repository root",
+  );
+}
+
+test("component map validates against its Draft 2020-12 schema", () => {
+  const mapping = readJson(mappingPath);
+
+  assert.equal(validateMapping(mapping), true, JSON.stringify(validateMapping.errors));
+});
+
+test("Draft 2020-12 validation rejects extra properties and path traversal", () => {
+  const mapping = readJson(mappingPath);
+  const withExtraProperty = structuredClone(mapping);
+  withExtraProperty.components[0].unexpected = true;
+  assert.equal(validateMapping(withExtraProperty), false);
+  assert.ok(
+    validateMapping.errors?.some((error) => error.keyword === "additionalProperties"),
+  );
+
+  const withTraversal = structuredClone(mapping);
+  withTraversal.components[0].codeFile = "../outside.ts";
+  assert.equal(validateMapping(withTraversal), false);
+  assert.ok(validateMapping.errors?.some((error) => error.keyword === "pattern"));
+});
 
 test("component map schema fixes the verified Penpot bridge contract", () => {
   const schema = readJson(schemaPath);
@@ -59,7 +109,7 @@ test("component map is secret-free and points to unique repository files", () =>
     assertNonEmptyString(component.penpotName, "penpotName");
     assertNonEmptyString(component.codeFile, `${component.penpotName}.codeFile`);
     assert.ok(!component.codeFile.includes("\\"), "codeFile must use repository separators");
-    assert.ok(!component.codeFile.startsWith("/"), "codeFile must be repository-relative");
+    assertCanonicalRepositoryFile(component.codeFile);
     assert.ok(
       existsSync(resolve(repositoryRoot, component.codeFile)),
       `missing codeFile: ${component.codeFile}`,

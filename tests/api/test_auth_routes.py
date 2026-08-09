@@ -192,6 +192,18 @@ def test_validation_error_uses_common_envelope_without_password_leak(client):
     assert "short" not in response.text
 
 
+def test_username_validation_error_is_localized_for_the_login_form(client):
+    response = client.post(
+        "/api/v1/auth/login",
+        json={"username": "visual_reader\u200b", "password": "correct horse battery"},
+    )
+
+    assert_error_envelope(response, status=422, code="validation_error")
+    error = response.json()["error"]
+    assert error["message"] == "请修正表单错误"
+    assert error["field_errors"]["username"] == "用户名格式无效"
+
+
 def test_credentials_repr_masks_password():
     credentials = Credentials(
         username="reader",

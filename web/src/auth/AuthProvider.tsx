@@ -11,11 +11,11 @@ import {
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { apiRequest, type ApiRequestOptions } from "../api/client";
+import { ApiError, apiRequest, type ApiRequestOptions } from "../api/client";
 
 export type AuthState =
   | { status: "loading" }
-  | { status: "anonymous" }
+  | { status: "anonymous"; sessionExpired?: boolean }
   | { status: "authenticated"; username: string; csrfToken: string };
 
 export type Credentials = {
@@ -166,14 +166,34 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const logout = useCallback(async () => {
     authGenerationRef.current += 1;
+    let sessionExpired = false;
     try {
       await logoutMutation.mutateAsync();
+    } catch (reason) {
+      sessionExpired =
+        reason instanceof ApiError &&
+        reason.status === 401 &&
+        reason.code === "invalid_session";
+      if (!sessionExpired) {
+        throw reason;
+      }
     } finally {
       clearCachedSession();
-      setState({ status: "anonymous" });
-      navigate("/login", { replace: true });
+      setState({ status: "anonymous", sessionExpired });
+      const from = `${location.pathname}${location.search}${location.hash}`;
+      navigate("/login", {
+        replace: true,
+        state: sessionExpired ? { from, sessionExpired: true } : undefined,
+      });
     }
-  }, [clearCachedSession, logoutMutation, navigate]);
+  }, [
+    clearCachedSession,
+    location.hash,
+    location.pathname,
+    location.search,
+    logoutMutation,
+    navigate,
+  ]);
 
   const handleUnauthorized = useCallback(
     (requestGeneration: number) => {
@@ -183,9 +203,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
       authGenerationRef.current += 1;
       clearCachedSession();
-      setState({ status: "anonymous" });
+      setState({ status: "anonymous", sessionExpired: true });
       const from = `${location.pathname}${location.search}${location.hash}`;
-      navigate("/login", { replace: true, state: { from } });
+      navigate("/login", {
+        replace: true,
+        state: { from, sessionExpired: true },
+      });
     },
     [clearCachedSession, location.hash, location.pathname, location.search, navigate],
   );

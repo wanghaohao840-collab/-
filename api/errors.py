@@ -104,11 +104,18 @@ async def handle_invalid_csrf(
 
 
 def _validation_field_errors(exc: RequestValidationError) -> dict[str, str]:
+    localized_messages = {
+        "username": "用户名格式无效",
+        "password": "密码格式无效",
+    }
     field_errors: dict[str, str] = {}
     for error in exc.errors():
         location = [str(part) for part in error.get("loc", ()) if part != "body"]
         field = ".".join(location) or "request"
-        field_errors.setdefault(field, str(error.get("msg", "输入无效")))
+        field_errors.setdefault(
+            field,
+            localized_messages.get(field, str(error.get("msg", "输入无效"))),
+        )
     return field_errors
 
 
@@ -119,7 +126,7 @@ async def handle_validation_error(
     return error_response(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
         "validation_error",
-        "请求参数无效",
+        "请修正表单错误",
         field_errors=_validation_field_errors(exc),
     )
 

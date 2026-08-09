@@ -120,7 +120,7 @@ export function LoginPage() {
       setError(
         reason instanceof ApiError
           ? reason
-          : new ApiError(0, "client_error", "登录失败，请稍后重试"),
+          : new ApiError(0, "client_error", "服务暂时不可用，请稍后重试"),
       );
     }
   }

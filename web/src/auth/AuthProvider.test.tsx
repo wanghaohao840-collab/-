@@ -446,6 +446,44 @@ describe("AuthProvider", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("shows session expiry when logout finds the server-side session invalid", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ username: "reader", csrf_token: "expired-csrf" }),
+      )
+      .mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    const router = renderApp("/status");
+    const user = userEvent.setup();
+
+    expect(await screen.findByText("reader")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "退出测试" }));
+
+    expect(await screen.findByRole("dialog", { name: "会话已过期" })).toBeVisible();
+    expect(router.state.location.pathname).toBe("/login");
+    expect(router.state.location.state).toEqual({
+      from: "/status",
+      sessionExpired: true,
+    });
+  });
+
+  it("shows the service-unavailable message after a real network failure", async () => {
+    fetchMock
+      .mockResolvedValueOnce(unauthorized())
+      .mockRejectedValueOnce(new TypeError("fetch failed"));
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+    const user = userEvent.setup();
+
+    await user.type(await screen.findByLabelText("用户名"), "reader");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery");
+    await user.click(screen.getByRole("button", { name: "登录" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "服务暂时不可用，请稍后重试",
+    );
+  });
+
   it("ignores a delayed 401 from the previous session after logout and re-login", async () => {
     const oldUnauthorized = deferred<Response>();
     fetchMock
