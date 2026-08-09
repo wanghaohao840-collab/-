@@ -93,13 +93,20 @@ entry point rather than from an exact parser or chunk offset.
 
 ## Persistent Data
 
-Import tasks gain one control timestamp:
+Import tasks gain durable control timestamps:
 
 - `control_requested_at`
+- `control_claimed_at`
 
 The existing `finished_at`, safe error code, and safe summary fields describe
 terminal completion, compensation, or cleanup failures. State updates continue
 to set `updated_at`.
+
+`control_claimed_at` is null for unclaimed control work. Repository claim sets
+it atomically for `pause_requested` or `cancel_requested`; normal completion,
+failure, or shutdown release clears it. Startup recovery clears stale control
+claims before scheduling, so a process interruption cannot strand or duplicate
+cleanup work.
 
 Import batches gain deletion-lifecycle fields:
 
@@ -177,7 +184,9 @@ The scheduler selects `pause_requested` and `cancel_requested` work before
 ordinary queued or retry-ready imports. Its existing in-memory blocked-user set
 still enforces one executing item per user, while repository claim predicates
 also exclude users with pending control work so restart and multi-worker races
-cannot bypass the ordering.
+cannot bypass the ordering. Requested-control candidates require
+`control_claimed_at is null`; claiming one atomically sets the timestamp before
+returning the task to the worker.
 
 Batch controls transition each eligible task in one transaction:
 
