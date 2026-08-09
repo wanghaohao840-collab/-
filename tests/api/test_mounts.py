@@ -8,6 +8,7 @@ from inspect import unwrap
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from api.app import create_application
@@ -91,12 +92,21 @@ def test_unified_routes_preserve_precedence_and_share_one_lifespan(tmp_path):
         }
         assert legacy.requests == [("/legacy", "/legacy/")]
 
-        legacy_prefix = client.get("/legacy", headers={"Accept": "text/html"})
-        assert legacy_prefix.status_code == 404
-        assert legacy_prefix.headers["content-type"].startswith(
-            "application/json"
+        legacy_prefix = client.get(
+            "/legacy",
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
         )
+        assert legacy_prefix.status_code == 307
+        assert legacy_prefix.headers["location"] == "/legacy/"
         assert "SPA_INDEX" not in legacy_prefix.text
+
+        redirected_legacy = client.get(
+            "/legacy",
+            headers={"Accept": "application/json"},
+        )
+        assert redirected_legacy.status_code == 200
+        assert redirected_legacy.json()["legacy"] is True
 
         overview = client.get("/overview", headers={"Accept": "text/html"})
         assert overview.status_code == 200
@@ -144,6 +154,70 @@ def test_unified_routes_preserve_precedence_and_share_one_lifespan(tmp_path):
 
     assert services.start_calls == 1
     assert services.stop_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("accept", "expected_status"),
+    [
+        pytest.param("text/html", 200, id="exact-html"),
+        pytest.param("text/*", 200, id="text-wildcard"),
+        pytest.param("*/*", 200, id="any-wildcard"),
+        pytest.param("text/html;q=0", 404, id="exact-html-rejected"),
+        pytest.param(
+            "text/html;q=0, text/*;q=0.8, */*;q=1",
+            404,
+            id="exact-rejection-outranks-wildcards",
+        ),
+        pytest.param(
+            "text/html;q=0.2, text/*;q=0, */*;q=1",
+            200,
+            id="exact-acceptance-outranks-wildcards",
+        ),
+    ],
+)
+def test_spa_fallback_negotiates_html_by_quality_and_specificity(
+    tmp_path,
+    accept,
+    expected_status,
+):
+    services = FakeServices(session_registry=FakeSessionRegistry())
+    application = create_application(
+        services=services,
+        legacy_app=FakeLegacyApp(services),
+        dist_dir=_fake_dist(tmp_path),
+    )
+
+    with TestClient(application) as client:
+        response = client.get("/overview", headers={"Accept": accept})
+
+    assert response.status_code == expected_status
+    if expected_status == 200:
+        assert response.headers["content-type"].startswith("text/html")
+        assert "SPA_INDEX" in response.text
+    else:
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["error"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize("accept", ["text/html", "text/*", "*/*"])
+def test_reserved_api_prefix_never_uses_spa_fallback(tmp_path, accept):
+    services = FakeServices(session_registry=FakeSessionRegistry())
+    application = create_application(
+        services=services,
+        legacy_app=FakeLegacyApp(services),
+        dist_dir=_fake_dist(tmp_path),
+    )
+
+    with TestClient(application) as client:
+        response = client.get(
+            "/api/v1/not-a-route",
+            headers={"Accept": accept},
+        )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"]["code"] == "not_found"
+    assert "SPA_INDEX" not in response.text
 
 
 def test_missing_dist_is_explicit_without_swallowing_api_or_legacy(tmp_path):

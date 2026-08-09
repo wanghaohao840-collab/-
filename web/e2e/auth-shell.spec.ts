@@ -61,3 +61,26 @@ test("registers with a cookie, navigates the shell, and logs out with CSRF", asy
   await expect(page).toHaveURL(`${appUrl}/login`);
   await expect(page.getByRole("heading", { level: 1, name: "登录" })).toBeVisible();
 });
+
+test("redirects the exact legacy path and opens legacy from the migration CTA", async ({
+  appUrl,
+  page,
+}, testInfo) => {
+  const redirectResponse = page.waitForResponse(
+    (response) => response.url() === `${appUrl}/legacy` && response.status() === 307,
+  );
+  const legacyResponse = await page.goto(`${appUrl}/legacy`);
+
+  expect((await redirectResponse).headers().location).toBe("/legacy/");
+  expect(legacyResponse?.status()).toBe(200);
+  await expect(page).toHaveURL(`${appUrl}/legacy/`);
+
+  await registerUser(page, appUrl, uniqueUsername(`legacy_${testInfo.project.name}`));
+  await page.goto(`${appUrl}/documents`);
+  const legacyAction = page.getByRole("link", { name: "前往旧版" });
+  await expect(legacyAction).toHaveAttribute("href", "/legacy/");
+  await legacyAction.click();
+
+  await expect(page).toHaveURL(`${appUrl}/legacy/`);
+  await expect(page.locator("gradio-app")).toBeVisible();
+});

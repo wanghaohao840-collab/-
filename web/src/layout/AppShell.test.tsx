@@ -31,6 +31,24 @@ function getStyleRule(selector: string): CSSStyleDeclaration {
   throw new Error(`Missing CSS rule: ${selector}`);
 }
 
+function getMediaStyleRule(mediaText: string, selector: string): CSSStyleDeclaration {
+  for (const sheet of document.styleSheets) {
+    for (const rule of sheet.cssRules) {
+      if (rule instanceof CSSMediaRule && rule.conditionText === mediaText) {
+        for (const nestedRule of rule.cssRules) {
+          if (
+            nestedRule instanceof CSSStyleRule
+            && nestedRule.selectorText === selector
+          ) {
+            return nestedRule.style;
+          }
+        }
+      }
+    }
+  }
+  throw new Error(`Missing CSS rule: ${mediaText} / ${selector}`);
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -310,8 +328,21 @@ describe("AppShell", () => {
     ).toBeVisible();
     expect(screen.getByRole("link", { name: "前往旧版" })).toHaveAttribute(
       "href",
-      "/legacy",
+      "/legacy/",
     );
+  });
+
+  it("stops the loading spinner animation for reduced motion", () => {
+    render(<Button loading>导入中</Button>);
+
+    expect(screen.getByRole("button", { name: "导入中" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+    expect(
+      getMediaStyleRule("(prefers-reduced-motion: reduce)", ".button__spinner")
+        .animation,
+    ).toBe("none");
   });
 
   it("uses named shell variables for migration-state dimensions", async () => {

@@ -649,6 +649,6 @@
   }
 
   .button__spinner {
-    animation-duration: 1400ms;
+    animation: none;
   }
 }

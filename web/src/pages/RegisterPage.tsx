@@ -62,11 +62,11 @@ export function RegisterPage() {
               autoComplete="username"
               required
               minLength={3}
-              maxLength={64}
+              maxLength={32}
               aria-invalid={Boolean(usernameError)}
               aria-describedby={`register-username-help${usernameError ? " register-username-error" : ""}`}
             />
-            <p id="register-username-help" className="field-help">请输入 3–64 个字符的用户名</p>
+            <p id="register-username-help" className="field-help">请输入 3–32 个字符的用户名</p>
             {usernameError ? <p id="register-username-error" className="field-error">{usernameError}</p> : null}
           </div>
           <div className="form-field">
@@ -79,7 +79,7 @@ export function RegisterPage() {
                 autoComplete="new-password"
                 required
                 minLength={8}
-                maxLength={256}
+                maxLength={128}
                 aria-invalid={Boolean(passwordError)}
                 aria-describedby={`register-password-help${passwordError ? " register-password-error" : ""}`}
               />
@@ -93,7 +93,7 @@ export function RegisterPage() {
                 <span className="password-field__eye" aria-hidden="true" />
               </button>
             </div>
-            <p id="register-password-help" className="field-help">密码至少包含 8 个字符</p>
+            <p id="register-password-help" className="field-help">请输入 8–128 个字符的密码</p>
             {passwordError ? <p id="register-password-error" className="field-error">{passwordError}</p> : null}
           </div>
           <button className="auth-submit" type="submit" disabled={auth.isRegisterPending}>

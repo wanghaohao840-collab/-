@@ -8,8 +8,8 @@ from app.auth import AuthError, validate_username
 
 
 class Credentials(BaseModel):
-    username: Annotated[str, Field(min_length=3, max_length=64)]
-    password: Annotated[SecretStr, Field(min_length=8, max_length=256)]
+    username: Annotated[str, Field(min_length=3, max_length=32)]
+    password: Annotated[SecretStr, Field(min_length=8, max_length=128)]
 
     @field_validator("username")
     @classmethod

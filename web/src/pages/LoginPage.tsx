@@ -152,11 +152,11 @@ export function LoginPage() {
               autoComplete="username"
               required
               minLength={3}
-              maxLength={64}
+              maxLength={32}
               aria-invalid={Boolean(usernameError)}
               aria-describedby={`login-username-help${usernameError ? " login-username-error" : ""}`}
             />
-            <p id="login-username-help" className="field-help">请输入 3–64 个字符的用户名</p>
+            <p id="login-username-help" className="field-help">请输入 3–32 个字符的用户名</p>
             {usernameError ? <p id="login-username-error" className="field-error">{usernameError}</p> : null}
           </div>
           <div className="form-field">
@@ -169,7 +169,7 @@ export function LoginPage() {
                 autoComplete="current-password"
                 required
                 minLength={8}
-                maxLength={256}
+                maxLength={128}
                 aria-invalid={Boolean(passwordError)}
                 aria-describedby={`login-password-help${passwordError ? " login-password-error" : ""}`}
               />
@@ -183,7 +183,7 @@ export function LoginPage() {
                 <span className="password-field__eye" aria-hidden="true" />
               </button>
             </div>
-            <p id="login-password-help" className="field-help">密码至少包含 8 个字符</p>
+            <p id="login-password-help" className="field-help">请输入 8–128 个字符的密码</p>
             {passwordError ? <p id="login-password-error" className="field-error">{passwordError}</p> : null}
           </div>
           <label className="remember-control">

@@ -7,7 +7,7 @@ from threading import RLock
 from typing import Callable
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp
 
@@ -85,8 +85,20 @@ def _accepts_html(request: Request) -> bool:
     accept = request.headers.get("accept", "")
     if not accept:
         return True
+
+    selected_specificity = -1
+    selected_quality = 0.0
     for item in accept.split(","):
         media_type, *parameters = item.split(";")
+        normalized_media_type = media_type.strip().lower()
+        specificity = {
+            "*/*": 0,
+            "text/*": 1,
+            "text/html": 2,
+        }.get(normalized_media_type)
+        if specificity is None:
+            continue
+
         quality = 1.0
         for parameter in parameters:
             name, separator, value = parameter.strip().partition("=")
@@ -95,9 +107,14 @@ def _accepts_html(request: Request) -> bool:
                     quality = float(value)
                 except ValueError:
                     quality = 0.0
-        if quality > 0 and media_type.strip().lower() in {"text/html", "*/*"}:
-            return True
-    return False
+                if not 0.0 <= quality <= 1.0:
+                    quality = 0.0
+        if specificity > selected_specificity:
+            selected_specificity = specificity
+            selected_quality = quality
+        elif specificity == selected_specificity:
+            selected_quality = max(selected_quality, quality)
+    return selected_quality > 0.0
 
 
 def _has_reserved_prefix(path: str) -> bool:
@@ -146,6 +163,10 @@ def create_application(
                 )
             )
         application.mount("/legacy", legacy_app)
+
+    @application.get("/legacy", include_in_schema=False)
+    def redirect_legacy_root() -> RedirectResponse:
+        return RedirectResponse(url="/legacy/", status_code=307)
 
     resolved_dist = Path(dist_dir or PROJECT_ROOT / "web" / "dist").resolve()
     assets_dir = resolved_dist / "assets"

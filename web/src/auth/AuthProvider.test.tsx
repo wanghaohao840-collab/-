@@ -294,7 +294,7 @@ describe("AuthProvider", () => {
     const user = userEvent.setup();
 
     const username = await screen.findByLabelText("用户名");
-    expect(username).toHaveAccessibleDescription("请输入 3–64 个字符的用户名");
+    expect(username).toHaveAccessibleDescription("请输入 3–32 个字符的用户名");
     await user.type(username, "reader");
     await user.type(screen.getByLabelText("密码"), "wrong password");
     await user.click(screen.getByRole("button", { name: "登录" }));
@@ -330,8 +330,23 @@ describe("AuthProvider", () => {
     expect(await screen.findByText("用户名格式无效")).toBeVisible();
     expect(username).toHaveAttribute("aria-invalid", "true");
     expect(username).toHaveAccessibleDescription(
-      "请输入 3–64 个字符的用户名 用户名格式无效",
+      "请输入 3–32 个字符的用户名 用户名格式无效",
     );
+  });
+
+  it("publishes the domain length limits on the login form", async () => {
+    fetchMock.mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+
+    const username = await screen.findByLabelText("用户名");
+    const password = screen.getByLabelText("密码");
+    expect(username).toHaveAttribute("minlength", "3");
+    expect(username).toHaveAttribute("maxlength", "32");
+    expect(username).toHaveAccessibleDescription("请输入 3–32 个字符的用户名");
+    expect(password).toHaveAttribute("minlength", "8");
+    expect(password).toHaveAttribute("maxlength", "128");
+    expect(password).toHaveAccessibleDescription("请输入 8–128 个字符的密码");
   });
 
   it("shows and disables the pending login action", async () => {
@@ -365,6 +380,21 @@ describe("AuthProvider", () => {
 
     expect(await screen.findByRole("heading", { name: "学习概览" })).toBeVisible();
     expect(router.state.historyAction).toBe("REPLACE");
+  });
+
+  it("publishes the domain length limits on the registration form", async () => {
+    fetchMock.mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp("/register");
+
+    const username = await screen.findByLabelText("用户名");
+    const password = screen.getByLabelText("密码");
+    expect(username).toHaveAttribute("minlength", "3");
+    expect(username).toHaveAttribute("maxlength", "32");
+    expect(username).toHaveAccessibleDescription("请输入 3–32 个字符的用户名");
+    expect(password).toHaveAttribute("minlength", "8");
+    expect(password).toHaveAttribute("maxlength", "128");
+    expect(password).toHaveAccessibleDescription("请输入 8–128 个字符的密码");
   });
 
   it("preserves the complete protected target through login and registration", async () => {
