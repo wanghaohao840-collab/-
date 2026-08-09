@@ -91,6 +91,7 @@ The seven Penpot text styles preserve the approved size and line-height pairs. B
 ## Deliberate browser differences
 
 - The Desktop, Tablet, and Mobile AppShell reference boards contain illustrative overview metrics, recent-document names, reading progress, and continue-learning content. The Task 4 React routes intentionally do not reproduce those samples: all six product routes render only their real page heading and the approved migration empty state, so the empty-state card occupies the first content slot and the lower canvas remains open. This preserves the no-fabricated-data boundary until the corresponding product slices are implemented.
+- The session-expired browser state presents the approved dialog over Login rather than over the authenticated AppShell shown in the Penpot reference. A real `401` immediately unmounts the protected route and its user content before the re-authentication dialog is presented; retaining protected content solely to reproduce the reference backdrop would weaken that security boundary. The dialog geometry, overlay, actions, and focus behavior continue to follow the approved state.
 - Navigation blocks use the approved token geometry and state styling without importing an unapproved icon asset set. The visible text labels and `aria-current="page"` remain the authoritative destination and active-state signals.
 
 ## Token and implementation boundaries

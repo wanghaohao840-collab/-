@@ -3,6 +3,7 @@ import { Link, Navigate, useLocation } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import { resolveAuthDestination, useAuth } from "../auth/AuthProvider";
+import { AuthIntro } from "../components/AuthIntro/AuthIntro";
 
 type LocationState = { from?: unknown };
 
@@ -10,6 +11,7 @@ export function RegisterPage() {
   const auth = useAuth();
   const location = useLocation();
   const [error, setError] = useState<ApiError>();
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const from = (location.state as LocationState | null)?.from;
   const intendedPath = typeof from === "string" ? from : undefined;
 
@@ -47,11 +49,8 @@ export function RegisterPage() {
 
   return (
     <main className="auth-page">
+      <AuthIntro />
       <section className="auth-card" aria-labelledby="register-title">
-        <header className="auth-brand">
-          <p className="brand-name">知研</p>
-          <p>智能文档学习助手</p>
-        </header>
         <h1 id="register-title">注册</h1>
         {error ? <div className="form-banner" role="alert">{error.message}</div> : null}
         <form onSubmit={handleSubmit}>
@@ -72,21 +71,32 @@ export function RegisterPage() {
           </div>
           <div className="form-field">
             <label htmlFor="register-password">密码</label>
-            <input
-              id="register-password"
-              name="password"
-              type="password"
-              autoComplete="new-password"
-              required
-              minLength={8}
-              maxLength={256}
-              aria-invalid={Boolean(passwordError)}
-              aria-describedby={`register-password-help${passwordError ? " register-password-error" : ""}`}
-            />
+            <div className="password-field">
+              <input
+                id="register-password"
+                name="password"
+                type={passwordVisible ? "text" : "password"}
+                autoComplete="new-password"
+                required
+                minLength={8}
+                maxLength={256}
+                aria-invalid={Boolean(passwordError)}
+                aria-describedby={`register-password-help${passwordError ? " register-password-error" : ""}`}
+              />
+              <button
+                className="password-field__toggle"
+                type="button"
+                aria-label={passwordVisible ? "隐藏密码" : "显示密码"}
+                aria-pressed={passwordVisible}
+                onClick={() => setPasswordVisible((visible) => !visible)}
+              >
+                <span className="password-field__eye" aria-hidden="true" />
+              </button>
+            </div>
             <p id="register-password-help" className="field-help">密码至少包含 8 个字符</p>
             {passwordError ? <p id="register-password-error" className="field-error">{passwordError}</p> : null}
           </div>
-          <button type="submit" disabled={auth.isRegisterPending}>
+          <button className="auth-submit" type="submit" disabled={auth.isRegisterPending}>
             {auth.isRegisterPending ? "注册中…" : "注册"}
           </button>
         </form>

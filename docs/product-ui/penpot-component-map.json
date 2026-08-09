@@ -1,0 +1,56 @@
+{
+  "fileUrl": "https://design.penpot.app/#/workspace?team-id=81f57451-85cc-819d-8008-6f89f7eef6c2&file-id=3be9e5e1-190f-8090-8008-6ff3f3dcd54c",
+  "components": [
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-70741d401776",
+      "penpotName": "Button",
+      "codeFile": "web/src/components/Button/Button.tsx",
+      "exportName": "Button",
+      "variants": {
+        "hierarchy": ["primary", "secondary", "ghost", "danger"],
+        "size": ["sm", "md", "lg"],
+        "state": ["default", "hover", "focus", "disabled", "loading"],
+        "icon": ["none", "leading", "trailing"]
+      },
+      "verified": true
+    },
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-70744c2d6556",
+      "penpotName": "TextField",
+      "codeFile": "web/src/components/TextField/TextField.tsx",
+      "exportName": "TextField",
+      "variants": {
+        "state": ["default", "hover", "focus", "filled", "error", "disabled"],
+        "label": ["on", "off"],
+        "helper": ["none", "help", "error"]
+      },
+      "verified": true
+    },
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-7075be5192e9",
+      "penpotName": "AppShell",
+      "codeFile": "web/src/layout/AppShell.tsx",
+      "exportName": "AppShell",
+      "variants": {
+        "viewport": ["desktop", "tablet", "mobile"]
+      },
+      "verified": true
+    },
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-70750c0c6430",
+      "penpotName": "Sidebar",
+      "codeFile": "web/src/components/Sidebar/Sidebar.tsx",
+      "exportName": "Sidebar",
+      "variants": {},
+      "verified": true
+    },
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-70750d23f8e1",
+      "penpotName": "MobileBottomNav",
+      "codeFile": "web/src/components/MobileBottomNav/MobileBottomNav.tsx",
+      "exportName": "MobileBottomNav",
+      "variants": {},
+      "verified": true
+    }
+  ]
+}

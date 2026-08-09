@@ -105,6 +105,7 @@ function renderApp(
   initialEntry = "/login",
   intendedPath?: string,
   queryClient = createTestQueryClient(),
+  sessionExpired = false,
 ) {
   const router = createMemoryRouter(
     [
@@ -133,7 +134,13 @@ function renderApp(
     {
       initialEntries: [
         intendedPath
-          ? { pathname: initialEntry, state: { from: intendedPath } }
+          ? {
+              pathname: initialEntry,
+              state: {
+                from: intendedPath,
+                ...(sessionExpired ? { sessionExpired: true } : {}),
+              },
+            }
           : initialEntry,
       ],
     },
@@ -176,6 +183,48 @@ describe("AuthProvider", () => {
     await waitFor(() => {
       expect(screen.getByTestId("auth-status")).toHaveTextContent("anonymous");
     });
+  });
+
+  it("shows an expired-session dialog and returns focus to login", async () => {
+    fetchMock.mockResolvedValue(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp(
+      "/login",
+      "/overview",
+      createTestQueryClient(),
+      true,
+    );
+    const user = userEvent.setup();
+
+    const dialog = await screen.findByRole("dialog", { name: "会话已过期" });
+    expect(dialog).toBeVisible();
+    expect(screen.getByRole("button", { name: "重新登录" })).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+
+    expect(screen.queryByRole("dialog", { name: "会话已过期" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("用户名")).toHaveFocus();
+  });
+
+  it("renders the approved login controls and toggles password visibility", async () => {
+    fetchMock.mockResolvedValueOnce(unauthorized());
+    vi.stubGlobal("fetch", fetchMock);
+    renderApp();
+    const user = userEvent.setup();
+
+    expect(await screen.findByRole("complementary", { name: "知研介绍" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "保持登录状态" })).toBeChecked();
+    const password = screen.getByLabelText("密码");
+    const toggle = screen.getByRole("button", { name: "显示密码" });
+    expect(password).toHaveAttribute("type", "password");
+
+    await user.click(toggle);
+
+    expect(password).toHaveAttribute("type", "text");
+    expect(screen.getByRole("button", { name: "隐藏密码" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 
   it("restores an authenticated session without persisting secrets", async () => {
