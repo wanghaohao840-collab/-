@@ -1,6 +1,6 @@
 # 智能文档学习助手
 
-一个基于 **Memory + RAG** 的多用户文档学习系统。它围绕“导入文档 → 检索与问答 → 保存学习过程 → 生成报告”形成完整闭环，并通过 Gradio 提供可直接操作的 Web 界面。
+一个基于 **Memory + RAG** 的多用户文档学习系统。产品界面名为 **知研**，围绕“导入文档 → 检索与问答 → 保存学习过程 → 生成报告”形成完整闭环。当前统一服务提供 React 产品外壳，并在 `/legacy` 保留完整的 Gradio 功能界面作为迁移与回滚入口。
 
 当前版本已经实现：
 
@@ -17,6 +17,7 @@
 - 旧版单用户数据迁移；
 - History/Memory 损坏检测、隔离、备份和恢复；
 - 同一用户多会话写入协调及失败补偿。
+- Penpot 驱动的 React 登录、注册和响应式产品外壳。
 
 ## 功能概览
 
@@ -307,26 +308,51 @@ Chunk 正文。对比模式的结构化输出可以引用 `S-*` 或 `G-*`；摘�
 PDF_ASSISTANT_DATA_DIR=D:\document-assistant-data
 ```
 
-## 运行
+## 知研产品界面
 
-启动 Gradio 应用：
+Penpot 是产品界面的设计源，经过核验的文件、页面、组件和参考画板 ID 见
+[`docs/product-ui/penpot-handoff.md`](docs/product-ui/penpot-handoff.md)。仓库中的
+DTCG Token 快照生成 React 使用的 CSS；修改后执行生成与一致性检查：
 
 ```powershell
-.\venv\Scripts\python.exe .\ui\gradio_app.py
+node scripts/design_tokens.mjs design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
+node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
 ```
 
-默认地址：
+完整的路由、Penpot 无密钥连接、组件映射、认证安全、视口、截图基线、开发、
+部署和 `/legacy` 回滚流程见
+[`docs/product-ui/README.md`](docs/product-ui/README.md)。
+
+## 运行
+
+本地开发需要两个进程。先启动 FastAPI 后端和 `/legacy`；会话和用户锁仍是
+进程内状态，因此 Uvicorn 必须保持单 worker：
+
+```powershell
+.\venv\Scripts\python.exe -m uvicorn server:app --host 127.0.0.1 --port 7860 --workers 1
+```
+
+再在另一个 PowerShell 中启动 Vite：
+
+```powershell
+Set-Location web; npm run dev
+```
+
+Vite 将 `/api` 和 `/legacy` 代理到 `http://127.0.0.1:7860`。构建
+`web/dist` 后，上述 Uvicorn 进程也会直接提供 React SPA；`/healthz` 用于健康
+检查，`/legacy/` 是完整旧版功能入口。默认后端地址：
 
 ```text
 http://127.0.0.1:7860
 ```
 
-`main.py` 是早期单 Agent 演示入口，不是当前多用户 Web 应用入口。
+`main.py` 是早期单 Agent 演示入口，不是当前多用户 Web 应用入口。直接运行
+`ui/gradio_app.py` 仅用于旧版界面诊断，不是支持的统一生产启动方式。
 
 ## Docker 单节点部署
 
 目标是单台 Linux 云主机或内网服务器上的单副本 Compose 部署。默认启动
-Gradio 应用和 Qdrant，Neo4j 通过 `graph` Profile 按需启动；只有应用端口
+统一 FastAPI/React/Gradio 应用和 Qdrant，Neo4j 通过 `graph` Profile 按需启动；只有应用端口
 发布到宿主机，数据保存在 `deploy-data/`。
 
 ```sh
