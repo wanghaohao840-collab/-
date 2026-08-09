@@ -167,7 +167,7 @@ Execute the `import_task_events` table/index script only after `_ensure_import_c
 Run:
 
 ```powershell
-D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/test_import_control_schema.py tests/test_import_models.py tests/test_import_repository.py tests/test_database_report_schema.py -q --basetemp=.runtime/pytest-import-controls-schema
+D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/test_import_control_schema.py tests/test_import_models.py tests/test_import_repository.py -q --basetemp=.runtime/pytest-import-controls-schema
 ```
 
 Expected: PASS; running and pause-requested remain unique per user, while multiple cancel-requested rows are valid.
