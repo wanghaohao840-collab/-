@@ -327,9 +327,11 @@ try {
         try {
             $runningServices = @(Get-RunningUpdateServices -Config $config)
             if ($runningServices -notcontains 'app' -or $runningServices -notcontains 'qdrant') {
-                $stage = 'rollback-start-services'
+                $stage = 'rollback-prepare-services'
                 Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
-                    Get-ComposeArguments -Config $config -Command @('start', 'app', 'qdrant')
+                    Get-ComposeArguments -Config $config -Command @(
+                        'up', '-d', '--no-build', '--no-recreate', 'app', 'qdrant'
+                    )
                 ) | Out-Null
                 $runningServices = @(Get-RunningUpdateServices -Config $config)
             }
