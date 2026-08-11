@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -15,15 +16,26 @@ def test_dockerfile_uses_pinned_python_and_non_root_user():
 
 def test_dockerfile_builds_and_copies_the_react_distribution():
     source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    package = json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))
 
     package_copy = source.index("COPY web/package.json web/package-lock.json ./")
     install = source.index("RUN npm ci")
     source_copy = source.index("COPY web/src ./src")
     assert package_copy < install < source_copy
     assert "RUN npm ci" in source
-    assert "RUN npm run build" in source
+    assert package["scripts"]["build:app"] == (
+        "tsc -b tsconfig.app.json tsconfig.node.json && vite build"
+    )
+    assert "RUN npm run build:app" in source
+    tsconfig_copy = next(
+        line for line in source.splitlines() if "web/tsconfig.app.json" in line
+    )
+    assert "web/tsconfig.json" not in tsconfig_copy
+    assert "web/tsconfig.e2e.json" not in source
     assert "COPY --from=web-build /web/dist /app/web/dist" in source
     assert "COPY web/ ./" not in source
+    assert "COPY web/e2e" not in source
+    assert "COPY web/tests" not in source
 
 
 def test_final_image_copies_only_runtime_source_and_built_web_assets():

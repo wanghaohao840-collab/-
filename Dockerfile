@@ -5,9 +5,9 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
-COPY web/index.html web/tsconfig.json web/tsconfig.app.json web/tsconfig.node.json web/vite.config.ts ./
+COPY web/index.html web/tsconfig.app.json web/tsconfig.node.json web/vite.config.ts ./
 COPY web/src ./src
-RUN npm run build
+RUN npm run build:app
 
 FROM python:3.11-slim-bookworm
 
