@@ -37,11 +37,11 @@ _QUOTED_ABSOLUTE_PATH_RE = re.compile(
     r'''(["'])(?:(?:[a-z]:[\\/])|(?:\\\\)|/)[^"'\r\n]+\1''',
     re.IGNORECASE,
 )
-_UNC_PATH_RE = re.compile(r"(?<!\\)\\\\[^\s,;]+")
-_WINDOWS_PATH_RE = re.compile(r"(?<!\w)[a-z]:[\\/][^\s,;]+", re.IGNORECASE)
-_POSIX_PATH_RE = re.compile(r"(?<![:\w])/(?:[^/\s,;]+/)*[^/\s,;]+")
+_UNC_PATH_RE = re.compile(r"(?<!\\)\\\\[^;\r\n]*")
+_WINDOWS_PATH_RE = re.compile(r"(?<!\w)[a-z]:[\\/][^;\r\n]*", re.IGNORECASE)
+_POSIX_PATH_RE = re.compile(r"(?<![:\w])/[^;\r\n]*")
 _STAGED_IMPORT_PATH_RE = re.compile(
-    r"(?<!\w)imports[\\/][^\s,;]+", re.IGNORECASE
+    r"(?<!\w)imports[\\/][^;\r\n]*", re.IGNORECASE
 )
 _UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
@@ -1016,7 +1016,7 @@ def _safe_import_error_summary(message: object) -> str:
             continue
         safe_lines.append(stripped)
 
-    text = " ".join(safe_lines)
+    text = "\n".join(safe_lines)
     text = text.replace("Traceback (most recent call last):", "")
     text = _URL_RE.sub("[redacted-url]", text)
     text = _QUOTED_ABSOLUTE_PATH_RE.sub("[redacted-path]", text)

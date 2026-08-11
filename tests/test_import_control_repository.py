@@ -389,6 +389,9 @@ def test_control_failure_persistence_redacts_private_diagnostics(repository):
         '"C:\\Users\\private folder\\document.pdf" '
         "\\\\private-server\\share\\document.pdf "
         "'/home/private folder/document.pdf' "
+        "windows_path=C:\\Users\\Jane Doe\\private.pdf\n"
+        "posix_path=/home/Jane Doe/private.pdf\n"
+        "unc_path=\\\\private-server\\Jane Doe\\private.pdf\n"
         f"imports/{private_uuid}/{private_uuid}.md "
         f'document_id={private_uuid} user_id=private-user-42 '
         '"task_id": "private-task-42"\n'
@@ -422,25 +425,29 @@ def test_control_failure_persistence_redacts_private_diagnostics(repository):
         ).fetchone()["message"]
 
     assert persisted == event_message
-    assert persisted.startswith("ValueError: cleanup failed safely")
-    assert len(persisted) <= 500
-    for private_value in (
-        "correct horse battery",
-        "bearer-secret",
-        "private-user",
-        "private-pass",
-        "private folder",
-        "private-server",
-        "/home/private",
-        "imports/",
-        private_uuid,
-        "private-user-42",
-        "private-task-42",
-        "Traceback",
-        'File "',
-        "cleanup(private_uuid)",
-    ):
-        assert private_value not in persisted
+    for stored_summary in (persisted, event_message):
+        assert stored_summary.startswith("ValueError: cleanup failed safely")
+        assert len(stored_summary) <= 500
+        for private_value in (
+            "correct horse battery",
+            "bearer-secret",
+            "private-user",
+            "private-pass",
+            "private folder",
+            "private-server",
+            "/home/private",
+            "imports/",
+            private_uuid,
+            "private-user-42",
+            "private-task-42",
+            "Jane Doe",
+            "Doe\\private.pdf",
+            "Doe/private.pdf",
+            "Traceback",
+            'File "',
+            "cleanup(private_uuid)",
+        ):
+            assert private_value not in stored_summary
 
 
 def test_list_events_is_user_scoped_ordered_and_limit_is_capped(repository):
