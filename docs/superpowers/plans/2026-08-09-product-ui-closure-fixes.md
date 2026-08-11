@@ -109,7 +109,7 @@ Do not force-upgrade ESLint's nested Ajv 6, React Router, FastAPI, Starlette, or
 ```powershell
 & 'D:\python_self_agent\venv\Scripts\python.exe' -m pip install -r requirements-dev.txt
 & 'D:\python_self_agent\venv\Scripts\python.exe' -m pip check
-& 'D:\python_self_agent\venv\Scripts\python.exe' -W error::starlette.testclient.StarletteDeprecationWarning -c "from fastapi.testclient import TestClient; print(TestClient.__module__)"
+& 'D:\python_self_agent\venv\Scripts\python.exe' -c "import warnings; from starlette.exceptions import StarletteDeprecationWarning; warnings.simplefilter('error', StarletteDeprecationWarning); from fastapi.testclient import TestClient; print(TestClient.__module__)"
 ```
 
 If `httpx2` is installed but importing `TestClient` still emits the same warning, stop with a reality-conflict report; do not suppress or filter the warning.
@@ -125,7 +125,7 @@ and leaving the lifespan took under 0.2 seconds; the larger budget preserves
 the assertion while removing machine-level cold-import flakiness.
 
 ```powershell
-& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest tests/deploy/test_dependency_contract.py tests/api -q -W error::starlette.testclient.StarletteDeprecationWarning --basetemp=.runtime/pytest-closure-deps
+& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest tests/deploy/test_dependency_contract.py tests/api -q -p no:cacheprovider -W error::starlette.exceptions.StarletteDeprecationWarning --basetemp=.runtime/pytest-closure-deps
 
 Set-Location web
 npm ls ajv ajv-formats

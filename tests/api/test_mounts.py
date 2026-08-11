@@ -388,7 +388,11 @@ print("late-binding-ok")
         env=environment,
         capture_output=True,
         text=True,
-        timeout=45,
+        # Importing the unified server loads Gradio's component graph.  A cold
+        # Windows filesystem can take just over 45 seconds even though startup
+        # and shutdown themselves complete immediately, so keep this lifecycle
+        # assertion independent of machine-level import cache timing.
+        timeout=90,
         check=False,
     )
 

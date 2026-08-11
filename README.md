@@ -198,7 +198,7 @@ Neo4j 模块已经支持文档图谱构建、状态、恢复、查询、重试�
 ```powershell
 cd D:\python_self_agent
 python -m venv venv
-.\venv\Scripts\python.exe -m pip install "gradio==6.19.0" -r requirements.txt
+.\venv\Scripts\python.exe -m pip install "gradio==6.19.0" -r requirements-dev.txt
 ```
 
 后续启动和测试均使用 `venv\Scripts\python.exe`，避免系统 Python、Anaconda
