@@ -47,6 +47,8 @@ def test_create_claim_and_complete_task(tmp_path):
     assert claimed.task_id == task.task_id
     assert claimed.status == "running"
     assert claimed.total_attempt_count == 1
+    assert claimed.control_requested_at is None
+    assert claimed.control_claimed_at is None
     repo.mark_succeeded(user_id, task.task_id, now="2026-07-30T00:01:00Z")
     assert repo.get_batch(user_id, task.batch_id).succeeded == 1
 
