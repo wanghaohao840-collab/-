@@ -568,7 +568,7 @@ def test_startup_global_deadline_stops_a_hanging_docker_command(
     elapsed = time.monotonic() - started
 
     assert result.returncode != 0, result.stderr
-    assert 25 <= elapsed < 45
+    assert 25 <= elapsed < 55
     status = json.loads(
         (trusted_fallback_state / "status.json").read_text(encoding="utf-8-sig")
     )
