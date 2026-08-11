@@ -9,8 +9,7 @@ async function fillLogin(
   await page.getByRole("button", { name: "登录", exact: true }).click();
 }
 
-test("login baseline", async ({ appUrl, page }, testInfo) => {
-  test.skip(testInfo.project.name === "tablet", "The brief requires Login at desktop/mobile only");
+test("login baseline", async ({ appUrl, page }) => {
   await page.goto(`${appUrl}/login`);
   await expect(page.getByRole("heading", { level: 1, name: "登录" })).toBeVisible();
   await settleVisuals(page);
@@ -42,6 +41,9 @@ test("validation error baseline", async ({ appUrl, page }) => {
 });
 
 test("server error baseline", async ({ appServer, appUrl, page }) => {
+  // Stopping the real unified runtime can exceed the default budget on a cold
+  // Windows filesystem while the browser resolves the failed request.
+  test.slow();
   await page.goto(`${appUrl}/login`);
   await appServer.stop();
   try {
@@ -55,6 +57,8 @@ test("server error baseline", async ({ appServer, appUrl, page }) => {
 });
 
 test("session-expired baseline", async ({ appServer, appUrl, page }, testInfo) => {
+  // This assertion intentionally restarts the full FastAPI + Gradio runtime.
+  test.slow();
   await registerUser(page, appUrl, `visual_expired_${testInfo.project.name}`);
   await appServer.restart();
   if (testInfo.project.name === "mobile") {

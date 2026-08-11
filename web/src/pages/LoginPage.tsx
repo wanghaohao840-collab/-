@@ -186,10 +186,6 @@ export function LoginPage() {
             <p id="login-password-help" className="field-help">请输入 8–128 个字符的密码</p>
             {passwordError ? <p id="login-password-error" className="field-error">{passwordError}</p> : null}
           </div>
-          <label className="remember-control">
-            <input name="remember" type="checkbox" defaultChecked />
-            <span>保持登录状态</span>
-          </label>
           <button className="auth-submit" type="submit" disabled={auth.isLoginPending}>
             {auth.isLoginPending ? "登录中…" : "登录"}
           </button>

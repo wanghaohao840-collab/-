@@ -20,7 +20,7 @@ test("login, register, AppShell, and More drawer have no serious axe violations"
   await page.goto(`${appUrl}/login`);
   await expect(page.getByRole("heading", { level: 1, name: "登录" })).toBeVisible();
   await expect(page.getByRole("complementary", { name: "知研介绍" })).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: "保持登录状态" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "保持登录状态" })).toHaveCount(0);
   const password = page.getByLabel("密码", { exact: true });
   const visibilityToggle = page.getByRole("button", { name: "显示密码" });
   const toggleBox = await visibilityToggle.boundingBox();

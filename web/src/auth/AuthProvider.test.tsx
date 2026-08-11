@@ -213,7 +213,7 @@ describe("AuthProvider", () => {
     const user = userEvent.setup();
 
     expect(await screen.findByRole("complementary", { name: "知研介绍" })).toBeVisible();
-    expect(screen.getByRole("checkbox", { name: "保持登录状态" })).toBeChecked();
+    expect(screen.queryByRole("checkbox", { name: "保持登录状态" })).not.toBeInTheDocument();
     const password = screen.getByLabelText("密码");
     const toggle = screen.getByRole("button", { name: "显示密码" });
     expect(password).toHaveAttribute("type", "password");

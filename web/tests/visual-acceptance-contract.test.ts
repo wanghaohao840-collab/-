@@ -13,7 +13,7 @@ describe("visual acceptance contract", () => {
     expect(visualSpec).not.toMatch(/\bhistory\.(?:pushState|replaceState)\s*\(/);
   });
 
-  it("keeps exactly the brief's fifteen reviewed baselines", () => {
+  it("keeps exactly the closure brief's sixteen reviewed baselines", () => {
     const snapshots = readdirSync(resolve(e2eRoot, "visual.spec.ts-snapshots"))
       .filter((name) => name.endsWith(".png"))
       .sort();
@@ -21,6 +21,7 @@ describe("visual acceptance contract", () => {
     expect(snapshots).toEqual([
       "login-desktop.png",
       "login-mobile.png",
+      "login-tablet.png",
       "more-drawer-mobile.png",
       "server-error-desktop.png",
       "server-error-mobile.png",

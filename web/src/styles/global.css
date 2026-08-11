@@ -194,22 +194,6 @@ a {
   font-size: 0.875rem;
 }
 
-.remember-control {
-  display: flex;
-  min-height: calc(var(--space-10) + var(--space-1));
-  align-items: center;
-  gap: var(--space-2);
-  margin: var(--space-0) var(--space-0) var(--space-4);
-  cursor: pointer;
-}
-
-.remember-control input {
-  width: var(--space-5);
-  height: var(--space-5);
-  margin: var(--space-0);
-  accent-color: var(--color-brand-600);
-}
-
 .auth-submit {
   width: 100%;
   min-height: 44px;
