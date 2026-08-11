@@ -1,6 +1,6 @@
 # 知研 Penpot product UI handoff
 
-Validated on 2026-08-06 against Penpot 2.17.1. Penpot is the sole design source for this product UI; the former design file is an archive only.
+Validated on 2026-08-11 against Penpot 2.17.1 at file revision `89`. Penpot is the sole design source for this product UI; the former design file is an archive only.
 
 ## Source file
 
@@ -52,27 +52,43 @@ The first ID is the library component or native Variant container; the second is
 
 Native Variant axes are present for Button (`hierarchy`, `size`, `state`, `icon`), TextField (`state`, `label`, `helper`), SidebarItem (`state`, `collapsed`), Toast (`tone`), Dialog (`size`), and AppShell (`viewport`). Focus states use a visible 2 px ring. Disabled, destructive, warning, and selected states also use text, iconography, or opacity, rather than color alone.
 
+## Responsive field cleanup
+
+- Removed empty Foundations board: `0f745b42-1a51-801c-8008-6ff39f5b8841`. The `Board / Foundation System` board remains the sole top-level Foundations board.
+- Login remember rows removed from Desktop, Tablet, and Mobile: `9b1e7a6b-703c-8060-8008-70761b2c4b92`, `9b1e7a6b-703c-8060-8008-7076b6e5a9c5`, and `9b1e7a6b-703c-8060-8008-70770173089e`. Register boards and their existing controls were not changed.
+- The affected Login forms reflow with their existing 16 px desktop/tablet and 12 px mobile Flex gaps. Desktop and Tablet submit controls now follow PasswordField directly; Mobile retains its 188 px Hero and 656 px Form geometry.
+
+| Internal layer | Penpot shape ID | Horizontal sizing | Fixed geometry |
+|---|---|---|---|
+| TextField / Input | `9b1e7a6b-703c-8060-8008-70743ef84e3c` | `fill` | — |
+| PasswordField / Input | `9b1e7a6b-703c-8060-8008-7074e250419f` | `fill` | — |
+| PasswordField / Spacer | `9b1e7a6b-703c-8060-8008-7074e286ce22` | `fill` | — |
+| PasswordField / Eye | `9b1e7a6b-703c-8060-8008-7074e28f276b` | `fix` | `44 × 44` |
+
+Fresh readback found 14 linked component copies on Desktop Login, 12 on Tablet Login, and 12 on Mobile Login, with zero broken links, text-bounds overflow, or actual-bounds overflow. Desktop field and submit edges are aligned at `x=900..1300`; the corresponding Tablet and Mobile controls are also equal-width and aligned. Desktop, Tablet, and Mobile Register boards still include ConfirmPassword and retain their original content.
+
 ## Reference boards
 
 | Reference | Viewport | Penpot board ID | Export |
 |---|---:|---|---|
 | Desktop login | 1440 × 1024 | `9b1e7a6b-703c-8060-8008-70761a57accd` | [`desktop-login.png`](reference/penpot/desktop-login.png) |
+| Tablet login | 1024 × 768 | `9b1e7a6b-703c-8060-8008-7076b66de7ca` | [`tablet-login.png`](reference/penpot/tablet-login.png) |
 | Desktop AppShell | 1440 × 1024 | `9b1e7a6b-703c-8060-8008-70768eb3fbd8` | [`desktop-shell.png`](reference/penpot/desktop-shell.png) |
 | Tablet AppShell | 1024 × 768 | `9b1e7a6b-703c-8060-8008-7076da187916` | [`tablet-shell.png`](reference/penpot/tablet-shell.png) |
 | Mobile login | 390 × 844 | `9b1e7a6b-703c-8060-8008-707701065fab` | [`mobile-login.png`](reference/penpot/mobile-login.png) |
 | Mobile AppShell | 390 × 844 | `9b1e7a6b-703c-8060-8008-7077227fbcfe` | [`mobile-shell.png`](reference/penpot/mobile-shell.png) |
 | Session expired | 1440 × 1024 | `9b1e7a6b-703c-8060-8008-70776404ef6f` | [`session-expired.png`](reference/penpot/session-expired.png) |
 
-The six exports were generated directly from these boards at their original dimensions and visually checked for clipping, overflow, alignment, contrast, and missing glyphs.
+The seven exports were generated directly from these boards at their original dimensions and visually checked for clipping, overflow, alignment, contrast, and missing glyphs. The three Login exports were refreshed after the responsive field cleanup and contain no remember control.
 
 ## Responsive and navigation rules
 
 - Desktop (`≥1200 px`): fixed 248 px sidebar, 64 px top bar, and content capped at 1200 px.
 - Tablet (`768–1199 px`): 72 px compact rail and on-demand drawer. Use two columns only while each remains at least 320 px.
-- Mobile (`≤767 px`): one content column, 64 px bottom navigation, and controls with a minimum 44 px target. The linked Login/Register remember rows read back at `220 × 44`, PasswordField visibility controls at `44 × 44`, and Mobile AppShell `/legacy` actions at `140 × 44`.
+- Mobile (`≤767 px`): one content column, 64 px bottom navigation, and controls with a minimum 44 px target. Login omits a persistence control; PasswordField visibility controls remain `44 × 44`, and Mobile AppShell `/legacy/` actions remain `140 × 44`.
 - Desktop navigation: 概览、文档库、智能问答、文献检索、学习笔记、学习洞察.
 - Mobile navigation: 概览、文档、问答、检索、更多. The 更多 drawer contains 学习笔记、学习洞察、账户、退出登录.
-- Unmigrated capability copy: “该能力正在迁移到新版界面，可暂时前往旧版使用。” The secondary action routes to `/legacy`.
+- Unmigrated capability copy: “该能力正在迁移到新版界面，可暂时前往旧版使用。” The secondary action routes to `/legacy/`.
 
 ## Keyboard, focus, and accessibility
 
@@ -98,4 +114,4 @@ The seven Penpot text styles preserve the approved size and line-height pairs. B
 
 Penpot tokens are published only through `Penpot → design/tokens/zhiyan.tokens.json → generated CSS`; code must not write values back to Penpot. Penpot 2.17.1 rejects `/` in native token names and does not accept a negative shadow spread, so native effect tokens are named `shadow.surface` and `shadow.overlay`. The Foundations page still presents the approved library labels `Shadow/Surface` and `Shadow/Overlay`; the normalized snapshot records the actual zero-spread native values.
 
-This UI handoff does not alter ApplicationServices, authentication/CSRF behavior, per-user UUID storage, `document_id`, citation, RAG, Memory, reporting, bulk-import, or storage boundaries. The legacy Gradio experience remains available only through `/legacy`.
+This UI handoff does not alter ApplicationServices, authentication/CSRF behavior, per-user UUID storage, `document_id`, citation, RAG, Memory, reporting, bulk-import, or storage boundaries. The legacy Gradio experience remains available only through `/legacy/`.

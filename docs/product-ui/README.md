@@ -31,10 +31,15 @@ Penpot 是本产品 UI 的唯一视觉设计源。使用已登录的浏览器会
 截图、提交或文档中。仓库只保存 team/file 标识组成的无密钥链接。发布核验只读
 取回文件、页面、组件和画板；除非另有明确设计任务，不在发布门禁中写入 Penpot。
 
-文件名、无密钥 URL、七个页面 ID、组件 ID、六个参考画板 ID 与导出路径见
+文件名、无密钥 URL、七个页面 ID、组件 ID、七个参考画板 ID 与导出路径见
 [`penpot-handoff.md`](penpot-handoff.md)。React 对应关系保存在
 [`penpot-component-map.json`](penpot-component-map.json)，不得用名称猜测或替换
 已经 fresh-read 核验的 ID。
+
+Login 的 Penpot 权威参考覆盖 desktop `1440 × 1024`、tablet `1024 × 768` 和
+mobile `390 × 844`。三档设计均不再展示“保持登录状态”；TextField 与
+PasswordField 的内部输入层按父表单宽度填充，PasswordField 的可见性按钮保持
+`44 × 44`。仓库参考图必须由这三个真实画板直接导出，不得以浏览器截图代替。
 
 ## DTCG Token 与组件映射
 
@@ -49,7 +54,7 @@ node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/
 Set-Location web
 npm ci
 Set-Location ..
-node --test tests/design/test_design_tokens.mjs tests/design/test_penpot_component_map.mjs
+node --test tests/design/test_design_tokens.mjs tests/design/test_penpot_component_map.mjs tests/design/test_penpot_handoff.mjs
 ```
 
 组件映射测试从 `web/node_modules` 加载 lockfile 固定的 Ajv 依赖，因此首次检出或
