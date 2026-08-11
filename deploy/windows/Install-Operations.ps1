@@ -1,0 +1,186 @@
+#Requires -Version 5.1
+#Requires -RunAsAdministrator
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
+    [string]$EnvFile = 'deploy\.env',
+    [string]$StateRoot = 'deploy-state',
+    [string]$BackupRoot = 'D:\python_self_agent_backups'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Assert-RequiredCommand {
+    param([Parameter(Mandatory)][string]$Name)
+
+    if ($null -eq (Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue)) {
+        throw "Required command was not found: $Name"
+    }
+}
+
+function Assert-PrivateInternetProfiles {
+    $activeProfiles = @(
+        Get-NetConnectionProfile | Where-Object {
+            $_.IPv4Connectivity -eq 'Internet' -or $_.IPv6Connectivity -eq 'Internet'
+        }
+    )
+    $nonPrivateProfiles = @($activeProfiles | Where-Object { $_.NetworkCategory -ne 'Private' })
+    if ($nonPrivateProfiles.Count -gt 0) {
+        throw 'Every active Internet-connected network profile must be Private before installation.'
+    }
+}
+
+function Assert-Tcp7860IsFreeOrOwnedByComposeApp {
+    param([Parameter(Mandatory)]$Config)
+
+    $listeners = @(Get-NetTCPConnection -LocalPort 7860 -State Listen -ErrorAction SilentlyContinue)
+    if ($listeners.Count -eq 0) {
+        return
+    }
+
+    $appContainerIds = @(
+        Invoke-External -FilePath 'docker' -ArgumentList @(
+            'compose',
+            '--project-directory', $Config.RepositoryRoot,
+            '--file', $Config.ComposeFile,
+            '--env-file', $Config.EnvFile,
+            'ps', '-q', 'app'
+        )
+    )
+    $appContainerId = @($appContainerIds | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -First 1
+    if ($null -eq $appContainerId) {
+        throw 'TCP 7860 is occupied and the current Compose app has no container mapping.'
+    }
+
+    $portJson = @(
+        Invoke-External -FilePath 'docker' -ArgumentList @(
+            'inspect', '--format', '{{json .NetworkSettings.Ports}}', $appContainerId.Trim()
+        )
+    ) | Select-Object -First 1
+    $portBindings = $portJson | ConvertFrom-Json
+    $appPortBindings = @($portBindings.'7860/tcp' | Where-Object { $_.HostPort -eq '7860' })
+    if ($appPortBindings.Count -eq 0) {
+        throw 'TCP 7860 is occupied by a process outside the current Compose app mapping.'
+    }
+}
+
+function New-OperationsTaskAction {
+    param(
+        [Parameter(Mandatory)][string]$ScriptPath,
+        [Parameter(Mandatory)]$Config,
+        [switch]$IncludeBackupRoot
+    )
+
+    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -RepositoryRoot "{1}" -EnvFile "{2}" -StateRoot "{3}"' -f $ScriptPath, $Config.RepositoryRoot, $Config.EnvFile, $Config.StateRoot
+    if ($IncludeBackupRoot) {
+        $arguments += ' -BackupRoot "{0}"' -f $Config.BackupRoot
+    }
+    return New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
+}
+
+function New-OperationsTaskSettings {
+    param([bool]$WakeToRun)
+
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew
+    $settings.StartWhenAvailable = $true
+    $settings.MultipleInstances = 'IgnoreNew'
+    $settings.WakeToRun = $WakeToRun
+    return $settings
+}
+
+$modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'
+Import-Module $modulePath -Force
+
+$config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+$taskScripts = [ordered]@{
+    'PythonSelfAgent-LoginRecovery' = Join-Path $PSScriptRoot 'Start-Deployment.ps1'
+    'PythonSelfAgent-Health' = Join-Path $PSScriptRoot 'Test-DeploymentHealth.ps1'
+    'PythonSelfAgent-DailyBackup' = Join-Path $PSScriptRoot 'Backup-Deployment.ps1'
+    'PythonSelfAgent-MonthlyRestoreDrill' = Join-Path $PSScriptRoot 'Invoke-RestoreDrill.ps1'
+}
+
+foreach ($scriptPath in $taskScripts.Values) {
+    if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+        throw "Required task script was not found: $scriptPath"
+    }
+}
+
+Assert-RequiredCommand -Name 'docker.exe'
+Assert-RequiredCommand -Name 'tar.exe'
+Invoke-External -FilePath 'docker.exe' -ArgumentList @('version') | Out-Null
+Invoke-External -FilePath 'docker.exe' -ArgumentList @('compose', 'version') | Out-Null
+Invoke-External -FilePath 'docker.exe' -ArgumentList @('scout', 'version') | Out-Null
+Invoke-External -FilePath 'tar.exe' -ArgumentList @('--version') | Out-Null
+Assert-PrivateInternetProfiles
+Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config
+
+# All preflight checks above this line. System changes below are intentional.
+$firewallName = 'Python Self Agent - Private Intranet 7860'
+$currentUser = "$env:USERDOMAIN\$env:USERNAME"
+$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
+$loginTrigger = New-ScheduledTaskTrigger -AtLogOn
+$healthTrigger = New-ScheduledTaskTrigger -Daily -At '00:00'
+$healthRepetition = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)
+$healthTrigger.Repetition = $healthRepetition.Repetition
+$backupTrigger = New-ScheduledTaskTrigger -Daily -At '03:00'
+$monthlyTrigger = New-CimInstance -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClassName MSFT_TaskMonthlyDOWTrigger -ClientOnly
+$monthlyTrigger.Enabled = $true
+$monthlyTrigger.StartBoundary = (Get-Date -Hour 4 -Minute 0 -Second 0).ToString('s')
+$monthlyTrigger.DaysOfWeek = 1 # Sunday
+$monthlyTrigger.WeeksOfMonth = 1 # First week only
+$monthlyTrigger.MonthsOfYear = 4095 # Every month
+
+if ($PSCmdlet.ShouldProcess($config.StateRoot, 'Create operations state directory')) {
+    New-Item -ItemType Directory -Force -Path $config.StateRoot | Out-Null
+}
+if ($PSCmdlet.ShouldProcess($config.EnvFile, 'Restrict deployment environment file ACL')) {
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/inheritance:r') | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant:r', "$env:USERDOMAIN\$env:USERNAME:(M)") | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'SYSTEM:(F)') | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'Administrators:(F)') | Out-Null
+}
+if ($PSCmdlet.ShouldProcess($firewallName, 'Replace private intranet firewall rule')) {
+    Get-NetFirewallRule -DisplayName $firewallName -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -eq $firewallName } |
+        Remove-NetFirewallRule -ErrorAction Stop
+    New-NetFirewallRule -DisplayName $firewallName -Direction Inbound -Action Allow `
+        -Protocol TCP -LocalPort 7860 -Profile Private -RemoteAddress LocalSubnet | Out-Null
+}
+
+$taskDefinitions = @(
+    [PSCustomObject]@{
+        Name = 'PythonSelfAgent-LoginRecovery'
+        Action = New-OperationsTaskAction -ScriptPath $taskScripts['PythonSelfAgent-LoginRecovery'] -Config $config
+        Trigger = $loginTrigger
+        Settings = New-OperationsTaskSettings -WakeToRun $false
+    },
+    [PSCustomObject]@{
+        Name = 'PythonSelfAgent-Health'
+        Action = New-OperationsTaskAction -ScriptPath $taskScripts['PythonSelfAgent-Health'] -Config $config
+        Trigger = $healthTrigger
+        Settings = New-OperationsTaskSettings -WakeToRun $false
+    },
+    [PSCustomObject]@{
+        Name = 'PythonSelfAgent-DailyBackup'
+        Action = New-OperationsTaskAction -ScriptPath $taskScripts['PythonSelfAgent-DailyBackup'] -Config $config -IncludeBackupRoot
+        Trigger = $backupTrigger
+        Settings = New-OperationsTaskSettings -WakeToRun $true
+    },
+    [PSCustomObject]@{
+        Name = 'PythonSelfAgent-MonthlyRestoreDrill'
+        Action = New-OperationsTaskAction -ScriptPath $taskScripts['PythonSelfAgent-MonthlyRestoreDrill'] -Config $config -IncludeBackupRoot
+        Trigger = $monthlyTrigger
+        Settings = New-OperationsTaskSettings -WakeToRun $true
+    }
+)
+
+foreach ($task in $taskDefinitions) {
+    if ($PSCmdlet.ShouldProcess($task.Name, 'Register scheduled task')) {
+        Register-ScheduledTask -TaskName $task.Name -Action $task.Action -Trigger $task.Trigger `
+            -Settings $task.Settings -Principal $principal -Force | Out-Null
+    }
+}
+
+Write-Output 'Windows deployment operations installation completed.'

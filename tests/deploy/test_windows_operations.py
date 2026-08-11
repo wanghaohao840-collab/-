@@ -14,6 +14,8 @@ ROOT = Path(__file__).parents[2]
 MODULE = ROOT / "deploy" / "windows" / "Operations.Common.psm1"
 START = ROOT / "deploy" / "windows" / "Start-Deployment.ps1"
 HEALTH = ROOT / "deploy" / "windows" / "Test-DeploymentHealth.ps1"
+INSTALL = ROOT / "deploy" / "windows" / "Install-Operations.ps1"
+UNINSTALL = ROOT / "deploy" / "windows" / "Uninstall-Operations.ps1"
 
 
 def run_ps(
@@ -572,3 +574,86 @@ def test_startup_global_deadline_stops_a_hanging_docker_command(
     )
     assert status["status"] == "failed"
     assert status["category"] == "startup"
+
+
+def test_operations_installer_has_private_intranet_and_exact_task_contracts():
+    source = INSTALL.read_text(encoding="utf-8")
+
+    for task_name in (
+        "PythonSelfAgent-LoginRecovery",
+        "PythonSelfAgent-Health",
+        "PythonSelfAgent-DailyBackup",
+        "PythonSelfAgent-MonthlyRestoreDrill",
+    ):
+        assert task_name in source
+
+    assert "#Requires -Version 5.1" in source
+    assert "#Requires -RunAsAdministrator" in source
+    assert "Get-NetConnectionProfile" in source
+    assert "NetworkCategory -ne 'Private'" in source
+    assert "-Profile Private" in source
+    assert "-RemoteAddress LocalSubnet" in source
+    assert "-Protocol TCP" in source
+    assert "-LocalPort 7860" in source
+    assert source.index("Get-NetConnectionProfile") < source.index("New-NetFirewallRule")
+    assert "MultipleInstances = 'IgnoreNew'" in source
+    assert "StartWhenAvailable = $true" in source
+    assert "-LogonType Interactive" in source
+    assert "-RunLevel Highest" in source
+    assert "-AtLogOn" in source
+    assert "RepetitionInterval (New-TimeSpan -Minutes 5)" in source
+    assert "-Daily -At '03:00'" in source
+    assert "$monthlyTrigger.DaysOfWeek = 1" in source
+    assert "$monthlyTrigger.WeeksOfMonth = 1" in source
+    assert "New-ScheduledTaskAction -Execute 'powershell.exe'" in source
+    assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in source
+    assert "Register-ScheduledTask" in source
+    assert "-Force" in source
+
+
+def test_operations_installer_preflights_before_system_mutations():
+    source = INSTALL.read_text(encoding="utf-8")
+
+    preflight_end = source.index("# All preflight checks above this line")
+    for preflight in (
+        "Get-OperationsConfig",
+        "'compose', 'version'",
+        "'scout', 'version'",
+        "Assert-PrivateInternetProfiles",
+        "Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config",
+    ):
+        assert source.index(preflight) < preflight_end
+    for mutation in (
+        "New-Item -ItemType Directory",
+        "icacls.exe",
+        "Remove-NetFirewallRule",
+        "New-NetFirewallRule",
+        "Register-ScheduledTask",
+    ):
+        assert source.index(mutation) > preflight_end
+
+
+def test_operations_uninstaller_removes_only_its_exact_tasks_and_rule():
+    source = UNINSTALL.read_text(encoding="utf-8")
+
+    for task_name in (
+        "PythonSelfAgent-LoginRecovery",
+        "PythonSelfAgent-Health",
+        "PythonSelfAgent-DailyBackup",
+        "PythonSelfAgent-MonthlyRestoreDrill",
+    ):
+        assert task_name in source
+    assert "Python Self Agent - Private Intranet 7860" in source
+    assert "Unregister-ScheduledTask -TaskName $taskName" in source
+    assert "Remove-NetFirewallRule" in source
+    assert "Preserved environment file:" in source
+    assert "Preserved containers and images." in source
+    for forbidden in (
+        "Remove-Item",
+        "-Recurse",
+        "docker ",
+        "docker.exe",
+        "rmdir",
+        "del /",
+    ):
+        assert forbidden not in source
