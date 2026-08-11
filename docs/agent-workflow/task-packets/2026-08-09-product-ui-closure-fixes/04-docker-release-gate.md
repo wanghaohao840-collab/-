@@ -187,7 +187,7 @@ Stop and append a reality-conflict report if Docker context/daemon differs, port
 - Residual risks:
   - Deep external-model smoke intentionally excluded by packet scope; full Python output retains existing Neo4j driver destructor warnings, not the closed TestClient warning.
 - Commit:
-  - `d65fd7d` for the Linux entrypoint correction; closure documentation commit follows this handoff.
+  - `d65fd7d` for the Linux entrypoint correction; `837f240` for the closure report and final workflow records.
 
 ## Resolved reality-conflict report
 

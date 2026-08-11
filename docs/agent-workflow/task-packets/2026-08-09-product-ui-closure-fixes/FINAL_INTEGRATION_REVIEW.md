@@ -1,7 +1,7 @@
 # Final Integration Review: product UI closure fixes
 
 - Source review: `REVIEW.md`
-- Reviewed commit/worktree: `d65fd7d` plus the closure-report and workflow-document changes listed below
+- Reviewed delivery range: `ef93550f6b0616815314baf2f62263b43536a17e` through `837f240`
 - Review date: `2026-08-11`
 - Result: `accepted`
 
@@ -13,7 +13,7 @@
 | `product-ui-closure-02` | done | `fd6706e`, `cbec2ca` | Penpot source, handoff, three Login exports | fresh-read/export and design contracts PASS |
 | `product-ui-closure-03` | done | `6ea34fd`, `2d2d1e5` | Login React/CSS/tests and browser baselines | unit, axe and visual gates PASS |
 | `product-ui-closure-05` | done | `03c0584` | Docker application-only TypeScript build | focused contract and real Linux image build PASS |
-| `product-ui-closure-04` | done | `d65fd7d` plus closure documentation commit | LF image contract, release evidence/docs/test | isolated Linux runtime/smoke and combined regression PASS |
+| `product-ui-closure-04` | done | `d65fd7d`, `837f240` | LF image contract, release evidence/docs/test | isolated Linux runtime/smoke and combined regression PASS |
 
 ## Combined diff reviewed
 
