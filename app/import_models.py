@@ -4,7 +4,18 @@ from dataclasses import dataclass
 from typing import Callable, Literal, Sequence
 
 
-ImportStatus = Literal["queued", "running", "retry_wait", "succeeded", "failed"]
+ImportStatus = Literal[
+    "queued",
+    "running",
+    "retry_wait",
+    "pause_requested",
+    "paused",
+    "cancel_requested",
+    "cancelled",
+    "succeeded",
+    "failed",
+]
+BatchLifecycleState = Literal["active", "deleting"]
 ImportStage = Literal[
     "queued",
     "staged",
@@ -13,6 +24,8 @@ ImportStage = Literal[
     "embedding",
     "persisting",
     "committing",
+    "paused",
+    "cancelled",
     "succeeded",
     "failed",
 ]
@@ -62,6 +75,8 @@ class ImportTaskRecord:
     started_at: str | None
     finished_at: str | None
     updated_at: str
+    control_requested_at: str | None = None
+    control_claimed_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +92,39 @@ class ImportBatchSummary:
     succeeded: int
     failed: int
     tasks: tuple[ImportTaskRecord, ...]
+    lifecycle_state: BatchLifecycleState = "active"
+    paused: int = 0
+    pause_requested: int = 0
+    cancel_requested: int = 0
+    cancelled: int = 0
+
+
+@dataclass(frozen=True)
+class ImportTaskEventRecord:
+    event_id: int
+    batch_id: str
+    task_id: str
+    user_id: str
+    event_type: str
+    status: ImportStatus
+    stage: str
+    message: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ImportHistoryFilters:
+    statuses: tuple[ImportStatus, ...] = ()
+    filename_query: str = ""
+    created_from: str | None = None
+    created_to: str | None = None
+    batch_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ImportHistoryPage:
+    batches: tuple[ImportBatchSummary, ...]
+    next_cursor: str | None
 
 
 def validate_batch_sizes(sizes: Sequence[int], limits: ImportLimits) -> None:
