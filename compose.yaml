@@ -22,6 +22,11 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   qdrant:
     build:
@@ -42,6 +47,11 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   neo4j:
     profiles:
@@ -67,6 +77,11 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 networks:
   app_net:

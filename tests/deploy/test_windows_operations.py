@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import subprocess
 
 
 ROOT = Path(__file__).parents[2]
 MODULE = ROOT / "deploy" / "windows" / "Operations.Common.psm1"
+START = ROOT / "deploy" / "windows" / "Start-Deployment.ps1"
+HEALTH = ROOT / "deploy" / "windows" / "Test-DeploymentHealth.ps1"
 
 
 def run_ps(script: str, *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
@@ -259,3 +262,66 @@ def test_wait_until_caps_sleep_to_remaining_timeout():
     payload = json.loads(result.stdout)
     assert payload["Matched"] is False
     assert payload["Elapsed"] < 2.5
+
+
+def test_startup_is_bounded_and_runs_default_smoke():
+    source = START.read_text(encoding="utf-8")
+
+    assert "TimeoutSeconds = 180" in source
+    assert "Wait-Until" in source
+    assert "deploy/smoke_test.py" in source.replace("\\", "/")
+    assert "--deep" not in source
+
+
+def test_health_attempts_at_most_one_compose_recovery():
+    source = HEALTH.read_text(encoding="utf-8")
+
+    assert source.count("up', '-d") == 1
+    assert "AttemptRecovery" in source
+    assert "Send-OperationsNotification" in source
+
+
+def test_health_runs_one_recovery_before_reporting_persistent_http_failure(
+    tmp_path: Path,
+):
+    docker_calls = tmp_path / "docker-calls.jsonl"
+    state = tmp_path / "state"
+    result = run_ps(
+        "function global:docker { "
+        + f"$args | ConvertTo-Json -Compress | Add-Content '{ps_quote(docker_calls)}'; "
+        + "$global:LASTEXITCODE = 0; "
+        + "'app|running|healthy'; 'qdrant|running|healthy' }; "
+        + "function global:Invoke-WebRequest { throw 'forced HTTP failure' }; "
+        + "try { "
+        + f"& '{ps_quote(HEALTH)}' -RepositoryRoot '{ps_quote(ROOT)}' "
+        + "-EnvFile 'deploy/.env' "
+        + f"-StateRoot '{ps_quote(state)}' -AttemptRecovery $true "
+        + "} catch { }; "
+        + "if (-not (Test-Path (Join-Path '"
+        + ps_quote(state)
+        + "' 'status.json'))) { exit 21 }"
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in docker_calls.read_text().splitlines()]
+    assert sum(call[-2:] == ["up", "-d"] for call in calls) == 1
+    status = json.loads((state / "status.json").read_text(encoding="utf-8-sig"))
+    assert status["status"] == "failed"
+    assert status["category"] == "health"
+
+
+def test_every_compose_service_has_bounded_local_logging():
+    source = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+    for service in ("app", "qdrant", "neo4j"):
+        match = re.search(
+            rf"^  {service}:\n(?P<body>.*?)(?=^  \S|\Z)",
+            source,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None
+        service_block = match.group("body")
+        assert "logging:" in service_block
+        assert "driver: local" in service_block
+        assert 'max-size: "10m"' in service_block
+        assert 'max-file: "5"' in service_block
