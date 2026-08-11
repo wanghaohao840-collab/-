@@ -48,14 +48,23 @@ def test_final_image_copies_only_runtime_source_and_built_web_assets():
 
 
 def test_entrypoint_runs_one_uvicorn_worker_without_gradio_launch():
-    source = (ROOT / "deploy" / "entrypoint.sh").read_text(encoding="utf-8")
+    entrypoint = ROOT / "deploy" / "entrypoint.sh"
+    raw = entrypoint.read_bytes()
+    source = raw.decode("utf-8")
 
+    assert b"\r\n" not in raw
     assert "exec python -m uvicorn server:app" in source
     assert '--host "${APP_HOST:-0.0.0.0}"' in source
     assert '--port "${APP_PORT:-7860}"' in source
     assert "--workers 1" in source
     assert "ui/gradio_app.py" not in source
     assert "demo.launch" not in source
+
+
+def test_shell_scripts_are_checked_out_with_linux_line_endings():
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+    assert "deploy/*.sh text eol=lf" in attributes.splitlines()
 
 
 def test_image_healthcheck_targets_fastapi_health_endpoint():
