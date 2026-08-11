@@ -325,3 +325,117 @@ def test_every_compose_service_has_bounded_local_logging():
         assert "driver: local" in service_block
         assert 'max-size: "10m"' in service_block
         assert 'max-file: "5"' in service_block
+
+
+def test_startup_uses_one_global_deadline_for_all_startup_work():
+    source = START.read_text(encoding="utf-8")
+
+    assert "Start-Job" in source
+    assert "Wait-Job -Job $startupJob -Timeout $TimeoutSeconds" in source
+    assert "Stop-Job -Job $startupJob" in source
+    assert "Get-RemainingSeconds" in source
+    assert "Wait-Until -TimeoutSeconds $TimeoutSeconds" not in source
+
+
+def test_health_first_run_uses_loopback_and_preserves_configured_port(
+    tmp_path: Path,
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repository / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\nAPP_BIND_ADDRESS=192.0.2.10\nAPP_PORT=9988\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    uri_file = tmp_path / "http-uri.txt"
+    result = run_ps(
+        "function global:docker { "
+        + "$global:LASTEXITCODE = 0; "
+        + "'app|running|healthy'; 'qdrant|running|healthy' }; "
+        + "function global:Invoke-WebRequest { param($Uri) "
+        + f"$Uri | Set-Content '{ps_quote(uri_file)}'; "
+        + "[PSCustomObject]@{ StatusCode = 200 } }; "
+        + f"& '{ps_quote(HEALTH)}' -RepositoryRoot '{ps_quote(repository)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}'"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert uri_file.read_text(encoding="utf-8-sig").strip() == "http://127.0.0.1:9988/"
+    status = json.loads((state / "status.json").read_text(encoding="utf-8-sig"))
+    assert status["status"] == "healthy"
+    assert status["category"] == "health"
+
+
+def test_scripts_record_missing_env_failures_without_leaking_secret(tmp_path: Path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    (repository / "present.env").write_text(
+        "LLM_API_KEY=must-not-leak\n", encoding="utf-8"
+    )
+
+    for script in (START, HEALTH):
+        state = tmp_path / script.stem
+        result = run_ps(
+            "try { "
+            + f"& '{ps_quote(script)}' -RepositoryRoot '{ps_quote(repository)}' "
+            + f"-EnvFile '{ps_quote(repository / 'missing.env')}' "
+            + f"-StateRoot '{ps_quote(state)}' "
+            + "} catch { $_.Exception.Message }; "
+            + "if (-not (Test-Path (Join-Path '"
+            + ps_quote(state)
+            + "' 'status.json'))) { exit 31 }"
+        )
+
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        assert "must-not-leak" not in output
+        status_text = (state / "status.json").read_text(encoding="utf-8-sig")
+        log_text = (state / "operations.log").read_text(encoding="utf-8-sig")
+        assert "must-not-leak" not in status_text + log_text
+        assert json.loads(status_text)["status"] == "failed"
+
+
+def test_health_reruns_checks_once_when_compose_recovery_command_fails(
+    tmp_path: Path,
+):
+    docker_calls = tmp_path / "docker-calls.jsonl"
+    state = tmp_path / "state"
+    result = run_ps(
+        "function global:docker { "
+        + f"$args | ConvertTo-Json -Compress | Add-Content '{ps_quote(docker_calls)}'; "
+        + "if ($args.Count -ge 2 -and $args[-2] -eq 'up' -and $args[-1] -eq '-d') { "
+        + "$global:LASTEXITCODE = 1; 'recovery command failed'; return }; "
+        + "$global:LASTEXITCODE = 0; "
+        + "'app|running|healthy'; 'qdrant|running|healthy' }; "
+        + "function global:Invoke-WebRequest { throw 'forced HTTP failure' }; "
+        + "try { "
+        + f"& '{ps_quote(HEALTH)}' -RepositoryRoot '{ps_quote(ROOT)}' "
+        + "-EnvFile 'deploy/.env' "
+        + f"-StateRoot '{ps_quote(state)}' -AttemptRecovery $true "
+        + "} catch { }; exit 0"
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in docker_calls.read_text().splitlines()]
+    assert sum(call[-2:] == ["up", "-d"] for call in calls) == 1
+    assert calls[-2] == "info"
+    assert calls[-1] == [
+        "compose",
+        "--project-directory",
+        str(ROOT),
+        "--file",
+        str(ROOT / "compose.yaml"),
+        "--env-file",
+        str(ROOT / "deploy/.env"),
+        "ps",
+        "--format",
+        "{{.Service}}|{{.State}}|{{.Health}}",
+        "app",
+        "qdrant",
+    ]
+    assert "Compose recovery command failed" in (state / "operations.log").read_text(
+        encoding="utf-8-sig"
+    )

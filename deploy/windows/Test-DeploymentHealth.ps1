@@ -12,6 +12,19 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 
+function Get-SafeFallbackStateRoot {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$RequestedStateRoot
+    )
+
+    $basePath = [IO.Path]::GetFullPath($Root)
+    if ([IO.Path]::IsPathRooted($RequestedStateRoot)) {
+        return [IO.Path]::GetFullPath($RequestedStateRoot)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $basePath $RequestedStateRoot))
+}
+
 function Get-PreviousHealthStatus {
     param([Parameter(Mandatory)][string]$OperationsStateRoot)
 
@@ -29,19 +42,13 @@ function Get-PreviousHealthStatus {
 function Test-DeploymentHttp {
     param([Parameter(Mandatory)]$Config)
 
-    $bindAddress = Read-DeployEnvValue -EnvFile $Config.EnvFile -Name 'APP_BIND_ADDRESS'
     $port = Read-DeployEnvValue -EnvFile $Config.EnvFile -Name 'APP_PORT'
-    if ([string]::IsNullOrWhiteSpace($bindAddress) -or $bindAddress -eq '0.0.0.0') {
-        $bindAddress = '127.0.0.1'
-    } elseif ($bindAddress -eq '::' -or $bindAddress -eq '[::]') {
-        $bindAddress = '[::1]'
-    }
     if ([string]::IsNullOrWhiteSpace($port)) {
         $port = '7860'
     }
 
     try {
-        $response = Invoke-WebRequest -Uri "http://${bindAddress}:$port/" -UseBasicParsing -TimeoutSec 10
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 10
         if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 400) {
             throw "Application returned HTTP $($response.StatusCode)"
         }
@@ -66,21 +73,29 @@ function Invoke-DeploymentHealthChecks {
     return Test-DeploymentHttp -Config $Config
 }
 
-$config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot
-$previousStatus = Get-PreviousHealthStatus -OperationsStateRoot $config.StateRoot
+$operationsStateRoot = Get-SafeFallbackStateRoot -Root $RepositoryRoot -RequestedStateRoot $StateRoot
+$config = $null
+$previousStatus = $null
 $recoveryAttempted = $false
 
 try {
+    $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot
+    $operationsStateRoot = $config.StateRoot
+    $previousStatus = Get-PreviousHealthStatus -OperationsStateRoot $operationsStateRoot
     $health = Invoke-DeploymentHealthChecks -Config $config
     if (-not $health.Healthy -and $AttemptRecovery) {
         $recoveryAttempted = $true
-        Write-OperationsLog $config.StateRoot 'health' "Health check failed; attempting Compose recovery: $($health.Reason)" 'WARN'
+        Write-OperationsLog $operationsStateRoot 'health' "Health check failed; attempting Compose recovery: $($health.Reason)" 'WARN'
 
-        Push-Location $config.RepositoryRoot
         try {
-            Invoke-External docker @('compose', '--env-file', $config.EnvFile, 'up', '-d') | Out-Null
-        } finally {
-            Pop-Location
+            Push-Location $config.RepositoryRoot
+            try {
+                Invoke-External docker @('compose', '--env-file', $config.EnvFile, 'up', '-d') | Out-Null
+            } finally {
+                Pop-Location
+            }
+        } catch {
+            Write-OperationsLog $operationsStateRoot 'health' "Compose recovery command failed: $($_.Exception.Message)" 'WARN'
         }
 
         Wait-Until -TimeoutSeconds 90 -IntervalSeconds 5 -Condition {
@@ -93,24 +108,25 @@ try {
         throw $health.Reason
     }
 
-    Write-OperationsStatus $config.StateRoot @{
+    Write-OperationsStatus $operationsStateRoot @{
         status = 'healthy'
         category = 'health'
         checked_at = (Get-Date).ToUniversalTime().ToString('o')
         recovery_attempted = $recoveryAttempted
     }
-    if ($recoveryAttempted -or ($previousStatus.status -eq 'failed' -and $previousStatus.category -eq 'health')) {
-        Send-OperationsNotification $config.StateRoot 'health-recovered' 'Deployment health recovered' 'Docker, Compose, and HTTP health checks are passing.'
+    $previousHealthFailed = $null -ne $previousStatus -and $previousStatus.status -eq 'failed' -and $previousStatus.category -eq 'health'
+    if ($recoveryAttempted -or $previousHealthFailed) {
+        Send-OperationsNotification $operationsStateRoot 'health-recovered' 'Deployment health recovered' 'Docker, Compose, and HTTP health checks are passing.' | Out-Null
     }
 } catch {
-    Write-OperationsLog $config.StateRoot 'health' $_.Exception.Message 'ERROR'
-    Write-OperationsStatus $config.StateRoot @{
+    Write-OperationsLog $operationsStateRoot 'health' $_.Exception.Message 'ERROR'
+    Write-OperationsStatus $operationsStateRoot @{
         status = 'failed'
         category = 'health'
         detail = $_.Exception.Message
         checked_at = (Get-Date).ToUniversalTime().ToString('o')
         recovery_attempted = $recoveryAttempted
     }
-    Send-OperationsNotification $config.StateRoot 'health' 'Deployment health check failed' $_.Exception.Message
+    Send-OperationsNotification $operationsStateRoot 'health' 'Deployment health check failed' $_.Exception.Message | Out-Null
     throw
 }
