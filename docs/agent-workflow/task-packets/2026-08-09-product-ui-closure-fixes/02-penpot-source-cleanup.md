@@ -1,11 +1,11 @@
 ---
 id: "product-ui-closure-02"
 title: "Clean Penpot Login source and references"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["product-ui-closure-01"]
 base-commit: "ef93550f6b0616815314baf2f62263b43536a17e"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Task Packet: Clean Penpot Login source and references
@@ -119,12 +119,12 @@ Penpot is the only design source. The final design review found a zero-child `10
 
 ## Acceptance criteria
 
-- [ ] Blank board ID is absent and the Foundation System board remains.
-- [ ] TextField Input and PasswordField Input/spacer read back `horizontalSizing=fill`; eye is fixed 44×44/right-aligned.
-- [ ] Desktop/tablet/mobile Login contain no “保持登录状态” text/checkbox/row; Register content remains complete.
-- [ ] All affected instances are linked with zero text/actual-bounds overflow.
-- [ ] Three real Penpot exports exist at exact dimensions and pass visual inspection.
-- [ ] Handoff contract, component-map test, token freshness, secret/Figma scan, and diff check pass.
+- [x] Blank board ID is absent and the Foundation System board remains.
+- [x] TextField Input and PasswordField Input/spacer read back `horizontalSizing=fill`; eye is fixed 44×44/right-aligned.
+- [x] Desktop/tablet/mobile Login contain no “保持登录状态” text/checkbox/row; Register content remains complete.
+- [x] All affected instances are linked with zero text/actual-bounds overflow.
+- [x] Three real Penpot exports exist at exact dimensions and pass visual inspection.
+- [x] Handoff contract, component-map test, token freshness, secret/Figma scan, and diff check pass.
 
 ## Test and verification commands
 
@@ -145,4 +145,32 @@ Stop and append a reality-conflict report if the plugin is disconnected/times ou
 
 ## Implementation handoff
 
-Replace this placeholder using the template format. Include file/page revision, discovered internal IDs and parents, exact before/after sizing, deleted ID, board/link/overflow scans, export dimensions/hashes, commands, scope confirmation, and commit.
+- Status: done
+- Commit: `fd6706e` (`fix: clean Penpot login source`)
+- Live source: Penpot 2.17.1, file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c`, revision `89`, seven unique pages.
+- Removed objects:
+  - Foundations blank board `0f745b42-1a51-801c-8008-6ff39f5b8841`.
+  - Desktop remember row `9b1e7a6b-703c-8060-8008-70761b2c4b92`.
+  - Tablet remember row `9b1e7a6b-703c-8060-8008-7076b6e5a9c5`.
+  - Mobile remember row `9b1e7a6b-703c-8060-8008-70770173089e`.
+- Responsive source readback:
+  - TextField Input `9b1e7a6b-703c-8060-8008-70743ef84e3c`: `fill`.
+  - PasswordField Input `9b1e7a6b-703c-8060-8008-7074e250419f`: `fill`.
+  - PasswordField Spacer `9b1e7a6b-703c-8060-8008-7074e286ce22`: `fill`.
+  - PasswordField Eye `9b1e7a6b-703c-8060-8008-7074e28f276b`: `fix`, `44 × 44`.
+- Board verification:
+  - Desktop Login `9b1e7a6b-703c-8060-8008-70761a57accd`: `1440 × 1024`, 14 linked copies, zero broken links/overflow, fields and submit aligned at `x=900..1300`.
+  - Tablet Login `9b1e7a6b-703c-8060-8008-7076b66de7ca`: `1024 × 768`, 12 linked copies, zero broken links/overflow.
+  - Mobile Login `9b1e7a6b-703c-8060-8008-707701065fab`: `390 × 844`, 12 linked copies, zero broken links/overflow; Hero/Form remain `188/656` px.
+  - Desktop/Tablet/Mobile Register boards retain ConfirmPassword and their original controls.
+- Export evidence:
+  - `desktop-login.png`: 80,990 bytes, SHA-256 `d632431cea0ce30c8f22bc96aefc63bcfe5157b3483fdadd1f3863611753f4f2`.
+  - `tablet-login.png`: 57,164 bytes, SHA-256 `a8dc0bafb315edfeed6721735360dbb49beecb7bd1a914c325589ee8167857b0`.
+  - `mobile-login.png`: 33,596 bytes, SHA-256 `e7744484e3b35c6d710a8df156d397d41b7ecd9badecb5d5100296bc5df0a493`.
+  - All three were exported by live `export_shape` at original dimensions and opened for visual inspection; no remember row, clipping, misalignment, or missing glyph was found.
+- Repository gates:
+  - Handoff/component-map: 9 passed.
+  - Token freshness: pass.
+  - `git diff --check`: pass.
+  - The focused credential/Figma scan returned only two pre-existing defensive literals: the component-map schema rejection pattern and README guidance prohibiting credential copying; no credential-bearing URL or Figma source is present.
+- Scope: no React, backend, token, Register, AppShell, or session-state source was changed by this packet.
