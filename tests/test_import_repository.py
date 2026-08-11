@@ -240,6 +240,46 @@ def test_active_document_lookup_is_user_and_document_scoped(tmp_path):
     assert repo.has_active_task_for_document(user_id, task.document_id) is False
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "queued",
+        "running",
+        "retry_wait",
+        "pause_requested",
+        "paused",
+        "cancel_requested",
+    ],
+)
+def test_active_queries_include_import_and_control_work(tmp_path, status):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    with sqlite3.connect(repo.db_path) as connection:
+        connection.execute(
+            "update import_tasks set status = ? where id = ? and user_id = ?",
+            (status, task.task_id, user_id),
+        )
+
+    assert repo.has_active_tasks(user_id) is True
+    assert repo.has_active_task_for_document(user_id, task.document_id) is True
+
+
+@pytest.mark.parametrize("status", ["cancelled", "succeeded", "failed"])
+def test_active_queries_exclude_terminal_work(tmp_path, status):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    with sqlite3.connect(repo.db_path) as connection:
+        connection.execute(
+            "update import_tasks set status = ? where id = ? and user_id = ?",
+            (status, task.task_id, user_id),
+        )
+
+    assert repo.has_active_tasks(user_id) is False
+    assert repo.has_active_task_for_document(user_id, task.document_id) is False
+
+
 def test_recover_running_requeues_existing_stage_and_fails_missing_stage(tmp_path):
     repo, user_id = make_repo(tmp_path)
     staged_task = make_task(user_id, task_id="00000000-0000-0000-0000-000000000001")

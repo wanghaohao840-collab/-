@@ -378,6 +378,71 @@ def test_mark_control_failed_whitelists_code_and_sanitizes_event_message(
         )
 
 
+def test_control_failure_persistence_redacts_private_diagnostics(repository):
+    repo, user_id = repository
+    task = _task_in_state(repo, user_id, "cancel_requested")
+    private_uuid = "123e4567-e89b-12d3-a456-426614174000"
+    unsafe = (
+        "ValueError: cleanup failed safely\n"
+        'password="correct horse battery" Bearer bearer-secret '
+        "https://private-user:private-pass@example.com/internal "
+        '"C:\\Users\\private folder\\document.pdf" '
+        "\\\\private-server\\share\\document.pdf "
+        "'/home/private folder/document.pdf' "
+        f"imports/{private_uuid}/{private_uuid}.md "
+        f'document_id={private_uuid} user_id=private-user-42 '
+        '"task_id": "private-task-42"\n'
+        "Traceback (most recent call last):\n"
+        '  File "C:\\Users\\private\\worker.py", line 7, in cleanup\n'
+        "    cleanup(private_uuid)\n"
+        f"RuntimeError: cleanup failed for task_id={private_uuid}\n"
+        + "x" * 800
+    )
+
+    repo.mark_control_failed(
+        user_id,
+        task.task_id,
+        "cancel_cleanup_failed",
+        unsafe,
+        now=NOW,
+    )
+
+    with connect(repo.db_path) as conn:
+        persisted = conn.execute(
+            "select error_summary from import_tasks where id = ? and user_id = ?",
+            (task.task_id, user_id),
+        ).fetchone()["error_summary"]
+        event_message = conn.execute(
+            """
+            select message from import_task_events
+            where task_id = ? and user_id = ? order by created_at desc, id desc
+            limit 1
+            """,
+            (task.task_id, user_id),
+        ).fetchone()["message"]
+
+    assert persisted == event_message
+    assert persisted.startswith("ValueError: cleanup failed safely")
+    assert len(persisted) <= 500
+    for private_value in (
+        "correct horse battery",
+        "bearer-secret",
+        "private-user",
+        "private-pass",
+        "private folder",
+        "private-server",
+        "/home/private",
+        "imports/",
+        private_uuid,
+        "private-user-42",
+        "private-task-42",
+        "Traceback",
+        'File "',
+        "cleanup(private_uuid)",
+    ):
+        assert private_value not in persisted
+
+
 def test_list_events_is_user_scoped_ordered_and_limit_is_capped(repository):
     repo, user_id = repository
     other_user_id = AuthService(repo.db_path).register(

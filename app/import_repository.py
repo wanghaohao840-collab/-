@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,7 +23,36 @@ class InvalidImportTransition(ValueError):
     """Raised when an import task cannot make the requested state change."""
 
 
-ACTIVE_STATUSES = ("queued", "running", "retry_wait")
+ACTIVE_STATUSES = (
+    "queued",
+    "running",
+    "retry_wait",
+    "pause_requested",
+    "paused",
+    "cancel_requested",
+)
+
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s,;]+", re.IGNORECASE)
+_QUOTED_ABSOLUTE_PATH_RE = re.compile(
+    r'''(["'])(?:(?:[a-z]:[\\/])|(?:\\\\)|/)[^"'\r\n]+\1''',
+    re.IGNORECASE,
+)
+_UNC_PATH_RE = re.compile(r"(?<!\\)\\\\[^\s,;]+")
+_WINDOWS_PATH_RE = re.compile(r"(?<!\w)[a-z]:[\\/][^\s,;]+", re.IGNORECASE)
+_POSIX_PATH_RE = re.compile(r"(?<![:\w])/(?:[^/\s,;]+/)*[^/\s,;]+")
+_STAGED_IMPORT_PATH_RE = re.compile(
+    r"(?<!\w)imports[\\/][^\s,;]+", re.IGNORECASE
+)
+_UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.IGNORECASE,
+)
+_PRIVATE_ID_RE = re.compile(
+    r'''["']?((?:user|document|task|batch)_id)["']?\s*[:=]\s*["']?'''
+    r'''[^"'\s,;}]+["']?''',
+    re.IGNORECASE,
+)
+_ERROR_CLASS_RE = re.compile(r"^[\w.]+(?:Error|Exception):")
 
 
 def _utc_now() -> str:
@@ -437,7 +467,7 @@ class ImportTaskRepository:
         now: str | None = None,
     ) -> ImportTaskRecord:
         timestamp = now or _utc_now()
-        error_summary = sanitize_error_message(error_summary)[:500]
+        error_summary = _safe_import_error_summary(error_summary)
         return self._transition_update(
             user_id,
             task_id,
@@ -457,7 +487,7 @@ class ImportTaskRepository:
         now: str | None = None,
     ) -> ImportTaskRecord:
         timestamp = now or _utc_now()
-        error_summary = sanitize_error_message(error_summary)[:500]
+        error_summary = _safe_import_error_summary(error_summary)
         return self._transition_update(
             user_id,
             task_id,
@@ -500,7 +530,7 @@ class ImportTaskRepository:
         if error_code not in {"pause_cleanup_failed", "cancel_cleanup_failed"}:
             raise ValueError("unsupported control error code")
         timestamp = now or _utc_now()
-        safe_summary = sanitize_error_message(error_summary)[:500]
+        safe_summary = _safe_import_error_summary(error_summary)
         with transaction(self.db_path) as conn:
             updated = conn.execute(
                 """
@@ -668,27 +698,29 @@ class ImportTaskRepository:
         return removed
 
     def has_active_tasks(self, user_id: str) -> bool:
+        placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
         with connect(self.db_path) as conn:
             row = conn.execute(
-                """
+                f"""
                 select 1 from import_tasks
-                where user_id = ? and status in ('queued', 'running', 'retry_wait')
+                where user_id = ? and status in ({placeholders})
                 limit 1
                 """,
-                (user_id,),
+                (user_id, *ACTIVE_STATUSES),
             ).fetchone()
             return row is not None
 
     def has_active_task_for_document(self, user_id: str, document_id: str) -> bool:
+        placeholders = ", ".join("?" for _ in ACTIVE_STATUSES)
         with connect(self.db_path) as conn:
             row = conn.execute(
-                """
+                f"""
                 select 1 from import_tasks
                 where user_id = ? and document_id = ?
-                  and status in ('queued', 'running', 'retry_wait')
+                  and status in ({placeholders})
                 limit 1
                 """,
-                (user_id, document_id),
+                (user_id, document_id, *ACTIVE_STATUSES),
             ).fetchone()
             return row is not None
 
@@ -811,7 +843,7 @@ class ImportTaskRepository:
     ) -> None:
         safe_message = None
         if message is not None:
-            safe_message = sanitize_error_message(message)[:500]
+            safe_message = _safe_import_error_summary(message)
         conn.execute(
             """
             insert into import_task_events (
@@ -967,6 +999,35 @@ def _event_from_row(row: sqlite3.Row) -> ImportTaskEventRecord:
         message=row["message"],
         created_at=row["created_at"],
     )
+
+
+def _safe_import_error_summary(message: object) -> str:
+    text = sanitize_error_message(message)
+    safe_lines: list[str] = []
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("Traceback (most recent call last):"):
+            continue
+        if stripped.startswith("During handling of the above exception"):
+            continue
+        if stripped.startswith("File "):
+            continue
+        if raw_line[:1].isspace() and not _ERROR_CLASS_RE.match(stripped):
+            continue
+        safe_lines.append(stripped)
+
+    text = " ".join(safe_lines)
+    text = text.replace("Traceback (most recent call last):", "")
+    text = _URL_RE.sub("[redacted-url]", text)
+    text = _QUOTED_ABSOLUTE_PATH_RE.sub("[redacted-path]", text)
+    text = _STAGED_IMPORT_PATH_RE.sub("[redacted-path]", text)
+    text = _UNC_PATH_RE.sub("[redacted-path]", text)
+    text = _WINDOWS_PATH_RE.sub("[redacted-path]", text)
+    text = _POSIX_PATH_RE.sub("[redacted-path]", text)
+    text = _PRIVATE_ID_RE.sub(r"\1=[redacted-id]", text)
+    text = _UUID_RE.sub("[redacted-id]", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return (text or "Import processing failed")[:500]
 
 
 def _blocked_user_clause(
