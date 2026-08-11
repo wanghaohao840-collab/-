@@ -242,10 +242,10 @@ try {
     ) | Out-Null
 
     $stage = 'candidate-up'
-    $candidateUpStarted = $true
     Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
         Get-ComposeArguments -Config $config -Command @('up', '-d', '--no-build', 'app', 'qdrant')
     ) | Out-Null
+    $candidateUpStarted = $true
 
     $stage = 'candidate-health'
     if (-not (Wait-ForUpdateHealth -Config $config)) {
@@ -282,32 +282,26 @@ try {
     $failureStage = $stage
     $failureDetail = Protect-LogText $_.Exception.Message
     $compensationErrors = @()
-
-    if ($candidateUpStarted) {
-        $stage = 'rollback-stop'
-        try {
-            Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
-                Get-ComposeArguments -Config $config -Command @('stop', 'app', 'qdrant')
-            ) | Out-Null
-        } catch {
-            $compensationErrors += Protect-LogText "stop candidate: $($_.Exception.Message)"
-        }
-    }
+    $rollbackFailurePriority = $null
+    $imagesRestored = $false
+    $dataRestored = $false
 
     if ($rollbackTagsReady) {
-        foreach ($service in @('app', 'qdrant')) {
-            $stage = "rollback-image-$service"
-            try {
+        try {
+            foreach ($service in @('app', 'qdrant')) {
+                $stage = "rollback-image-$service"
                 Invoke-UpdateCommand -FilePath 'docker' -ArgumentList @(
-                    'image', 'tag', $rollbackImages[$service], $stableImages[$service]
+                    'image', 'tag', $oldImageIds[$service], $stableImages[$service]
                 ) | Out-Null
-            } catch {
-                $compensationErrors += Protect-LogText "restore $service image: $($_.Exception.Message)"
             }
+            $imagesRestored = $true
+        } catch {
+            $rollbackFailurePriority = 'high'
+            $compensationErrors += Protect-LogText "restore stable image tags: $($_.Exception.Message)"
         }
     }
 
-    if ($candidateUpStarted -and $null -ne $backupArchive) {
+    if ($candidateUpStarted -and $imagesRestored -and $null -ne $backupArchive) {
         $stage = 'rollback-data'
         try {
             Invoke-UpdateScript -ScriptPath (Join-Path $PSScriptRoot 'Restore-Deployment.ps1') -Parameters ([ordered]@{
@@ -318,14 +312,21 @@ try {
                 BackupRoot = $config.BackupRoot
                 HealthTimeoutSeconds = $HealthTimeoutSeconds
             }) | Out-Null
+            $dataRestored = $true
         } catch {
+            $rollbackFailurePriority = 'high'
             $compensationErrors += Protect-LogText "restore backup: $($_.Exception.Message)"
         }
 
+    }
+
+    if ($candidateUpStarted -and $imagesRestored -and $dataRestored) {
         $stage = 'rollback-recreate'
         try {
             Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
-                Get-ComposeArguments -Config $config -Command @('up', '-d', '--no-build', 'app', 'qdrant')
+                Get-ComposeArguments -Config $config -Command @(
+                    'up', '-d', '--no-build', '--force-recreate', 'app', 'qdrant'
+                )
             ) | Out-Null
             if (-not (Wait-ForUpdateHealth -Config $config)) {
                 throw 'The restored deployment did not become healthy'
@@ -333,11 +334,14 @@ try {
             $stage = 'rollback-smoke'
             Invoke-DefaultSmoke -Config $config
         } catch {
+            $rollbackFailurePriority = 'high'
             $compensationErrors += Protect-LogText "verify restored deployment: $($_.Exception.Message)"
         }
         $rollbackSucceeded = ($compensationErrors.Count -eq 0)
-    } elseif ($rollbackTagsReady) {
+    } elseif (-not $candidateUpStarted -and $rollbackTagsReady) {
         $rollbackSucceeded = ($compensationErrors.Count -eq 0)
+    } elseif ($candidateUpStarted) {
+        $rollbackSucceeded = $false
     }
 
     if ($null -ne $reportPath) {
@@ -354,6 +358,7 @@ try {
                 previous_image_ids = $oldImageIds
                 rollback_images = $rollbackImages
                 rollback_succeeded = $rollbackSucceeded
+                rollback_failure_priority = $rollbackFailurePriority
                 compensation_errors = @($compensationErrors)
             })
         } catch {}
@@ -363,7 +368,7 @@ try {
         }
     }
     if ($compensationErrors.Count -gt 0) {
-        throw "Upgrade failed at $failureStage`: $failureDetail. Compensation issues: $($compensationErrors -join '; ')"
+        throw "Upgrade failed at $failureStage`: $failureDetail. HIGH PRIORITY rollback failure: $($compensationErrors -join '; ')"
     }
     throw "Upgrade failed at $failureStage`: $failureDetail"
 }

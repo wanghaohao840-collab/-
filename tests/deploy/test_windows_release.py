@@ -67,9 +67,11 @@ def write_harness(
         f"$global:releaseArchive = '{ps_quote(archive)}'\n"
         f"$global:releaseFailure = '{failure}'\n"
         "$global:candidateUpFailed = $false\n"
+        "$global:appRunning = $true\n"
+        "$global:qdrantRunning = $true\n"
         "$runner = {\n"
         "  param([string]$FilePath, [string[]]$ArgumentList)\n"
-        "  [PSCustomObject]@{ FilePath=$FilePath; Args=@($ArgumentList) } | ConvertTo-Json -Compress | Add-Content -LiteralPath $global:releaseCalls\n"
+        "  [PSCustomObject]@{ FilePath=$FilePath; Args=@($ArgumentList); AppRunning=$global:appRunning; QdrantRunning=$global:qdrantRunning } | ConvertTo-Json -Compress | Add-Content -LiteralPath $global:releaseCalls\n"
         "  $joined = @($ArgumentList) -join ' '\n"
         "  if ($FilePath -eq 'git') { ' M deploy/.env'; return }\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'ps') {\n"
@@ -81,9 +83,17 @@ def write_harness(
         "    else { 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }; return\n"
         "  }\n"
         "  if ($joined -match 'Backup-Deployment\\.ps1') { [PSCustomObject]@{ Archive=$global:releaseArchive }; return }\n"
+        f"  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'tag' -and (($global:releaseFailure -eq 'retag-app' -and $ArgumentList[-1] -eq '{APP_IMAGE}') -or ($global:releaseFailure -eq 'retag-qdrant' -and $ArgumentList[-1] -eq '{QDRANT_IMAGE}'))) {{ throw 'LLM_API_KEY={SECRET} forced rollback retag failure' }}\n"
+        "  if ($joined -match 'Restore-Deployment\\.ps1') {\n"
+        "    if (-not $global:appRunning -or -not $global:qdrantRunning) { throw 'restore invoked without running services' }\n"
+        f"    if ($global:releaseFailure -eq 'restore') {{ throw 'LLM_API_KEY={SECRET} forced restore failure' }}\n"
+        "    $global:appRunning = $true; $global:qdrantRunning = $true; return\n"
+        "  }\n"
         f"  if ($global:releaseFailure -eq 'scan' -and $FilePath -eq 'docker' -and $ArgumentList -contains 'scout') {{ throw 'LLM_API_KEY={SECRET} forced scan failure' }}\n"
         f"  if ($global:releaseFailure -eq 'candidate-up' -and $FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and -not $global:candidateUpFailed) {{ $global:candidateUpFailed=$true; throw 'LLM_API_KEY={SECRET} forced candidate up failure' }}\n"
-        f"  if ($global:releaseFailure -eq 'deep-smoke' -and $FilePath -like '*python.exe' -and $ArgumentList -contains '--deep') {{ throw 'LLM_API_KEY={SECRET} forced deep smoke failure' }}\n"
+        f"  if (@('deep-smoke','retag-app','retag-qdrant','restore') -contains $global:releaseFailure -and $FilePath -like '*python.exe' -and $ArgumentList -contains '--deep') {{ throw 'LLM_API_KEY={SECRET} forced deep smoke failure' }}\n"
+        "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'stop') { $global:appRunning = $false; $global:qdrantRunning = $false; return }\n"
+        "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up') { $global:appRunning = $true; $global:qdrantRunning = $true; return }\n"
         "}\n"
         "try {\n"
         f"  & '{ps_quote(UPDATE)}' -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' -BackupRoot '{ps_quote(backups)}' -HealthTimeoutSeconds 5 -CommandRunner $runner -SkipNotification\n"
@@ -196,7 +206,7 @@ def test_scan_failure_restores_images_only_and_redacts(tmp_path: Path):
         item
         for item in items
         if "docker image tag" in item
-        and "rollback-" in item
+        and "sha256:" in item
         and item.endswith(":local")
     ]
     assert len(retags) == 2
@@ -222,27 +232,47 @@ def test_unhealthy_baseline_stops_before_any_mutation(tmp_path: Path):
     assert "10GB" in source
 
 
-@pytest.mark.parametrize("failure", ["candidate-up", "deep-smoke"])
-def test_failure_after_candidate_start_runs_full_compensation(
-    tmp_path: Path, failure: str
-):
-    result, calls, state, archive = run_update(tmp_path, failure)
+def test_candidate_up_failure_uses_image_only_rollback(tmp_path: Path):
+    result, calls, state, _ = run_update(tmp_path, "candidate-up")
 
     assert result.returncode != 0
     items = actions(calls)
     candidate = find_action(items, "docker compose", "up", "-d", "--no-build")
-    stop = find_action(items, "docker compose", "stop", "app", "qdrant", start=candidate + 1)
+    assert sum("docker compose" in item and " up " in item for item in items) == 1
+    assert all("Restore-Deployment.ps1" not in item for item in items)
+    assert not any("docker compose" in item and " stop " in item for item in items)
+    retags = [
+        item
+        for item in items[candidate + 1 :]
+        if "docker image tag" in item and item.endswith(":local")
+    ]
+    assert len(retags) == 2
+    report = json.loads(
+        next((state / "reports").glob("update-*.json")).read_text(
+            encoding="utf-8-sig"
+        )
+    )
+    assert report["failure_stage"] == "candidate-up"
+    assert report["rollback_succeeded"] is True
+
+
+def test_deep_smoke_failure_retages_restores_then_force_recreates(tmp_path: Path):
+    result, calls, state, archive = run_update(tmp_path, "deep-smoke")
+
+    assert result.returncode != 0
+    items = actions(calls)
+    deep = find_action(items, "deploy\\smoke_test.py", "--deep")
     app_tag = find_action(
         items,
         "docker image tag",
-        "python_self_agent-app:rollback-",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         APP_IMAGE,
-        start=stop + 1,
+        start=deep + 1,
     )
     qdrant_tag = find_action(
         items,
         "docker image tag",
-        "python_self_agent-qdrant:rollback-",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         QDRANT_IMAGE,
         start=app_tag + 1,
     )
@@ -255,18 +285,45 @@ def test_failure_after_candidate_start_runs_full_compensation(
         "up",
         "-d",
         "--no-build",
+        "--force-recreate",
         start=restore + 1,
     )
     smoke = find_action(items, "deploy\\smoke_test.py", start=recreate + 1)
-    assert candidate < stop < app_tag < qdrant_tag < restore < recreate < smoke
+    assert app_tag < qdrant_tag < restore < recreate < smoke
+    assert calls[restore]["AppRunning"] is True
+    assert calls[restore]["QdrantRunning"] is True
+    assert not any("docker compose" in item and " stop " in item for item in items)
     assert "--deep" not in items[smoke]
-    report = json.loads(
-        next((state / "reports").glob("update-*.json")).read_text(
-            encoding="utf-8-sig"
-        )
+    report_text = next((state / "reports").glob("update-*.json")).read_text(
+        encoding="utf-8-sig"
     )
-    assert report["status"] == "failed"
-    assert report["rollback_succeeded"] is True
+    assert SECRET not in report_text
+    assert json.loads(report_text)["rollback_succeeded"] is True
+
+
+@pytest.mark.parametrize("failure", ["retag-app", "retag-qdrant", "restore"])
+def test_failed_rollback_prerequisite_stops_compensation(
+    tmp_path: Path, failure: str
+):
+    result, calls, state, _ = run_update(tmp_path, failure)
+
+    assert result.returncode != 0
+    items = actions(calls)
+    deep = find_action(items, "deploy\\smoke_test.py", "--deep")
+    after_failure = items[deep + 1 :]
+    if failure.startswith("retag-"):
+        assert all("Restore-Deployment.ps1" not in item for item in after_failure)
+    else:
+        assert any("Restore-Deployment.ps1" in item for item in after_failure)
+    assert not any("docker compose" in item and " up " in item for item in after_failure)
+    assert not any("docker compose" in item and " stop " in item for item in after_failure)
+    report_text = next((state / "reports").glob("update-*.json")).read_text(
+        encoding="utf-8-sig"
+    )
+    assert SECRET not in report_text
+    report = json.loads(report_text)
+    assert report["rollback_succeeded"] is False
+    assert report["rollback_failure_priority"] == "high"
 
 
 def test_update_records_git_status_without_git_writes(tmp_path: Path):
