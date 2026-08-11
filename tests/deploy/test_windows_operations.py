@@ -609,6 +609,15 @@ def test_operations_installer_has_private_intranet_and_exact_task_contracts():
     assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in source
     assert "Register-ScheduledTask" in source
     assert "-Force" in source
+    assert '"${currentUser}:(M)"' in source
+    assert "'SYSTEM:(F)'" in source
+    assert "'Administrators:(F)'" in source
+    assert "Get-CimInstance Win32_ComputerSystem" in source
+    assert "$monthlyTrigger.StartBoundary" in source
+    assert "-Hour 4 -Minute 0" in source
+    assert source.count("Settings = New-OperationsTaskSettings -WakeToRun $true") == 2
+    assert "$env:USERDOMAIN" not in source
+    assert "$env:USERNAME" not in source
 
 
 def test_operations_installer_preflights_before_system_mutations():
@@ -657,3 +666,82 @@ def test_operations_uninstaller_removes_only_its_exact_tasks_and_rule():
         "del /",
     ):
         assert forbidden not in source
+
+
+def installer_prelude() -> str:
+    source = INSTALL.read_text(encoding="utf-8")
+    helpers = source.split("$modulePath = Join-Path", maxsplit=1)[0]
+    return helpers[helpers.index("function Assert-RequiredCommand") :]
+
+
+def test_installer_listener_ownership_rejects_mixed_or_unrecognized_listener():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @("
+        + "[PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }, "
+        + "[PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=202 }); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' }; "
+        + "202=[PSCustomObject]@{ ProcessName='unexpected-listener' } }; "
+        + "if (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes) { exit 61 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_listener_ownership_rejects_mismatched_listener_address():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @([PSCustomObject]@{ LocalAddress='127.0.0.1'; OwningProcess=101 }); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' } }; "
+        + "if (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes) { exit 64 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_listener_ownership_accepts_only_matching_docker_forwarder():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' } }; "
+        + "if (-not (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes)) { exit 62 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_rejects_absent_interactive_identity():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; function Get-CimInstance { [PSCustomObject]@{ UserName=$null } }; "
+        + "try { Get-OperationsInteractiveUserName | Out-Null; exit 65 } catch { exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_uses_one_domain_qualified_interactive_identity():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; function Get-CimInstance { [PSCustomObject]@{ UserName='WORKSTATION\\alice' } }; "
+        + "$identity = Get-OperationsInteractiveUserName; "
+        + "if ($identity -ne 'WORKSTATION\\alice') { exit 63 } }"
+    )
+
+    assert result.returncode == 0, result.stderr

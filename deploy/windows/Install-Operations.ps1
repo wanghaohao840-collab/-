@@ -31,6 +31,72 @@ function Assert-PrivateInternetProfiles {
     }
 }
 
+function Get-OperationsInteractiveUserName {
+    $interactiveUsers = @(
+        (Get-CimInstance Win32_ComputerSystem).UserName |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($interactiveUsers.Count -ne 1) {
+        throw 'Exactly one interactive domain-qualified user must be available before installation.'
+    }
+
+    $interactiveUser = [string]$interactiveUsers[0]
+    if ($interactiveUser -notmatch '^[^\\]+\\[^\\]+$') {
+        throw 'The interactive user must be domain-qualified as DOMAIN\\User.'
+    }
+    return $interactiveUser
+}
+
+function Test-ListenerAddressCompatibleWithBinding {
+    param(
+        [Parameter(Mandatory)][string]$ListenerAddress,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$HostIp
+    )
+
+    $normalizedListener = $ListenerAddress.Trim().ToLowerInvariant()
+    $normalizedHost = $HostIp.Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($normalizedHost) -or $normalizedHost -eq '0.0.0.0') {
+        return $normalizedListener -eq '0.0.0.0' -or $normalizedListener -eq '::'
+    }
+    return $normalizedListener -eq $normalizedHost
+}
+
+function Test-ComposePortListenerOwnership {
+    param(
+        [Parameter(Mandatory)][object[]]$Listeners,
+        [Parameter(Mandatory)][object[]]$PortBindings,
+        [Parameter(Mandatory)][hashtable]$ProcessesById
+    )
+
+    if ($Listeners.Count -eq 0) {
+        return $false
+    }
+
+    $acceptedProcessNames = @('com.docker.backend', 'docker-proxy', 'wslrelay')
+    foreach ($listener in $Listeners) {
+        $listenerAddress = [string]$listener.LocalAddress
+        $compatibleBindings = @(
+            $PortBindings | Where-Object {
+                $_.HostPort -eq '7860' -and
+                    (Test-ListenerAddressCompatibleWithBinding -ListenerAddress $listenerAddress -HostIp ([string]$_.HostIp))
+            }
+        )
+        if ($compatibleBindings.Count -eq 0) {
+            return $false
+        }
+
+        $processId = [int]$listener.OwningProcess
+        if ($processId -eq 4 -or -not $ProcessesById.ContainsKey($processId)) {
+            return $false
+        }
+        $processName = ([string]$ProcessesById[$processId].ProcessName).ToLowerInvariant()
+        if ($acceptedProcessNames -notcontains $processName) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Assert-Tcp7860IsFreeOrOwnedByComposeApp {
     param([Parameter(Mandatory)]$Config)
 
@@ -48,20 +114,37 @@ function Assert-Tcp7860IsFreeOrOwnedByComposeApp {
             'ps', '-q', 'app'
         )
     )
-    $appContainerId = @($appContainerIds | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -First 1
-    if ($null -eq $appContainerId) {
-        throw 'TCP 7860 is occupied and the current Compose app has no container mapping.'
+    $appContainerIds = @($appContainerIds | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($appContainerIds.Count -ne 1) {
+        throw 'TCP 7860 is occupied and the current Compose app must resolve to exactly one container.'
     }
+    $appContainerId = $appContainerIds[0].Trim()
 
     $portJson = @(
         Invoke-External -FilePath 'docker' -ArgumentList @(
-            'inspect', '--format', '{{json .NetworkSettings.Ports}}', $appContainerId.Trim()
+            'inspect', '--format', '{{json .HostConfig.PortBindings}}', $appContainerId
         )
     ) | Select-Object -First 1
     $portBindings = $portJson | ConvertFrom-Json
     $appPortBindings = @($portBindings.'7860/tcp' | Where-Object { $_.HostPort -eq '7860' })
     if ($appPortBindings.Count -eq 0) {
         throw 'TCP 7860 is occupied by a process outside the current Compose app mapping.'
+    }
+
+    $processesById = @{}
+    foreach ($listener in $listeners) {
+        $listenerProcessId = [int]$listener.OwningProcess
+        if ($listenerProcessId -eq 4) {
+            throw 'TCP 7860 is owned by System and cannot be correlated to an accepted Docker Desktop forwarder.'
+        }
+        try {
+            $processesById[$listenerProcessId] = Get-Process -Id $listenerProcessId -ErrorAction Stop
+        } catch {
+            throw 'TCP 7860 listener process could not be resolved for Compose ownership validation.'
+        }
+    }
+    if (-not (Test-ComposePortListenerOwnership -Listeners $listeners -PortBindings $appPortBindings -ProcessesById $processesById)) {
+        throw 'TCP 7860 listeners do not unambiguously match the current Compose app Docker Desktop forwarding process.'
     }
 }
 
@@ -114,10 +197,10 @@ Invoke-External -FilePath 'docker.exe' -ArgumentList @('scout', 'version') | Out
 Invoke-External -FilePath 'tar.exe' -ArgumentList @('--version') | Out-Null
 Assert-PrivateInternetProfiles
 Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config
+$currentUser = Get-OperationsInteractiveUserName
 
 # All preflight checks above this line. System changes below are intentional.
 $firewallName = 'Python Self Agent - Private Intranet 7860'
-$currentUser = "$env:USERDOMAIN\$env:USERNAME"
 $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
 $loginTrigger = New-ScheduledTaskTrigger -AtLogOn
 $healthTrigger = New-ScheduledTaskTrigger -Daily -At '00:00'
@@ -137,7 +220,7 @@ if ($PSCmdlet.ShouldProcess($config.StateRoot, 'Create operations state director
 }
 if ($PSCmdlet.ShouldProcess($config.EnvFile, 'Restrict deployment environment file ACL')) {
     Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/inheritance:r') | Out-Null
-    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant:r', "$env:USERDOMAIN\$env:USERNAME:(M)") | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant:r', "${currentUser}:(M)") | Out-Null
     Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'SYSTEM:(F)') | Out-Null
     Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'Administrators:(F)') | Out-Null
 }
