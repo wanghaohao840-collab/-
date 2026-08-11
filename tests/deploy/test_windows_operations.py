@@ -9,7 +9,7 @@ ROOT = Path(__file__).parents[2]
 MODULE = ROOT / "deploy" / "windows" / "Operations.Common.psm1"
 
 
-def run_ps(script: str) -> subprocess.CompletedProcess[str]:
+def run_ps(script: str, *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         cwd=ROOT,
@@ -17,6 +17,7 @@ def run_ps(script: str) -> subprocess.CompletedProcess[str]:
         errors="replace",
         capture_output=True,
         check=False,
+        timeout=timeout,
     )
 
 
@@ -67,6 +68,48 @@ def test_status_json_contains_no_secret_values(tmp_path: Path):
     payload = json.loads((state / "status.json").read_text(encoding="utf-8-sig"))
     assert "hidden" not in json.dumps(payload)
     assert "[REDACTED]" in json.dumps(payload)
+
+
+def test_notification_types_resolve_in_clean_windows_powershell():
+    source = MODULE.read_text(encoding="utf-8")
+    manager_type = (
+        "[Windows.UI.Notifications.ToastNotificationManager, "
+        "Windows.UI.Notifications, ContentType=WindowsRuntime]"
+    )
+    toast_type = (
+        "[Windows.UI.Notifications.ToastNotification, "
+        "Windows.UI.Notifications, ContentType=WindowsRuntime]"
+    )
+    assert manager_type in source
+    assert toast_type in source
+
+    result = run_ps(f"[void]{manager_type}; [void]{toast_type}; 'resolved'")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "resolved"
+
+
+def test_notification_failure_is_best_effort_and_does_not_start_cooldown(
+    tmp_path: Path,
+):
+    state = tmp_path / "state"
+    result = run_ps(
+        import_module()
+        + f"$state='{ps_quote(state)}'; "
+        + "$failed = Send-OperationsNotification -StateRoot $state "
+        + "-Category 'failure' -Title 'title' -Message 'message' "
+        + "-NotificationAction { param($title, $message) throw 'unavailable' }; "
+        + "if ($failed) { exit 11 }; "
+        + "if (Test-Path (Join-Path $state 'notifications\\failure.json')) { exit 12 }; "
+        + "$sent = Send-OperationsNotification -StateRoot $state "
+        + "-Category 'success' -Title 'title' -Message 'message' "
+        + "-NotificationAction { param($title, $message) }; "
+        + "if (-not $sent) { exit 13 }; "
+        + "if (-not (Test-Path (Join-Path $state 'notifications\\success.json'))) "
+        + "{ exit 14 }"
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_common_module_exports_exact_public_command_set():
@@ -143,3 +186,76 @@ def test_configuration_rejects_missing_inputs_and_overlapping_roots_without_env_
 
     assert overlap.returncode != 0
     assert "overlap" in (overlap.stdout + overlap.stderr).lower()
+
+
+def test_configuration_rejects_missing_env_when_compose_exists(tmp_path: Path):
+    repo = tmp_path / "missing-env"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+
+    result = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(repo / 'absent.env')}'"
+    )
+
+    assert result.returncode != 0
+    assert "environment file was not found" in result.stderr.lower()
+
+
+def test_compose_health_uses_config_context_and_only_required_services(
+    tmp_path: Path,
+):
+    args_file = tmp_path / "docker-args.json"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    compose_file = repository / "compose.yaml"
+    env_file = repository / "deploy.env"
+    result = run_ps(
+        "function global:docker { "
+        + f"$args | ConvertTo-Json | Set-Content '{ps_quote(args_file)}'; "
+        + "$global:LASTEXITCODE = 0; "
+        + "'app|running|healthy'; 'qdrant|running|healthy' }; "
+        + import_module()
+        + "$config = [PSCustomObject]@{ "
+        + f"RepositoryRoot='{ps_quote(repository)}'; "
+        + f"ComposeFile='{ps_quote(compose_file)}'; "
+        + f"EnvFile='{ps_quote(env_file)}' }}; "
+        + "$health = Test-ComposeHealth -Config $config; "
+        + "if (-not $health.Healthy) { exit 15 }"
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = json.loads(args_file.read_text(encoding="utf-8-sig"))
+    assert arguments == [
+        "compose",
+        "--project-directory",
+        str(repository),
+        "--file",
+        str(compose_file),
+        "--env-file",
+        str(env_file),
+        "ps",
+        "--format",
+        "{{.Service}}|{{.State}}|{{.Health}}",
+        "app",
+        "qdrant",
+    ]
+
+
+def test_wait_until_caps_sleep_to_remaining_timeout():
+    result = run_ps(
+        import_module()
+        + "$watch = [Diagnostics.Stopwatch]::StartNew(); "
+        + "$matched = Wait-Until -Condition { $false } "
+        + "-TimeoutSeconds 1 -IntervalSeconds 300; "
+        + "$watch.Stop(); "
+        + "[PSCustomObject]@{ Matched=$matched; Elapsed=$watch.Elapsed.TotalSeconds } "
+        + "| ConvertTo-Json -Compress",
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["Matched"] is False
+    assert payload["Elapsed"] < 2.5

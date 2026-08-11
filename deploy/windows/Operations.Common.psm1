@@ -210,13 +210,29 @@ function Write-OperationsStatus {
     [IO.File]::WriteAllText((Join-Path $StateRoot 'status.json'), $payload, $utf8)
 }
 
+function Show-OperationsToast {
+    param(
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message
+    )
+    [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
+    $template = [Windows.UI.Notifications.ToastTemplateType, Windows.UI.Notifications, ContentType=WindowsRuntime]::ToastText02
+    $xml = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]::GetTemplateContent($template)
+    $textNodes = $xml.GetElementsByTagName('text')
+    $textNodes.Item(0).AppendChild($xml.CreateTextNode($Title)) | Out-Null
+    $textNodes.Item(1).AppendChild($xml.CreateTextNode($Message)) | Out-Null
+    $toast = [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType=WindowsRuntime]::new($xml)
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]::CreateToastNotifier('Python Self Agent').Show($toast)
+}
+
 function Send-OperationsNotification {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$StateRoot,
         [Parameter(Mandatory)][string]$Category,
         [Parameter(Mandatory)][string]$Title,
-        [Parameter(Mandatory)][AllowEmptyString()][string]$Message
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
+        [scriptblock]$NotificationAction
     )
     try {
         $notificationRoot = Join-Path $StateRoot 'notifications'
@@ -233,16 +249,16 @@ function Send-OperationsNotification {
                 }
             }
         }
+        if ($null -eq $NotificationAction) {
+            $NotificationAction = {
+                param($NotificationTitle, $NotificationMessage)
+                Show-OperationsToast -Title $NotificationTitle -Message $NotificationMessage
+            }
+        }
+        & $NotificationAction (Protect-LogText $Title) (Protect-LogText $Message) | Out-Null
+
         $stamp = [PSCustomObject]@{ last_sent_at = $now.ToString('o') } | ConvertTo-Json
         [IO.File]::WriteAllText($stampFile, $stamp, (New-Object System.Text.UTF8Encoding($false)))
-
-        $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
-        $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($template)
-        $textNodes = $xml.GetElementsByTagName('text')
-        $textNodes.Item(0).AppendChild($xml.CreateTextNode((Protect-LogText $Title))) | Out-Null
-        $textNodes.Item(1).AppendChild($xml.CreateTextNode((Protect-LogText $Message))) | Out-Null
-        $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
-        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Python Self Agent').Show($toast)
         return $true
     } catch {
         return $false
@@ -267,7 +283,12 @@ function Test-ComposeHealth {
     $services = @()
     try {
         $lines = Invoke-External -FilePath 'docker' -ArgumentList @(
-            'compose', '--env-file', $Config.EnvFile, 'ps', '--format', '{{.Service}}|{{.State}}|{{.Health}}'
+            'compose',
+            '--project-directory', $Config.RepositoryRoot,
+            '--file', $Config.ComposeFile,
+            '--env-file', $Config.EnvFile,
+            'ps', '--format', '{{.Service}}|{{.State}}|{{.Health}}',
+            'app', 'qdrant'
         )
         foreach ($line in $lines) {
             $parts = $line -split '\|', 3
@@ -329,7 +350,11 @@ function Wait-Until {
         if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
             break
         }
-        Start-Sleep -Seconds $IntervalSeconds
+        $remainingMilliseconds = [Math]::Ceiling(
+            ($TimeoutSeconds - $stopwatch.Elapsed.TotalSeconds) * 1000
+        )
+        $sleepMilliseconds = [Math]::Min($IntervalSeconds * 1000, $remainingMilliseconds)
+        Start-Sleep -Milliseconds ([Math]::Max(1, [int]$sleepMilliseconds))
     } while ($true)
     return $false
 }
