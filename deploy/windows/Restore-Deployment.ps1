@@ -189,42 +189,59 @@ try {
     if (-not (Test-RestoreHealth -Config $config)) { throw 'Deployment did not become healthy after the restore swap' }
 } catch {
     $restoreError = $_
-    $compensationError = $null
-    $safeToCompensate = $true
-    try {
-        if ($rollbackCreated) {
+    $compensationErrors = @()
+    $rollbackRestored = $false
+    if ($rollbackCreated) {
+        try {
+            Invoke-ComposeForServices -Config $config -Action stop -Services $runningServices
+        } catch {
+            $compensationErrors += "stop failed services: $($_.Exception.Message)"
+        }
+        if ($candidateInstalled -and (Test-Path -LiteralPath $dataRoot -PathType Container)) {
             try {
-                Invoke-ComposeForServices -Config $config -Action stop -Services $runningServices
+                Rename-Sibling -LiteralPath $dataRoot -Destination $failedPath
             } catch {
-                $compensationError = $_
-                $safeToCompensate = $false
-            }
-            if ($safeToCompensate) {
-                if ($candidateInstalled -and (Test-Path -LiteralPath $dataRoot -PathType Container)) {
-                    Rename-Sibling -LiteralPath $dataRoot -Destination $failedPath
-                }
-                if (Test-Path -LiteralPath $rollbackPath -PathType Container) {
-                    Rename-Sibling -LiteralPath $rollbackPath -Destination $dataRoot
-                }
+                $compensationErrors += "retain failed candidate: $($_.Exception.Message)"
             }
         }
-        if ($safeToCompensate) {
-            Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
-            if ($rollbackCreated -and -not (Test-RestoreHealth -Config $config)) {
-                throw 'Rollback was restored but did not become healthy'
+        if (Test-Path -LiteralPath $rollbackPath -PathType Container) {
+            try {
+                Rename-Sibling -LiteralPath $rollbackPath -Destination $dataRoot
+                $rollbackRestored = $true
+            } catch {
+                $compensationErrors += "restore rollback: $($_.Exception.Message)"
             }
+        } else {
+            $compensationErrors += 'restore rollback: rollback directory is missing'
         }
-    } catch { $compensationError = $_ }
+    }
+    $restartSucceeded = $false
+    try {
+        Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
+        $restartSucceeded = $true
+    } catch {
+        $compensationErrors += "restart services: $($_.Exception.Message)"
+    }
+    if ($rollbackCreated -and $rollbackRestored -and $restartSucceeded) {
+        try {
+            if (-not (Test-RestoreHealth -Config $config)) {
+                $compensationErrors += 'rollback health: restored deployment did not become healthy'
+            }
+        } catch {
+            $compensationErrors += "rollback health: $($_.Exception.Message)"
+        }
+    }
     $diagnostic = [ordered]@{
         failed_at = (Get-Date).ToUniversalTime().ToString('o')
         restore_error = Protect-LogText $restoreError.Exception.Message
-        compensation_error = if ($null -eq $compensationError) { $null } else { Protect-LogText $compensationError.Exception.Message }
+        compensation_error = if ($compensationErrors.Count -eq 0) { $null } else { Protect-LogText ($compensationErrors -join '; ') }
+        compensation_errors = @($compensationErrors | ForEach-Object { Protect-LogText $_ })
         failed_candidate = if (Test-Path -LiteralPath $failedPath) { $failedPath } else { $null }
         retained_staging = if (Test-Path -LiteralPath $stagingPath) { $stagingPath } else { $null }
     } | ConvertTo-Json
     try { [IO.File]::WriteAllText($diagnosticPath, $diagnostic, (New-Object System.Text.UTF8Encoding($false))) } catch {}
-    if ($null -ne $compensationError) {
-        throw "Restore failed: $($restoreError.Exception.Message). Compensation also failed: $($compensationError.Exception.Message)"
+    if ($compensationErrors.Count -gt 0) {
+        throw "Restore failed: $($restoreError.Exception.Message). Compensation issues: $($compensationErrors -join '; ')"
     }
     throw $restoreError
 }

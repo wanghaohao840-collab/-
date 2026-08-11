@@ -133,6 +133,28 @@ def test_retention_rejects_reparse_point_sidecars(tmp_path: Path):
     assert result.stdout.strip() == "0"
 
 
+@pytest.mark.parametrize(
+    ("date", "expected"),
+    [
+        ("2018-12-31T12:00:00Z", {"Year": 2019, "Week": 1}),
+        ("2019-01-01T12:00:00Z", {"Year": 2019, "Week": 1}),
+        ("2020-12-31T12:00:00Z", {"Year": 2020, "Week": 53}),
+        ("2021-01-01T12:00:00Z", {"Year": 2020, "Week": 53}),
+    ],
+)
+def test_iso_week_year_and_number_come_from_adjusted_thursday(
+    date: str, expected: dict[str, int]
+):
+    result = run_ps(
+        f"Import-Module '{ps_quote(COMMON)}' -Force; "
+        f"Get-IsoWeekInfo -UtcDate ([DateTime]::Parse('{date}').ToUniversalTime()) "
+        "| ConvertTo-Json -Compress"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == expected
+
+
 def test_backup_and_restore_scripts_have_static_safety_contracts():
     common = COMMON.read_text(encoding="utf-8")
     backup = BACKUP.read_text(encoding="utf-8")
@@ -246,6 +268,39 @@ def test_backup_archive_failure_restarts_prior_services_and_skips_retention(
     assert len(list(daily.glob("*.tar.gz"))) == 8
 
 
+def test_backup_rejects_reparse_ancestor_before_creating_backup_root(tmp_path: Path):
+    repository, data, env_file = make_repository(tmp_path)
+    (data / "app" / "marker.txt").write_text("live", encoding="utf-8")
+    target = tmp_path / "real-backup-parent"
+    target.mkdir()
+    junction = tmp_path / "backup-parent-link"
+    created = run_ps(
+        f"New-Item -ItemType Junction -Path '{ps_quote(junction)}' "
+        f"-Target '{ps_quote(target)}' | Out-Null"
+    )
+    if created.returncode != 0:
+        pytest.skip(f"junctions are unavailable: {created.stderr}")
+    calls = tmp_path / "external-called"
+    backup_root = junction / "must-not-exist"
+
+    try:
+        result = run_ps(
+            "$runner = { param($FilePath, $ArgumentList) "
+            f"Set-Content -LiteralPath '{ps_quote(calls)}' -Value called }}; "
+            f"& '{ps_quote(BACKUP)}' -RepositoryRoot '{ps_quote(repository)}' "
+            f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(tmp_path / 'state')}' "
+            f"-BackupRoot '{ps_quote(backup_root)}' -ExternalInvoker $runner "
+            "-HealthProbe { $true }"
+        )
+
+        assert result.returncode != 0
+        assert "reparse" in (result.stdout + result.stderr).lower()
+        assert not (target / "must-not-exist").exists()
+        assert not calls.exists()
+    finally:
+        run_ps(f"Remove-Item -LiteralPath '{ps_quote(junction)}' -Force")
+
+
 @pytest.mark.parametrize(
     ("members", "verbose"),
     [
@@ -324,9 +379,53 @@ def test_failed_post_swap_health_restores_old_data_and_retains_diagnostics(
     assert (data / "app" / "marker.txt").read_text(encoding="utf-8-sig") == "current"
     failed = [path for path in tmp_path.glob("deployment-data.failed-*") if path.is_dir()]
     diagnostics = list(tmp_path.glob("deployment-data.failed-*.diagnostic"))
-    assert len(failed) == 1
+    assert len(failed) == 1, result.stdout + result.stderr
     assert len(diagnostics) == 1
     assert (failed[0] / "app" / "marker.txt").read_text(encoding="utf-8-sig") == "candidate"
+
+
+def test_second_stop_failure_does_not_gate_post_swap_filesystem_rollback(
+    tmp_path: Path,
+):
+    if shutil.which("tar.exe") is None:
+        pytest.skip("tar.exe is unavailable")
+    repository, data, env_file = make_repository(tmp_path)
+    (data / "app" / "marker.txt").write_text("current", encoding="utf-8")
+    source = tmp_path / "source"
+    (source / "app").mkdir(parents=True)
+    (source / "qdrant").mkdir(parents=True)
+    (source / "app" / "marker.txt").write_text("candidate", encoding="utf-8")
+    backups = tmp_path / "backups"
+    archive = backups / "daily" / "assistant-20260701T030000Z.tar.gz"
+    archive.parent.mkdir(parents=True)
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(source / "app", arcname="app")
+        bundle.add(source / "qdrant", arcname="qdrant")
+    write_checksum(archive)
+
+    result = run_ps(
+        "$global:task4HealthCalls = 0; $global:task4StopCalls = 0; "
+        "$runner = { param([string]$FilePath, [string[]]$ArgumentList) "
+        "if ($FilePath -eq 'docker') { "
+        "if ($ArgumentList -contains 'ps') { 'app'; 'qdrant'; return }; "
+        "if ($ArgumentList -contains 'stop') { $global:task4StopCalls++; "
+        "if ($global:task4StopCalls -eq 2) { throw 'forced second stop failure' } }; return }; "
+        "& $FilePath @ArgumentList; if ($LASTEXITCODE -ne 0) { throw 'tar failed' } }; "
+        "$health = { param($Config) $global:task4HealthCalls++; return ($global:task4HealthCalls -gt 1) }; "
+        f"& '{ps_quote(RESTORE)}' -Archive '{ps_quote(archive)}' "
+        f"-RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' "
+        f"-StateRoot '{ps_quote(tmp_path / 'state')}' -BackupRoot '{ps_quote(backups)}' "
+        "-ExternalInvoker $runner -HealthProbe $health"
+    )
+
+    assert result.returncode != 0
+    assert (data / "app" / "marker.txt").read_text(encoding="utf-8-sig") == "current"
+    failed = [path for path in tmp_path.glob("deployment-data.failed-*") if path.is_dir()]
+    diagnostics = list(tmp_path.glob("deployment-data.failed-*.diagnostic"))
+    assert len(failed) == 1, result.stdout + result.stderr
+    assert len(diagnostics) == 1
+    assert (failed[0] / "app" / "marker.txt").read_text(encoding="utf-8-sig") == "candidate"
+    assert "forced second stop failure" in diagnostics[0].read_text(encoding="utf-8-sig")
 
 
 def test_restore_rejects_checksum_mismatch_before_external_commands(tmp_path: Path):
@@ -334,7 +433,7 @@ def test_restore_rejects_checksum_mismatch_before_external_commands(tmp_path: Pa
     archive = backups / "daily" / "assistant-20260701T030000Z.tar.gz"
     archive.parent.mkdir(parents=True)
     archive.write_bytes(b"not an archive")
-    (tmp_path / f"{archive.name}.sha256").write_text(
+    (archive.parent / f"{archive.name}.sha256").write_text(
         f"{'0' * 64}  {archive.name}\n", encoding="ascii"
     )
     repository, _, env_file = make_repository(tmp_path)
@@ -343,13 +442,12 @@ def test_restore_rejects_checksum_mismatch_before_external_commands(tmp_path: Pa
     result = run_ps(
         "$runner = { param($FilePath, $ArgumentList) "
         f"Set-Content -LiteralPath '{ps_quote(calls)}' -Value called }}; "
-        "try { "
         f"& '{ps_quote(RESTORE)}' -Archive '{ps_quote(archive)}' "
         f"-RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' "
         f"-StateRoot '{ps_quote(tmp_path / 'state')}' -BackupRoot '{ps_quote(backups)}' "
-        "-ExternalInvoker $runner -HealthProbe { $true }; exit 91 "
-        "} catch { exit 0 }"
+        "-ExternalInvoker $runner -HealthProbe { $true }"
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "checksum mismatch" in (result.stdout + result.stderr).lower()
     assert not calls.exists()

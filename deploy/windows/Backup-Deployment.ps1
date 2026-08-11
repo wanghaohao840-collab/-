@@ -99,21 +99,6 @@ function Test-BackupHealth {
     }
 }
 
-function Get-IsoWeekInfo {
-    param([Parameter(Mandatory)][DateTime]$UtcDate)
-
-    $day = [int]$UtcDate.DayOfWeek
-    if ($day -eq 0) { $day = 7 }
-    $thursday = $UtcDate.Date.AddDays(4 - $day)
-    $calendar = [Globalization.CultureInfo]::InvariantCulture.Calendar
-    $week = $calendar.GetWeekOfYear(
-        $UtcDate,
-        [Globalization.CalendarWeekRule]::FirstFourDayWeek,
-        [DayOfWeek]::Monday
-    )
-    return [PSCustomObject]@{ Year = $thursday.Year; Week = $week }
-}
-
 function Write-BackupMetadata {
     param(
         [Parameter(Mandatory)][string]$Archive,
@@ -152,8 +137,9 @@ if ((Test-PathOverlap $dataRoot $backupPath) -or (Test-PathOverlap $dataRoot $co
 
 $dataParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($dataRoot))
 Assert-BackupTreeSafe -Path $dataRoot -AllowedRoot $dataParent | Out-Null
-New-Item -ItemType Directory -Force -Path $backupPath | Out-Null
 $backupParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($backupPath))
+Assert-BackupPathAncestorsSafe -Path $backupPath | Out-Null
+New-Item -ItemType Directory -Force -Path $backupPath | Out-Null
 Assert-BackupTreeSafe -Path $backupPath -AllowedRoot $backupParent | Out-Null
 
 $dailyDirectory = Join-Path $backupPath 'daily'

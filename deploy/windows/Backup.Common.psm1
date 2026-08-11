@@ -30,6 +30,30 @@ function Assert-NoReparseAncestors {
     }
 }
 
+function Assert-BackupPathAncestorsSafe {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    Assert-NoReparseAncestors -Path $Path
+    return [IO.Path]::GetFullPath($Path)
+}
+
+function Get-IsoWeekInfo {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][DateTime]$UtcDate)
+
+    $day = [int]$UtcDate.DayOfWeek
+    if ($day -eq 0) { $day = 7 }
+    $thursday = $UtcDate.Date.AddDays(4 - $day)
+    $calendar = [Globalization.CultureInfo]::InvariantCulture.Calendar
+    $week = $calendar.GetWeekOfYear(
+        $thursday,
+        [Globalization.CalendarWeekRule]::FirstFourDayWeek,
+        [DayOfWeek]::Monday
+    )
+    return [PSCustomObject]@{ Year = $thursday.Year; Week = $week }
+}
+
 function Test-RegularNonReparseFile {
     param([Parameter(Mandatory)][string]$LiteralPath)
 
@@ -161,8 +185,10 @@ function Remove-BackupSet {
 }
 
 Export-ModuleMember -Function @(
+    'Assert-BackupPathAncestorsSafe',
     'Assert-BackupTreeSafe',
     'Get-CompleteBackupSets',
+    'Get-IsoWeekInfo',
     'Get-RetentionPlan',
     'Remove-BackupSet'
 )
