@@ -1,11 +1,11 @@
 ---
 id: "product-ui-closure-04"
 title: "Verify Docker delivery and close product UI"
-status: "ready"
+status: "done"
 parallel-safe: false
-depends-on: ["product-ui-closure-03"]
+depends-on: ["product-ui-closure-02", "product-ui-closure-03", "product-ui-closure-05"]
 base-commit: "ef93550f6b0616815314baf2f62263b43536a17e"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Task Packet: Verify Docker delivery and close product UI
@@ -40,6 +40,8 @@ Docker Desktop Linux Engine is now available, but the branch has not yet proved 
 ### Packet dependencies
 
 - `product-ui-closure-03` must be `done`.
+- `product-ui-closure-05` must be `done`.
+- `product-ui-closure-02` must be `done` before the final design-source comparison and integration review.
 
 ### Repository/base state
 
@@ -110,13 +112,13 @@ Docker Desktop Linux Engine is now available, but the branch has not yet proved 
 
 ## Acceptance criteria
 
-- [ ] Documentation test is RED before report/link and GREEN after.
-- [ ] Current images build and isolated app/Qdrant become healthy on 17860.
-- [ ] Non-root, single-worker, health/SPA/legacy/Qdrant/write/import/shallow-smoke checks pass.
-- [ ] Unique project and isolated data are removed; no residual container/network/process/runtime root remains.
-- [ ] Existing 7860 stack identity, images, health, and port bindings are unchanged.
-- [ ] Full Python with Starlette warning-as-error, design gates, zero npm audits, frontend, Playwright, unified smoke, and safety scans pass.
-- [ ] Closure report contains exact commands/totals/evidence and explicit residual risks.
+- [x] Documentation test is RED before report/link and GREEN after.
+- [x] Current images build and isolated app/Qdrant become healthy on 17860.
+- [x] Non-root, single-worker, health/SPA/legacy/Qdrant/write/import/shallow-smoke checks pass.
+- [x] Unique project and isolated data are removed; no residual container/network/process/runtime root remains.
+- [x] Existing 7860 stack identity, images, health, and port bindings are unchanged.
+- [x] Full Python with Starlette warning-as-error, design gates, zero npm audits, frontend, Playwright, unified smoke, and safety scans pass.
+- [x] Closure report contains exact commands/totals/evidence and explicit residual risks.
 
 ## Test and verification commands
 
@@ -166,4 +168,41 @@ Stop and append a reality-conflict report if Docker context/daemon differs, port
 
 ## Implementation handoff
 
-Replace this placeholder using the template format. Include Docker before/after tables, versions/project/port/data root, image/container IDs, endpoint/non-root/import/smoke evidence, cleanup proof, complete regression totals, scans, changed files, residual risks, and commit.
+### Final handoff
+
+- Status: done
+- Files changed:
+  - `docs/product-ui/closure-report-2026-08-09.md`
+  - `docs/product-ui/README.md`
+  - `tests/deploy/test_product_ui_readme.py`
+  - `.gitattributes`
+  - `tests/deploy/test_image_contract.py`
+- Acceptance evidence:
+  - Docker Desktop Linux 29.6.2 / Compose 5.3.1; isolated project built and ran on `127.0.0.1:17860`.
+  - app/Qdrant healthy; image default `10001:10001`, Compose runtime `1000:1000`; one Uvicorn worker; endpoint, redirect, Gradio, readiness, write and shallow-smoke checks passed.
+  - Isolated containers/network/data root removed; original 7860 app/Qdrant IDs, images, health and ports unchanged.
+  - Python `803 passed, 7 skipped`; design `17/17`; audits zero; Vitest `65/65`; type/lint/build pass; Playwright `28 passed, 2 skipped`.
+- Deviation:
+  - The first app runtime exposed a CRLF shebang defect after the image had built. Corrective commit `d65fd7d` adds a durable LF checkout contract; the rebuilt image passed every runtime check.
+- Residual risks:
+  - Deep external-model smoke intentionally excluded by packet scope; full Python output retains existing Neo4j driver destructor warnings, not the closed TestClient warning.
+- Commit:
+  - `d65fd7d` for the Linux entrypoint correction; closure documentation commit follows this handoff.
+
+## Resolved reality-conflict report
+
+- Packet: `product-ui-closure-04`
+- Status: resolved by `product-ui-closure-05`
+- Expected by packet:
+  - The current Dockerfile builds the React distribution before the isolated runtime starts.
+- Observed in repository:
+  - `web/tsconfig.json` references `tsconfig.e2e.json`, but Dockerfile's web-build COPY omits that file.
+  - Isolated build fails at `npm run build` with `TS5083: Cannot read file '/web/tsconfig.e2e.json'`.
+- Impact:
+  - The app image cannot be produced; runtime smoke and release acceptance cannot proceed.
+- Work completed before pause:
+  - Docker Desktop Linux 29.6.2/Compose 5.3.1 verified; existing 7860 container IDs recorded; 17860 free; isolated Compose config validated; Qdrant image built; no isolated containers started.
+- Resolution:
+  - Corrective packet `product-ui-closure-05` added the application-only TypeScript build contract. The rebuilt image and isolated runtime/shallow smoke passed.
+- Decision required:
+  - none; the repository evidence uniquely determines the minimal correction.

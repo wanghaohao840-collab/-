@@ -1,6 +1,6 @@
 # 知研产品 UI 收尾修复 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `subagent-driven-development` to implement this plan task-by-task. Execute the four tasks serially in the same isolated worktree; do not overlap their file ownership or external Penpot/Docker state.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `subagent-driven-development` to implement this plan task-by-task. Execute the delivery packets according to the dependency graph in the same isolated worktree; do not overlap their file ownership or external Penpot/Docker state.
 
 **Goal:** 关闭产品 UI 分支剩余的五类问题：npm moderate advisory、Starlette `TestClient` 弃用警告、无效的“保持登录状态”承诺、两项 Penpot 设计源清理，以及尚未完成的 Docker Linux 交付验证，并留下可重复执行的验收记录。
 
@@ -10,11 +10,17 @@
 
 ---
 
+## Execution status
+
+All five delivery packets were completed on 2026-08-11. Real isolated Docker build/runtime evidence added the application-only TypeScript build packet and the Linux LF entrypoint contract. Final combined evidence is recorded in `docs/product-ui/closure-report-2026-08-09.md`.
+
 ## Global constraints and task graph
 
 - Before implementation, read `PROJECT_KNOWLEDGE.md`; current code/tests/runtime win over historical notes.
 - Approved design source: `docs/superpowers/specs/2026-08-09-product-ui-closure-design.md`.
-- Execute serially: `Task 1 → Task 2 → Task 3 → Task 4`.
+- Execute `Task 1` first. `Task 2` (external Penpot source) and `Task 3`
+  (repository browser implementation) may then proceed independently; `Task 4`
+  and final source-to-browser acceptance require both to be done.
 - Preserve Cookie flags, CSRF rules, 12-hour sliding in-memory expiry, single-worker runtime, per-user UUID storage, `document_id`, citations, RAG, Memory, reports, imports, and `/legacy/`.
 - Do not introduce `localStorage`, `sessionStorage`, persistent refresh tokens, a second Gradio process, or deep LLM smoke calls.
 - Penpot writes require a fresh active-file/page read. If the connector times out, the file/page differs, or a target ID no longer resolves, stop that batch without guessing.

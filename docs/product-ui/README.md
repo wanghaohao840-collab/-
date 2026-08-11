@@ -156,3 +156,9 @@ npm run build
 npx playwright test
 Set-Location ..
 ```
+
+## 闭环验收记录
+
+本轮依赖、认证语义、Penpot 源文件、三档视觉与 Docker Linux 发布门的可复现结果见
+[产品 UI 闭环报告](closure-report-2026-08-09.md)。报告中的隔离 Compose 项目只用于验收，
+不会替换或停止现有 `7860` 环境。

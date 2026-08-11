@@ -89,4 +89,4 @@ Stop if the solution references differ, the build fails after the exact COPY cor
   - Local `npm run build:app`: 105 modules, pass.
   - Docker Desktop Linux build: `zhiyan-closure-20260809-app` and `zhiyan-closure-20260809-qdrant` both built successfully.
   - Existing `python_self_agent-app-1` (`0181c6abff3a`) and `python_self_agent-qdrant-1` (`b57faada1f90`) were not stopped or rebuilt.
-- Commit: pending immediately after this handoff.
+- Commit: `03c0584` (`fix: isolate Docker frontend build`).

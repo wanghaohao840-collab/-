@@ -70,8 +70,9 @@
 |---|---|---:|---|---|
 | `01-dependency-closure.md` | none | no | dependency manifests, root setup docs, dependency contract | zero npm advisory and zero TestClient warning |
 | `02-penpot-source-cleanup.md` | 01 | no | Penpot source, handoff contract/docs, Penpot Login references | clean source and three authoritative Login exports |
-| `03-react-login-sync.md` | 02 | no | Login React/CSS/tests/E2E/browser Login baselines | inert control removed and three browser viewports accepted |
-| `04-docker-release-gate.md` | 03 | no | closure docs/test and isolated ephemeral Docker state | verified Linux delivery plus full closure report |
+| `03-react-login-sync.md` | 01 | no | Login React/CSS/tests/E2E/browser Login baselines | inert control removed and three browser viewports accepted |
+| `04-docker-release-gate.md` | 02, 03, 05 | no | closure docs/test and isolated ephemeral Docker state | verified Linux delivery plus full closure report |
+| `05-docker-build-tsconfig.md` | 03 | no | Docker application-only TypeScript build contract | reproducible Linux image build without E2E sources |
 
 ## Packet readiness audit
 
@@ -81,8 +82,9 @@
 | `02-penpot-source-cleanup.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `03-react-login-sync.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `04-docker-release-gate.md` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `05-docker-build-tsconfig.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 
-Packet 02 is ready because its live-ID discovery is an explicit, bounded external precondition with semantic parent/shape assertions and a mandatory stop condition; no implementer is asked to guess a mutable ID.
+All five packets are done. Packet 02 completed against the freshly connected Penpot file using bounded semantic parent/shape assertions and fixed IDs; packet 03 then passed the final source-to-browser comparison across all three viewports.
 
 ## Integration verification
 
