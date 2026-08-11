@@ -157,6 +157,9 @@ function Protect-DrillText {
         [Parameter(Mandatory)][string]$DeploymentEnvFile
     )
     $safe = Protect-LogText $Text
+    if (-not (Test-Path -LiteralPath $DeploymentEnvFile -PathType Leaf)) {
+        return $safe
+    }
     foreach ($line in [IO.File]::ReadAllLines($DeploymentEnvFile)) {
         $match = [regex]::Match($line, '^\s*(?<name>[^#=\s]+)\s*=\s*(?<value>.*)\s*$')
         if (-not $match.Success -or $match.Groups['name'].Value -notmatch '(?i)(KEY|TOKEN|PASSWORD|SECRET)') {
@@ -187,62 +190,101 @@ function Remove-ValidatedDrillDirectory {
     Remove-Item -LiteralPath $safePath -Recurse -Force
 }
 
-$config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
-$backupPath = [IO.Path]::GetFullPath($config.BackupRoot).TrimEnd('\', '/')
-$backupParent = [IO.Path]::GetDirectoryName($backupPath)
-Assert-BackupTreeSafe -Path $backupPath -AllowedRoot $backupParent | Out-Null
-
-$dailyDirectory = Join-Path $backupPath 'daily'
-Assert-BackupTreeSafe -Path $dailyDirectory -AllowedRoot $backupPath | Out-Null
-$sets = @(Get-CompleteBackupSets -Directory $dailyDirectory -Prefix 'assistant-')
-if ($sets.Count -eq 0) {
-    throw 'No complete daily backup is available for a restore drill'
+$reportRepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
+$reportStateRoot = if ([IO.Path]::IsPathRooted($StateRoot)) {
+    [IO.Path]::GetFullPath($StateRoot)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $reportRepositoryRoot $StateRoot))
 }
-$backupSet = $sets[0]
-$archivePath = Assert-SafePath -Path $backupSet.Archive -AllowedRoot $dailyDirectory
-$checksumPath = Assert-SafePath -Path $backupSet.Checksum -AllowedRoot $dailyDirectory
-Assert-RegularNonReparseFile -LiteralPath $archivePath
-Assert-RegularNonReparseFile -LiteralPath $checksumPath
-
-$archiveName = [IO.Path]::GetFileName($archivePath)
-$checksumLine = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
-$checksumMatch = [regex]::Match($checksumLine, '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^\\/]+)$')
-if (-not $checksumMatch.Success -or
-    -not $checksumMatch.Groups['name'].Value.Equals($archiveName, [StringComparison]::Ordinal)) {
-    throw 'Checksum sidecar does not match the selected archive name'
-}
-$actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-if (-not $actualHash.Equals($checksumMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Backup checksum mismatch'
+$reportRoot = Join-Path $reportStateRoot 'reports'
+Assert-SafePath -Path $reportRoot -AllowedRoot $reportStateRoot | Out-Null
+New-Item -ItemType Directory -Force -Path $reportRoot | Out-Null
+$reportStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffffffZ')
+$reportPath = Join-Path $reportRoot "restore-drill-$reportStamp.json"
+Assert-SafePath -Path $reportPath -AllowedRoot $reportRoot | Out-Null
+$redactionEnvFile = if ([IO.Path]::IsPathRooted($EnvFile)) {
+    [IO.Path]::GetFullPath($EnvFile)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $reportRepositoryRoot $EnvFile))
 }
 
-$members = @(Invoke-DrillExternal -FilePath 'tar.exe' -ArgumentList @('-tzf', $archivePath))
-Assert-SafeArchiveMembers -MemberNames $members
-$verboseEntries = @(Invoke-DrillExternal -FilePath 'tar.exe' -ArgumentList @('-tvzf', $archivePath))
-Assert-NoArchiveLinks -VerboseEntries $verboseEntries
-$preExtractionHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-if (-not $preExtractionHash.Equals($checksumMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'Backup checksum changed during restore drill validation'
-}
-
-$drillsRoot = Join-Path $backupPath '.drills'
-Assert-BackupPathAncestorsSafe -Path $drillsRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $drillsRoot | Out-Null
-Assert-BackupTreeSafe -Path $drillsRoot -AllowedRoot $backupPath | Out-Null
-$drillId = [Guid]::NewGuid().ToString('N')
-$drillDirectory = Join-Path $drillsRoot $drillId
-$drillDataRoot = Join-Path $drillDirectory 'data'
-$temporaryEnv = Join-Path $drillDirectory 'restore-drill.env'
-Assert-SafePath -Path $drillDirectory -AllowedRoot $drillsRoot | Out-Null
-New-Item -ItemType Directory -Path $drillDataRoot | Out-Null
-
-$failureMessage = $null
+$config = $null
+$archiveName = $null
+$archivePath = $null
+$drillsRoot = $null
+$drillId = $null
+$drillDirectory = $null
+$drillDataRoot = $null
+$temporaryEnv = $null
+$projectName = $null
+$port = $null
 $composeAttempted = $false
-$projectName = "assistant-drill-$($drillId.Substring(0, 12))"
-$port = Get-FreeTcpPort
-while ($port -eq 7860) { $port = Get-FreeTcpPort }
+$failureMessage = $null
+$failureStage = $null
+$failureCategory = $null
+$stage = 'configuration'
+$category = 'preflight'
 
 try {
+    $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+    $redactionEnvFile = $config.EnvFile
+    $backupPath = [IO.Path]::GetFullPath($config.BackupRoot).TrimEnd('\', '/')
+    $backupParent = [IO.Path]::GetDirectoryName($backupPath)
+    Assert-BackupTreeSafe -Path $backupPath -AllowedRoot $backupParent | Out-Null
+
+    $stage = 'backup-discovery'
+    $dailyDirectory = Join-Path $backupPath 'daily'
+    Assert-BackupTreeSafe -Path $dailyDirectory -AllowedRoot $backupPath | Out-Null
+    $sets = @(Get-CompleteBackupSets -Directory $dailyDirectory -Prefix 'assistant-')
+    if ($sets.Count -eq 0) {
+        throw 'No complete daily backup is available for a restore drill'
+    }
+    $backupSet = $sets[0]
+    $archivePath = Assert-SafePath -Path $backupSet.Archive -AllowedRoot $dailyDirectory
+    $checksumPath = Assert-SafePath -Path $backupSet.Checksum -AllowedRoot $dailyDirectory
+    Assert-RegularNonReparseFile -LiteralPath $archivePath
+    Assert-RegularNonReparseFile -LiteralPath $checksumPath
+    $archiveName = [IO.Path]::GetFileName($archivePath)
+
+    $stage = 'checksum-validation'
+    $checksumLine = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
+    $checksumMatch = [regex]::Match($checksumLine, '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^\\/]+)$')
+    if (-not $checksumMatch.Success -or
+        -not $checksumMatch.Groups['name'].Value.Equals($archiveName, [StringComparison]::Ordinal)) {
+        throw 'Checksum sidecar does not match the selected archive name'
+    }
+    $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    if (-not $actualHash.Equals($checksumMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Backup checksum mismatch'
+    }
+
+    $stage = 'member-validation'
+    $members = @(Invoke-DrillExternal -FilePath 'tar.exe' -ArgumentList @('-tzf', $archivePath))
+    Assert-SafeArchiveMembers -MemberNames $members
+    $verboseEntries = @(Invoke-DrillExternal -FilePath 'tar.exe' -ArgumentList @('-tvzf', $archivePath))
+    Assert-NoArchiveLinks -VerboseEntries $verboseEntries
+    $preExtractionHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
+    if (-not $preExtractionHash.Equals($checksumMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Backup checksum changed during restore drill validation'
+    }
+
+    $stage = 'drill-setup'
+    $drillsRoot = Join-Path $backupPath '.drills'
+    Assert-BackupPathAncestorsSafe -Path $drillsRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $drillsRoot | Out-Null
+    Assert-BackupTreeSafe -Path $drillsRoot -AllowedRoot $backupPath | Out-Null
+    $drillId = [Guid]::NewGuid().ToString('N')
+    $drillDirectory = Join-Path $drillsRoot $drillId
+    $drillDataRoot = Join-Path $drillDirectory 'data'
+    $temporaryEnv = Join-Path $drillDirectory 'restore-drill.env'
+    Assert-SafePath -Path $drillDirectory -AllowedRoot $drillsRoot | Out-Null
+    New-Item -ItemType Directory -Path $drillDataRoot | Out-Null
+    $projectName = "assistant-drill-$($drillId.Substring(0, 12))"
+    $port = Get-FreeTcpPort
+    while ($port -eq 7860) { $port = Get-FreeTcpPort }
+
+    $category = 'execution'
+    $stage = 'extraction'
     Invoke-DrillExternal -FilePath 'tar.exe' -ArgumentList @('-C', $drillDataRoot, '-xzf', $archivePath) | Out-Null
     Assert-BackupTreeSafe -Path $drillDataRoot -AllowedRoot $drillDirectory | Out-Null
     foreach ($requiredDirectory in @('app', 'qdrant')) {
@@ -251,17 +293,21 @@ try {
         }
     }
 
+    $stage = 'environment-setup'
     Write-PrivateDrillEnv -Source $config.EnvFile -Destination $temporaryEnv -DataRoot $drillDataRoot -Port $port
+    $stage = 'compose-start'
     $composeAttempted = $true
     Invoke-DrillExternal -FilePath 'docker' -ArgumentList (
         Get-DrillComposeArguments -Config $config -ProjectName $projectName -DrillEnvFile $temporaryEnv -Command @('up', '-d')
     ) | Out-Null
+    $stage = 'health-check'
     $healthy = Wait-Until -TimeoutSeconds $HealthTimeoutSeconds -IntervalSeconds 2 -Condition {
         Test-DrillHealth -Config $config -ProjectName $projectName -DrillEnvFile $temporaryEnv
     }
     if (-not $healthy) {
         throw 'Restore drill services did not become healthy'
     }
+    $stage = 'smoke-test'
     Invoke-DrillExternal -FilePath $config.Python -ArgumentList @(
         (Join-Path $config.RepositoryRoot 'deploy\smoke_test.py'),
         '--env-file', $temporaryEnv,
@@ -269,42 +315,61 @@ try {
     ) | Out-Null
 } catch {
     $failureMessage = $_.Exception.Message
+    $failureStage = $stage
+    $failureCategory = $category
 } finally {
-    if ($composeAttempted) {
+    if ($composeAttempted -and $null -ne $config -and $null -ne $projectName -and $null -ne $temporaryEnv) {
         try {
             Invoke-DrillExternal -FilePath 'docker' -ArgumentList (
                 Get-DrillComposeArguments -Config $config -ProjectName $projectName -DrillEnvFile $temporaryEnv -Command @('down')
             ) | Out-Null
         } catch {
             $cleanupError = "compose down failed: $($_.Exception.Message)"
-            $failureMessage = if ($null -eq $failureMessage) { $cleanupError } else { "$failureMessage; $cleanupError" }
+            if ($null -eq $failureMessage) {
+                $failureMessage = $cleanupError
+                $failureStage = 'compose-down'
+                $failureCategory = 'cleanup'
+            } else {
+                $failureMessage = "$failureMessage; $cleanupError"
+            }
         }
     }
-    if (Test-Path -LiteralPath $temporaryEnv) {
+    if ($null -ne $temporaryEnv -and (Test-Path -LiteralPath $temporaryEnv -PathType Leaf)) {
         try {
             Remove-Item -LiteralPath $temporaryEnv -Force
         } catch {
             $cleanupError = "temporary environment cleanup failed: $($_.Exception.Message)"
-            $failureMessage = if ($null -eq $failureMessage) { $cleanupError } else { "$failureMessage; $cleanupError" }
+            if ($null -eq $failureMessage) {
+                $failureMessage = $cleanupError
+                $failureStage = 'environment-cleanup'
+                $failureCategory = 'cleanup'
+            } else {
+                $failureMessage = "$failureMessage; $cleanupError"
+            }
         }
     }
 }
 
-if ($null -eq $failureMessage) {
+if ($null -eq $failureMessage -and $null -ne $drillDirectory) {
     try {
         Remove-ValidatedDrillDirectory -DrillDirectory $drillDirectory -DrillsRoot $drillsRoot -ExpectedName $drillId
     } catch {
         $failureMessage = "drill data cleanup failed: $($_.Exception.Message)"
+        $failureStage = 'drill-cleanup'
+        $failureCategory = 'cleanup'
     }
 }
 
 $safeFailure = if ($null -eq $failureMessage) { $null } else {
-    Protect-DrillText -Text $failureMessage -DeploymentEnvFile $config.EnvFile
+    Protect-DrillText -Text $failureMessage -DeploymentEnvFile $redactionEnvFile
 }
-$reportRoot = Join-Path $config.StateRoot 'reports'
-New-Item -ItemType Directory -Force -Path $reportRoot | Out-Null
-$reportStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffffffZ')
-$reportPath = Join-Path $reportRoot "restore-drill-$reportStamp.json"
+$retainedData = if ($null -ne $failureMessage -and
+    $null -ne $drillDataRoot -and
+    (Test-Path -LiteralPath $drillDataRoot -PathType Container)) {
+    $drillDataRoot
+} else {
+    $null
+}
 $report = [ordered]@{
     status = if ($null -eq $failureMessage) { 'succeeded' } else { 'failed' }
     completed_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -312,7 +377,9 @@ $report = [ordered]@{
     project_name = $projectName
     bind_address = '127.0.0.1'
     port = $port
-    retained_data = if ($null -eq $failureMessage) { $null } else { $drillDataRoot }
+    failure_stage = $failureStage
+    failure_category = $failureCategory
+    retained_data = $retainedData
     error = $safeFailure
 } | ConvertTo-Json
 [IO.File]::WriteAllText($reportPath, $report, (New-Object System.Text.UTF8Encoding($false)))

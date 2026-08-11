@@ -650,3 +650,77 @@ def test_restore_drill_has_powershell_51_parser_contract():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_stage"),
+    [
+        ("no-complete-backup", "backup-discovery"),
+        ("checksum-mismatch", "checksum-validation"),
+        ("unsafe-member", "member-validation"),
+    ],
+)
+def test_restore_drill_preflight_failures_are_reported_without_mutation(
+    tmp_path: Path, scenario: str, expected_stage: str
+):
+    repository, production_data, env_file = make_repository(tmp_path)
+    marker = production_data / "app" / "production-marker.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+    secret = "preflight-configured-secret"
+    env_file.write_text(
+        f"DEPLOY_DATA_ROOT={production_data}\nLLM_API_KEY={secret}\n",
+        encoding="utf-8",
+    )
+    backups = tmp_path / "backups"
+    if scenario != "no-complete-backup":
+        archive = make_drill_backup(backups)
+        if scenario == "checksum-mismatch":
+            (archive.parent / f"{archive.name}.sha256").write_text(
+                f"{'0' * 64}  {archive.name}\n", encoding="ascii"
+            )
+    else:
+        (backups / "daily").mkdir(parents=True)
+        (backups / "daily" / "assistant-20260812T030000Z.tar.gz").write_bytes(
+            b"incomplete"
+        )
+
+    state = tmp_path / "state"
+    calls = tmp_path / "preflight-calls.jsonl"
+    unsafe_output = "'../escape'" if scenario == "unsafe-member" else "@()"
+    harness = tmp_path / f"preflight-{scenario}.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$runner = {\n"
+        "  param([string]$FilePath, [string[]]$ArgumentList)\n"
+        f"  [PSCustomObject]@{{ FilePath=$FilePath; Args=@($ArgumentList) }} | ConvertTo-Json -Compress | Add-Content -LiteralPath '{ps_quote(calls)}'\n"
+        f"  if ($FilePath -eq 'tar.exe' -and $ArgumentList -contains '-tzf') {{ {unsafe_output}; return }}\n"
+        "  throw \"unexpected external command: $FilePath\"\n"
+        "}\n"
+        f"& '{ps_quote(DRILL)}' -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' -BackupRoot '{ps_quote(backups)}' -ExternalInvoker $runner -HealthTimeoutSeconds 5\n",
+        encoding="utf-8",
+    )
+
+    result = run_ps(f"& '{ps_quote(harness)}'", timeout=90)
+
+    assert result.returncode != 0
+    assert secret not in result.stdout + result.stderr
+    reports = list((state / "reports").glob("restore-drill-*.json"))
+    assert len(reports) == 1
+    report_text = reports[0].read_text(encoding="utf-8-sig")
+    assert secret not in report_text
+    report = json.loads(report_text)
+    assert report["status"] == "failed"
+    assert report["failure_stage"] == expected_stage
+    assert report["failure_category"] == "preflight"
+    assert report["retained_data"] is None
+
+    recorded = (
+        [json.loads(line) for line in calls.read_text().splitlines()]
+        if calls.exists()
+        else []
+    )
+    assert all(call["FilePath"] != "docker" for call in recorded)
+    assert all("-xzf" not in call["Args"] for call in recorded)
+    assert str(production_data) not in json.dumps(recorded)
+    assert marker.read_text(encoding="utf-8") == "unchanged"
+    assert not (backups / ".drills").exists()
