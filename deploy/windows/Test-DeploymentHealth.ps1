@@ -10,19 +10,32 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
+$trustedRepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$trustedFallbackStateRoot = Join-Path $trustedRepositoryRoot 'deploy-state'
 
-function Get-SafeFallbackStateRoot {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$RequestedStateRoot
-    )
+function Write-TrustedFallbackTelemetry {
+    param([Parameter(Mandatory)][string]$Category)
 
-    $basePath = [IO.Path]::GetFullPath($Root)
-    if ([IO.Path]::IsPathRooted($RequestedStateRoot)) {
-        return [IO.Path]::GetFullPath($RequestedStateRoot)
-    }
-    return [IO.Path]::GetFullPath((Join-Path $basePath $RequestedStateRoot))
+    $message = 'Deployment operation failed during initialization.'
+    try {
+        New-Item -ItemType Directory -Force -Path $trustedFallbackStateRoot | Out-Null
+        $timestamp = (Get-Date).ToUniversalTime().ToString('o')
+        Add-Content -LiteralPath (Join-Path $trustedFallbackStateRoot 'operations.log') -Value "$timestamp [ERROR] ($Category) $message" -Encoding UTF8
+        $payload = [ordered]@{
+            status = 'failed'
+            category = $Category
+            detail = $message
+            checked_at = $timestamp
+        } | ConvertTo-Json
+        [IO.File]::WriteAllText(
+            (Join-Path $trustedFallbackStateRoot 'status.json'),
+            $payload,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+    } catch {}
+    try {
+        Write-EventLog -LogName Application -Source 'Python Self Agent' -EntryType Error -EventId 1001 -Message $message
+    } catch {}
 }
 
 function Get-PreviousHealthStatus {
@@ -73,12 +86,16 @@ function Invoke-DeploymentHealthChecks {
     return Test-DeploymentHttp -Config $Config
 }
 
-$operationsStateRoot = Get-SafeFallbackStateRoot -Root $RepositoryRoot -RequestedStateRoot $StateRoot
+$modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'
+$moduleAvailable = $false
+$operationsStateRoot = $trustedFallbackStateRoot
 $config = $null
 $previousStatus = $null
 $recoveryAttempted = $false
 
 try {
+    Import-Module $modulePath -Force
+    $moduleAvailable = $true
     $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot
     $operationsStateRoot = $config.StateRoot
     $previousStatus = Get-PreviousHealthStatus -OperationsStateRoot $operationsStateRoot
@@ -119,14 +136,18 @@ try {
         Send-OperationsNotification $operationsStateRoot 'health-recovered' 'Deployment health recovered' 'Docker, Compose, and HTTP health checks are passing.' | Out-Null
     }
 } catch {
-    Write-OperationsLog $operationsStateRoot 'health' $_.Exception.Message 'ERROR'
-    Write-OperationsStatus $operationsStateRoot @{
-        status = 'failed'
-        category = 'health'
-        detail = $_.Exception.Message
-        checked_at = (Get-Date).ToUniversalTime().ToString('o')
-        recovery_attempted = $recoveryAttempted
+    if ($moduleAvailable -and $null -ne $config) {
+        Write-OperationsLog $operationsStateRoot 'health' $_.Exception.Message 'ERROR'
+        Write-OperationsStatus $operationsStateRoot @{
+            status = 'failed'
+            category = 'health'
+            detail = $_.Exception.Message
+            checked_at = (Get-Date).ToUniversalTime().ToString('o')
+            recovery_attempted = $recoveryAttempted
+        }
+        Send-OperationsNotification $operationsStateRoot 'health' 'Deployment health check failed' $_.Exception.Message | Out-Null
+    } else {
+        Write-TrustedFallbackTelemetry -Category 'health'
     }
-    Send-OperationsNotification $operationsStateRoot 'health' 'Deployment health check failed' $_.Exception.Message | Out-Null
     throw
 }

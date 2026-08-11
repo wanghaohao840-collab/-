@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import time
+
+import pytest
 
 
 ROOT = Path(__file__).parents[2]
@@ -12,7 +16,9 @@ START = ROOT / "deploy" / "windows" / "Start-Deployment.ps1"
 HEALTH = ROOT / "deploy" / "windows" / "Test-DeploymentHealth.ps1"
 
 
-def run_ps(script: str, *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+def run_ps(
+    script: str, *, timeout: float = 60, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         cwd=ROOT,
@@ -21,6 +27,7 @@ def run_ps(script: str, *, timeout: float = 60) -> subprocess.CompletedProcess[s
         capture_output=True,
         check=False,
         timeout=timeout,
+        env=env,
     )
 
 
@@ -30,6 +37,17 @@ def ps_quote(path: Path) -> str:
 
 def import_module() -> str:
     return f"Import-Module '{ps_quote(MODULE)}' -Force; "
+
+
+@pytest.fixture
+def trusted_fallback_state():
+    state = ROOT / "deploy-state"
+    if state.exists():
+        pytest.skip("trusted fallback state exists and must not be disturbed")
+    try:
+        yield state
+    finally:
+        shutil.rmtree(state, ignore_errors=True)
 
 
 def test_common_module_redacts_named_secrets_and_url_credentials():
@@ -368,7 +386,9 @@ def test_health_first_run_uses_loopback_and_preserves_configured_port(
     assert status["category"] == "health"
 
 
-def test_scripts_record_missing_env_failures_without_leaking_secret(tmp_path: Path):
+def test_scripts_record_missing_env_failures_without_leaking_secret(
+    tmp_path: Path, trusted_fallback_state: Path
+):
     repository = tmp_path / "repository"
     repository.mkdir()
     (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
@@ -385,15 +405,20 @@ def test_scripts_record_missing_env_failures_without_leaking_secret(tmp_path: Pa
             + f"-StateRoot '{ps_quote(state)}' "
             + "} catch { $_.Exception.Message }; "
             + "if (-not (Test-Path (Join-Path '"
-            + ps_quote(state)
+            + ps_quote(trusted_fallback_state)
             + "' 'status.json'))) { exit 31 }"
         )
 
         output = result.stdout + result.stderr
         assert result.returncode == 0, output
         assert "must-not-leak" not in output
-        status_text = (state / "status.json").read_text(encoding="utf-8-sig")
-        log_text = (state / "operations.log").read_text(encoding="utf-8-sig")
+        assert not state.exists()
+        status_text = (trusted_fallback_state / "status.json").read_text(
+            encoding="utf-8-sig"
+        )
+        log_text = (trusted_fallback_state / "operations.log").read_text(
+            encoding="utf-8-sig"
+        )
         assert "must-not-leak" not in status_text + log_text
         assert json.loads(status_text)["status"] == "failed"
 
@@ -439,3 +464,111 @@ def test_health_reruns_checks_once_when_compose_recovery_command_fails(
     assert "Compose recovery command failed" in (state / "operations.log").read_text(
         encoding="utf-8-sig"
     )
+
+
+def test_rejected_overlapping_state_root_uses_trusted_fallback_without_secret(
+    tmp_path: Path, trusted_fallback_state: Path
+):
+    repository = tmp_path / "caller-repository"
+    repository.mkdir()
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repository / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\nLLM_API_KEY=must-not-leak\n", encoding="utf-8"
+    )
+    rejected_state = repository / "data"
+
+    for script in (START, HEALTH):
+        result = run_ps(
+            "try { "
+            + f"& '{ps_quote(script)}' -RepositoryRoot '{ps_quote(repository)}' "
+            + f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(rejected_state)}' "
+            + "} catch { }; exit 0"
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not rejected_state.exists()
+        status_text = (trusted_fallback_state / "status.json").read_text(
+            encoding="utf-8-sig"
+        )
+        log_text = (trusted_fallback_state / "operations.log").read_text(
+            encoding="utf-8-sig"
+        )
+        assert json.loads(status_text)["status"] == "failed"
+        assert "must-not-leak" not in result.stdout + result.stderr + status_text + log_text
+
+
+def test_module_import_failure_uses_the_script_repository_fallback(tmp_path: Path):
+    repository = tmp_path / "script-repository"
+    windows_dir = repository / "deploy" / "windows"
+    windows_dir.mkdir(parents=True)
+    rejected_state = tmp_path / "caller-state"
+
+    for script in (START, HEALTH):
+        copied_script = windows_dir / script.name
+        shutil.copyfile(script, copied_script)
+        result = run_ps(
+            "try { "
+            + f"& '{ps_quote(copied_script)}' "
+            + f"-RepositoryRoot '{ps_quote(tmp_path / 'caller-repository')}' "
+            + f"-EnvFile '{ps_quote(tmp_path / 'missing.env')}' "
+            + f"-StateRoot '{ps_quote(rejected_state)}' "
+            + "} catch { }; exit 0"
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not rejected_state.exists()
+        fallback = repository / "deploy-state"
+        status_text = (fallback / "status.json").read_text(encoding="utf-8-sig")
+        log_text = (fallback / "operations.log").read_text(encoding="utf-8-sig")
+        assert json.loads(status_text)["status"] == "failed"
+        assert "caller-state" not in status_text + log_text
+
+
+def test_startup_global_deadline_stops_a_hanging_docker_command(
+    tmp_path: Path, trusted_fallback_state: Path
+):
+    repository = tmp_path / "valid-repository"
+    repository.mkdir()
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repository / "deploy.env"
+    env_file.write_text("DEPLOY_DATA_ROOT=data\n", encoding="utf-8")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    child_pid = tmp_path / "hanging-docker.pid"
+    fake_docker = fake_bin / "docker.cmd"
+    fake_docker.write_text(
+        "@echo off\r\n"
+        + "powershell.exe -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath '"
+        + ps_quote(child_pid)
+        + "'; Start-Sleep -Seconds 60\"\r\n",
+        encoding="utf-8",
+    )
+
+    started = time.monotonic()
+    try:
+        result = run_ps(
+            "$env:PATH = '"
+            + ps_quote(fake_bin)
+            + ";' + $env:PATH; "
+            + f"& '{ps_quote(START)}' -RepositoryRoot '{ps_quote(repository)}' "
+            + f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(tmp_path / 'caller-state')}' "
+            + "-TimeoutSeconds 30; exit 0",
+            timeout=45,
+        )
+    finally:
+        if child_pid.exists():
+            subprocess.run(
+                ["taskkill", "/PID", child_pid.read_text().strip(), "/T", "/F"],
+                capture_output=True,
+                check=False,
+            )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0, result.stderr
+    assert 25 <= elapsed < 40
+    status = json.loads(
+        (trusted_fallback_state / "status.json").read_text(encoding="utf-8-sig")
+    )
+    assert status["status"] == "failed"
+    assert status["category"] == "startup"
