@@ -103,6 +103,93 @@ def test_deep_command_sets_container_project_root(tmp_path: Path):
     ]
 
 
+def test_compose_command_accepts_isolated_project_name():
+    command = smoke_test._compose_command(
+        Path("drill.env"), "assistant-drill-123"
+    )
+
+    assert command[:4] == [
+        "docker",
+        "compose",
+        "--project-name",
+        "assistant-drill-123",
+    ]
+    assert command[-2:] == ["--env-file", "drill.env"]
+
+
+def test_deep_command_propagates_isolated_project_name(tmp_path: Path):
+    command = _deep_command(tmp_path / "drill.env", "assistant-drill-123")
+
+    assert command[:4] == [
+        "docker",
+        "compose",
+        "--project-name",
+        "assistant-drill-123",
+    ]
+
+
+@pytest.mark.parametrize(
+    "project_name",
+    ["UPPER", "-leading", "has.dot", "has space", "a" * 64],
+)
+def test_project_name_rejects_values_outside_exact_contract(project_name: str):
+    with pytest.raises(SystemExit):
+        smoke_test._parse_args(["--project-name", project_name])
+
+
+def test_host_smoke_propagates_project_name_to_every_compose_call(
+    tmp_path: Path, monkeypatch
+):
+    env_file = tmp_path / "drill.env"
+    env_file.write_text(
+        "APP_BIND_ADDRESS=127.0.0.1\nAPP_PORT=17860\n", encoding="utf-8"
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command, label):
+        commands.append(command)
+        if "ps" in command:
+            status = json.dumps(
+                [
+                    {"Service": "app", "State": "running", "Health": "healthy"},
+                    {
+                        "Service": "qdrant",
+                        "State": "running",
+                        "Health": "healthy",
+                    },
+                ]
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=status, stderr="")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="/app/hello_agents/__init__.py\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(smoke_test, "_run_command", fake_run)
+    monkeypatch.setattr(smoke_test, "_check_app_http", lambda *_: None)
+
+    assert (
+        smoke_test.main(
+            [
+                "--env-file",
+                str(env_file),
+                "--project-name",
+                "assistant-drill-123",
+                "--deep",
+            ]
+        )
+        == 0
+    )
+    assert len(commands) == 3
+    assert all(
+        command[:4]
+        == ["docker", "compose", "--project-name", "assistant-drill-123"]
+        for command in commands
+    )
+
+
 def test_search_marker_check_ignores_displayed_filename():
     marker = "Deployment smoke marker unique-123"
     search = f"来源: 文件: smoke-generated-id.txt\n内容摘要:\n{marker}"

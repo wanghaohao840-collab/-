@@ -15,6 +15,7 @@ WINDOWS = ROOT / "deploy" / "windows"
 COMMON = WINDOWS / "Backup.Common.psm1"
 BACKUP = WINDOWS / "Backup-Deployment.ps1"
 RESTORE = WINDOWS / "Restore-Deployment.ps1"
+DRILL = WINDOWS / "Invoke-RestoreDrill.ps1"
 
 
 def run_ps(script: str, *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
@@ -55,6 +56,65 @@ def write_checksum(archive: Path) -> None:
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     (archive.parent / f"{archive.name}.sha256").write_text(
         f"{digest}  {archive.name}\n", encoding="ascii"
+    )
+
+
+def make_drill_backup(backup_root: Path) -> Path:
+    archive = backup_root / "daily" / "assistant-20260811T030000Z.tar.gz"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"synthetic drill archive")
+    write_checksum(archive)
+    (archive.parent / f"{archive.name}.meta").write_text(
+        '{"kind":"daily","format":1}', encoding="utf-8"
+    )
+    return archive
+
+
+def write_drill_harness(
+    path: Path,
+    *,
+    repository: Path,
+    env_file: Path,
+    state: Path,
+    backups: Path,
+    calls: Path,
+    captured_env: Path,
+    fail_smoke: bool,
+    secret: str,
+) -> None:
+    failure_line = (
+        f"    throw 'forced smoke failure {secret}'\n" if fail_smoke else "    return\n"
+    )
+    path.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "$runner = {\n"
+        "  param([string]$FilePath, [string[]]$ArgumentList)\n"
+        f"  [PSCustomObject]@{{ FilePath=$FilePath; Args=@($ArgumentList) }} | ConvertTo-Json -Compress | Add-Content -LiteralPath '{ps_quote(calls)}'\n"
+        "  if ($FilePath -eq 'tar.exe') {\n"
+        "    if ($ArgumentList -contains '-tzf') { './app/'; './qdrant/'; return }\n"
+        "    if ($ArgumentList -contains '-tvzf') { 'drwxr-xr-x user/group 0 2026-01-01 00:00 ./app/'; 'drwxr-xr-x user/group 0 2026-01-01 00:00 ./qdrant/'; return }\n"
+        "    if ($ArgumentList -contains '-xzf') {\n"
+        "      $target = $ArgumentList[[Array]::IndexOf($ArgumentList, '-C') + 1]\n"
+        "      New-Item -ItemType Directory -Path (Join-Path $target 'app') -Force | Out-Null\n"
+        "      New-Item -ItemType Directory -Path (Join-Path $target 'qdrant') -Force | Out-Null\n"
+        "      Set-Content -LiteralPath (Join-Path $target 'app\\restored.txt') -Value restored\n"
+        "      return\n"
+        "    }\n"
+        "  }\n"
+        "  if ($FilePath -eq 'docker') {\n"
+        "    if ($ArgumentList -contains 'ps') { 'app|running|healthy'; 'qdrant|running|healthy' }\n"
+        "    return\n"
+        "  }\n"
+        "  if ($FilePath -like '*python.exe') {\n"
+        "    $envPath = $ArgumentList[[Array]::IndexOf($ArgumentList, '--env-file') + 1]\n"
+        "    if (-not (Get-Acl -LiteralPath $envPath).AreAccessRulesProtected) { throw 'drill env ACL still inherits access' }\n"
+        f"    Get-Content -LiteralPath $envPath -Raw | Set-Content -LiteralPath '{ps_quote(captured_env)}' -NoNewline\n"
+        + failure_line
+        + "  }\n"
+        "  throw \"unexpected external command: $FilePath\"\n"
+        "}\n"
+        f"& '{ps_quote(DRILL)}' -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' -BackupRoot '{ps_quote(backups)}' -ExternalInvoker $runner -HealthTimeoutSeconds 5\n",
+        encoding="utf-8",
     )
 
 
@@ -451,3 +511,142 @@ def test_restore_rejects_checksum_mismatch_before_external_commands(tmp_path: Pa
     assert result.returncode != 0
     assert "checksum mismatch" in (result.stdout + result.stderr).lower()
     assert not calls.exists()
+
+
+def test_restore_drill_isolates_compose_data_and_port_then_cleans_success(
+    tmp_path: Path,
+):
+    repository, production_data, env_file = make_repository(tmp_path)
+    secret = "configured-secret-value"
+    env_file.write_text(
+        f"DEPLOY_DATA_ROOT={production_data}\n"
+        "APP_BIND_ADDRESS=0.0.0.0\n"
+        "APP_PORT=7860\n"
+        f"LLM_API_KEY={secret}\n",
+        encoding="utf-8",
+    )
+    backups = tmp_path / "backups"
+    selected_archive = make_drill_backup(backups)
+    (backups / "daily" / "assistant-20260812T030000Z.tar.gz").write_bytes(
+        b"newer but incomplete"
+    )
+    state = tmp_path / "state"
+    calls = tmp_path / "calls.jsonl"
+    captured_env = tmp_path / "captured.env"
+    harness = tmp_path / "drill-success.ps1"
+    write_drill_harness(
+        harness,
+        repository=repository,
+        env_file=env_file,
+        state=state,
+        backups=backups,
+        calls=calls,
+        captured_env=captured_env,
+        fail_smoke=False,
+        secret=secret,
+    )
+
+    result = run_ps(f"& '{ps_quote(harness)}'", timeout=90)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    docker = [call["Args"] for call in recorded if call["FilePath"] == "docker"]
+    up = next(args for args in docker if "up" in args)
+    down = next(args for args in docker if "down" in args)
+    project = up[up.index("--project-name") + 1]
+    temp_env = Path(up[up.index("--env-file") + 1])
+    assert project.startswith("assistant-drill-")
+    assert project != repository.name.lower()
+    assert down[down.index("--project-name") + 1] == project
+    assert "--volumes" not in down
+    assert not temp_env.exists()
+    tar_lists = [
+        call["Args"]
+        for call in recorded
+        if call["FilePath"] == "tar.exe" and "-tzf" in call["Args"]
+    ]
+    assert len(tar_lists) == 1
+    assert tar_lists[0][-1] == str(selected_archive)
+
+    smoke = next(call for call in recorded if call["FilePath"].endswith("python.exe"))
+    assert smoke["Args"][smoke["Args"].index("--project-name") + 1] == project
+
+    drill_env = captured_env.read_text(encoding="utf-8-sig")
+    assert "APP_BIND_ADDRESS=127.0.0.1" in drill_env
+    port_line = next(line for line in drill_env.splitlines() if line.startswith("APP_PORT="))
+    assert int(port_line.split("=", 1)[1]) != 7860
+    assert (
+        "DEPLOY_DATA_ROOT=" + str(backups).replace("\\", "/") + "/.drills/"
+        in drill_env
+    )
+    assert "DEPLOY_ENV_FILE=" + str(temp_env).replace("\\", "/") in drill_env
+    assert str(production_data).replace("\\", "/") not in drill_env
+    assert str(production_data) not in json.dumps(recorded)
+
+    drills_root = backups / ".drills"
+    assert not list(drills_root.iterdir())
+    reports = list((state / "reports").glob("restore-drill-*.json"))
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text(encoding="utf-8-sig"))
+    assert report["status"] == "succeeded"
+
+
+def test_restore_drill_failure_retains_data_but_removes_env_and_redacts_report(
+    tmp_path: Path,
+):
+    repository, production_data, env_file = make_repository(tmp_path)
+    secret = "configured-secret-value"
+    env_file.write_text(
+        f"DEPLOY_DATA_ROOT={production_data}\nLLM_API_KEY={secret}\n",
+        encoding="utf-8",
+    )
+    backups = tmp_path / "backups"
+    make_drill_backup(backups)
+    state = tmp_path / "state"
+    calls = tmp_path / "calls.jsonl"
+    captured_env = tmp_path / "captured.env"
+    harness = tmp_path / "drill-failure.ps1"
+    write_drill_harness(
+        harness,
+        repository=repository,
+        env_file=env_file,
+        state=state,
+        backups=backups,
+        calls=calls,
+        captured_env=captured_env,
+        fail_smoke=True,
+        secret=secret,
+    )
+
+    result = run_ps(f"& '{ps_quote(harness)}'", timeout=90)
+
+    assert result.returncode != 0
+    assert secret not in result.stdout + result.stderr
+    recorded = [json.loads(line) for line in calls.read_text().splitlines()]
+    docker = [call["Args"] for call in recorded if call["FilePath"] == "docker"]
+    up = next(args for args in docker if "up" in args)
+    down = next(args for args in docker if "down" in args)
+    temp_env = Path(up[up.index("--env-file") + 1])
+    assert "--volumes" not in down
+    assert not temp_env.exists()
+
+    retained = list((backups / ".drills").iterdir())
+    assert len(retained) == 1
+    assert (retained[0] / "data" / "app" / "restored.txt").is_file()
+    assert not list(retained[0].glob("*.env"))
+    reports = list((state / "reports").glob("restore-drill-*.json"))
+    assert len(reports) == 1
+    report_text = reports[0].read_text(encoding="utf-8-sig")
+    assert secret not in report_text
+    report = json.loads(report_text)
+    assert report["status"] == "failed"
+    assert report["retained_data"] == str(retained[0] / "data")
+
+
+def test_restore_drill_has_powershell_51_parser_contract():
+    result = run_ps(
+        f"$errors = $null; [void][Management.Automation.Language.Parser]::ParseFile('{ps_quote(DRILL)}', [ref]$null, [ref]$errors); "
+        "if ($errors.Count -gt 0) { $errors | ForEach-Object { $_.Message }; exit 1 }"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
