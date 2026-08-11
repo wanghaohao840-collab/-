@@ -31,20 +31,77 @@ function Assert-PrivateInternetProfiles {
     }
 }
 
-function Get-OperationsInteractiveUserName {
-    $interactiveUsers = @(
-        (Get-CimInstance Win32_ComputerSystem).UserName |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    )
-    if ($interactiveUsers.Count -ne 1) {
-        throw 'Exactly one interactive domain-qualified user must be available before installation.'
+function Get-OperationsWtsNativeMethods {
+    if ($null -eq ('PythonSelfAgent.Operations.WtsNativeMethods' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace PythonSelfAgent.Operations
+{
+    public enum WtsInfoClass
+    {
+        WTSUserName = 5,
+        WTSDomainName = 7
     }
 
-    $interactiveUser = [string]$interactiveUsers[0]
-    if ($interactiveUser -notmatch '^[^\\]+\\[^\\]+$') {
-        throw 'The interactive user must be domain-qualified as DOMAIN\\User.'
+    public static class WtsNativeMethods
+    {
+        [DllImport("Wtsapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool WTSQuerySessionInformation(
+            IntPtr hServer,
+            int sessionId,
+            WtsInfoClass wtsInfoClass,
+            out IntPtr ppBuffer,
+            out int pBytesReturned);
+
+        [DllImport("Wtsapi32.dll")]
+        public static extern void WTSFreeMemory(IntPtr pMemory);
     }
-    return $interactiveUser
+}
+'@
+    }
+    return ('PythonSelfAgent.Operations.WtsNativeMethods' -as [type])
+}
+
+function Get-WtsSessionValue {
+    param(
+        [Parameter(Mandatory)][int]$SessionId,
+        [Parameter(Mandatory)][int]$InfoClass
+    )
+
+    $nativeMethods = Get-OperationsWtsNativeMethods
+    $buffer = [IntPtr]::Zero
+    $bytesReturned = 0
+    try {
+        if (-not $nativeMethods::WTSQuerySessionInformation(
+            [IntPtr]::Zero,
+            $SessionId,
+            $InfoClass,
+            [ref]$buffer,
+            [ref]$bytesReturned
+        )) {
+            throw 'Unable to resolve the user attached to the installer process session.'
+        }
+        if ($buffer -eq [IntPtr]::Zero -or $bytesReturned -lt 2) {
+            return $null
+        }
+        return [Runtime.InteropServices.Marshal]::PtrToStringUni($buffer)
+    } finally {
+        if ($buffer -ne [IntPtr]::Zero) {
+            $nativeMethods::WTSFreeMemory($buffer)
+        }
+    }
+}
+
+function Get-OperationsInteractiveUserName {
+    $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $userName = Get-WtsSessionValue -SessionId $sessionId -InfoClass 5
+    $domainName = Get-WtsSessionValue -SessionId $sessionId -InfoClass 7
+    if ([string]::IsNullOrWhiteSpace($domainName) -or [string]::IsNullOrWhiteSpace($userName)) {
+        throw 'The installer process session must have one nonempty domain and user name.'
+    }
+    return ('{0}\{1}' -f $domainName.Trim(), $userName.Trim())
 }
 
 function Test-ListenerAddressCompatibleWithBinding {

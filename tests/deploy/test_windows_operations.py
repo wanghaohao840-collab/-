@@ -612,12 +612,15 @@ def test_operations_installer_has_private_intranet_and_exact_task_contracts():
     assert '"${currentUser}:(M)"' in source
     assert "'SYSTEM:(F)'" in source
     assert "'Administrators:(F)'" in source
-    assert "Get-CimInstance Win32_ComputerSystem" in source
+    assert "[Diagnostics.Process]::GetCurrentProcess().SessionId" in source
+    assert source.count("WTSQuerySessionInformation") >= 2
+    assert "WTSFreeMemory" in source
     assert "$monthlyTrigger.StartBoundary" in source
     assert "-Hour 4 -Minute 0" in source
     assert source.count("Settings = New-OperationsTaskSettings -WakeToRun $true") == 2
     assert "$env:USERDOMAIN" not in source
     assert "$env:USERNAME" not in source
+    assert "Win32_ComputerSystem" not in source
 
 
 def test_operations_installer_preflights_before_system_mutations():
@@ -727,21 +730,27 @@ def test_installer_rejects_absent_interactive_identity():
     result = run_ps(
         "& { "
         + prelude
-        + "; function Get-CimInstance { [PSCustomObject]@{ UserName=$null } }; "
+        + "; function Get-WtsSessionValue { param($SessionId, $InfoClass) return $null }; "
         + "try { Get-OperationsInteractiveUserName | Out-Null; exit 65 } catch { exit 0 } }"
     )
 
     assert result.returncode == 0, result.stderr
 
 
-def test_installer_uses_one_domain_qualified_interactive_identity():
+def test_installer_uses_current_process_session_for_wts_identity():
     prelude = installer_prelude()
     result = run_ps(
         "& { "
         + prelude
-        + "; function Get-CimInstance { [PSCustomObject]@{ UserName='WORKSTATION\\alice' } }; "
+        + "; $script:calls = @(); "
+        + "function Get-WtsSessionValue { param($SessionId, $InfoClass) "
+        + "$script:calls += \"$SessionId/$InfoClass\"; "
+        + "if ($InfoClass -eq 5) { return 'alice' }; return 'WORKSTATION' }; "
+        + "$expectedSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId; "
         + "$identity = Get-OperationsInteractiveUserName; "
-        + "if ($identity -ne 'WORKSTATION\\alice') { exit 63 } }"
+        + "if ($identity -ne 'WORKSTATION\\alice' -or "
+        + "$script:calls -notcontains \"$expectedSessionId/5\" -or "
+        + "$script:calls -notcontains \"$expectedSessionId/7\") { exit 63 } }"
     )
 
     assert result.returncode == 0, result.stderr
