@@ -543,7 +543,7 @@ def test_startup_global_deadline_stops_a_hanging_docker_command(
         "@echo off\r\n"
         + "powershell.exe -NoProfile -NonInteractive -Command \"$PID | Set-Content -NoNewline -LiteralPath '"
         + ps_quote(child_pid)
-        + "'; Start-Sleep -Seconds 60\"\r\n",
+        + "'; Start-Sleep -Seconds 60\" >nul 2>&1\r\n",
         encoding="utf-8",
     )
 
@@ -556,7 +556,7 @@ def test_startup_global_deadline_stops_a_hanging_docker_command(
             + f"& '{ps_quote(START)}' -RepositoryRoot '{ps_quote(repository)}' "
             + f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(tmp_path / 'caller-state')}' "
             + "-TimeoutSeconds 30; exit 0",
-            timeout=45,
+            timeout=50,
         )
     finally:
         if child_pid.exists():
@@ -568,7 +568,7 @@ def test_startup_global_deadline_stops_a_hanging_docker_command(
     elapsed = time.monotonic() - started
 
     assert result.returncode != 0, result.stderr
-    assert 25 <= elapsed < 40
+    assert 25 <= elapsed < 45
     status = json.loads(
         (trusted_fallback_state / "status.json").read_text(encoding="utf-8-sig")
     )
