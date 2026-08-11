@@ -77,6 +77,26 @@ function Test-UpdateHealth {
     return $healthy.Count -eq 2 -and $healthy['app'] -and $healthy['qdrant']
 }
 
+function Get-RunningUpdateServices {
+    param([Parameter(Mandatory)]$Config)
+    $output = @(Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
+        Get-ComposeArguments -Config $Config -Command @(
+            'ps', '--format', '{{.Service}}|{{.State}}|{{.Health}}', 'app', 'qdrant'
+        )
+    ))
+    $services = @()
+    foreach ($line in $output) {
+        $parts = ([string]$line) -split '\|', 3
+        if ($parts.Count -eq 3 -and
+            @('app', 'qdrant') -contains $parts[0] -and
+            $parts[1] -eq 'running' -and
+            $services -notcontains $parts[0]) {
+            $services += $parts[0]
+        }
+    }
+    return @($services)
+}
+
 function Wait-ForUpdateHealth {
     param([Parameter(Mandatory)]$Config)
     return Wait-Until -TimeoutSeconds $HealthTimeoutSeconds -IntervalSeconds 1 -Condition {
@@ -172,7 +192,7 @@ $rollbackImages = [ordered]@{
     qdrant = "python_self_agent-qdrant:rollback-$stamp"
 }
 $rollbackTagsReady = $false
-$candidateUpStarted = $false
+$candidateRollbackRequired = $false
 $rollbackSucceeded = $null
 $reportPath = $null
 
@@ -242,10 +262,10 @@ try {
     ) | Out-Null
 
     $stage = 'candidate-up'
+    $candidateRollbackRequired = $true
     Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
         Get-ComposeArguments -Config $config -Command @('up', '-d', '--no-build', 'app', 'qdrant')
     ) | Out-Null
-    $candidateUpStarted = $true
 
     $stage = 'candidate-health'
     if (-not (Wait-ForUpdateHealth -Config $config)) {
@@ -284,6 +304,7 @@ try {
     $compensationErrors = @()
     $rollbackFailurePriority = $null
     $imagesRestored = $false
+    $runningServicesReady = $false
     $dataRestored = $false
 
     if ($rollbackTagsReady) {
@@ -301,7 +322,28 @@ try {
         }
     }
 
-    if ($candidateUpStarted -and $imagesRestored -and $null -ne $backupArchive) {
+    if ($candidateRollbackRequired -and $imagesRestored) {
+        $stage = 'rollback-running-services'
+        try {
+            $runningServices = @(Get-RunningUpdateServices -Config $config)
+            if ($runningServices -notcontains 'app' -or $runningServices -notcontains 'qdrant') {
+                $stage = 'rollback-start-services'
+                Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
+                    Get-ComposeArguments -Config $config -Command @('start', 'app', 'qdrant')
+                ) | Out-Null
+                $runningServices = @(Get-RunningUpdateServices -Config $config)
+            }
+            if ($runningServices -notcontains 'app' -or $runningServices -notcontains 'qdrant') {
+                throw 'Both app and qdrant must be running before data restore'
+            }
+            $runningServicesReady = $true
+        } catch {
+            $rollbackFailurePriority = 'high'
+            $compensationErrors += Protect-LogText "establish running services: $($_.Exception.Message)"
+        }
+    }
+
+    if ($candidateRollbackRequired -and $imagesRestored -and $runningServicesReady -and $null -ne $backupArchive) {
         $stage = 'rollback-data'
         try {
             Invoke-UpdateScript -ScriptPath (Join-Path $PSScriptRoot 'Restore-Deployment.ps1') -Parameters ([ordered]@{
@@ -320,7 +362,7 @@ try {
 
     }
 
-    if ($candidateUpStarted -and $imagesRestored -and $dataRestored) {
+    if ($candidateRollbackRequired -and $imagesRestored -and $runningServicesReady -and $dataRestored) {
         $stage = 'rollback-recreate'
         try {
             Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
@@ -338,9 +380,9 @@ try {
             $compensationErrors += Protect-LogText "verify restored deployment: $($_.Exception.Message)"
         }
         $rollbackSucceeded = ($compensationErrors.Count -eq 0)
-    } elseif (-not $candidateUpStarted -and $rollbackTagsReady) {
+    } elseif (-not $candidateRollbackRequired -and $rollbackTagsReady) {
         $rollbackSucceeded = ($compensationErrors.Count -eq 0)
-    } elseif ($candidateUpStarted) {
+    } elseif ($candidateRollbackRequired) {
         $rollbackSucceeded = $false
     }
 

@@ -69,14 +69,18 @@ def write_harness(
         "$global:candidateUpFailed = $false\n"
         "$global:appRunning = $true\n"
         "$global:qdrantRunning = $true\n"
+        "$global:dataMutated = $false\n"
         "$runner = {\n"
         "  param([string]$FilePath, [string[]]$ArgumentList)\n"
-        "  [PSCustomObject]@{ FilePath=$FilePath; Args=@($ArgumentList); AppRunning=$global:appRunning; QdrantRunning=$global:qdrantRunning } | ConvertTo-Json -Compress | Add-Content -LiteralPath $global:releaseCalls\n"
+        "  [PSCustomObject]@{ FilePath=$FilePath; Args=@($ArgumentList); AppRunning=$global:appRunning; QdrantRunning=$global:qdrantRunning; DataMutated=$global:dataMutated } | ConvertTo-Json -Compress | Add-Content -LiteralPath $global:releaseCalls\n"
         "  $joined = @($ArgumentList) -join ' '\n"
         "  if ($FilePath -eq 'git') { ' M deploy/.env'; return }\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'ps') {\n"
         "    if ($global:releaseFailure -eq 'baseline') { 'app|running|unhealthy'; 'qdrant|running|healthy' }\n"
-        "    else { 'app|running|healthy'; 'qdrant|running|healthy' }; return\n"
+        "    else {\n"
+        "      if ($global:appRunning) { 'app|running|healthy' } else { 'app|exited|' }\n"
+        "      if ($global:qdrantRunning) { 'qdrant|running|healthy' } else { 'qdrant|exited|' }\n"
+        "    }; return\n"
         "  }\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'inspect') {\n"
         "    if ($ArgumentList[-1] -eq 'python_self_agent-app:local') { 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }\n"
@@ -87,12 +91,13 @@ def write_harness(
         "  if ($joined -match 'Restore-Deployment\\.ps1') {\n"
         "    if (-not $global:appRunning -or -not $global:qdrantRunning) { throw 'restore invoked without running services' }\n"
         f"    if ($global:releaseFailure -eq 'restore') {{ throw 'LLM_API_KEY={SECRET} forced restore failure' }}\n"
-        "    $global:appRunning = $true; $global:qdrantRunning = $true; return\n"
+        "    $global:appRunning = $true; $global:qdrantRunning = $true; $global:dataMutated = $false; return\n"
         "  }\n"
         f"  if ($global:releaseFailure -eq 'scan' -and $FilePath -eq 'docker' -and $ArgumentList -contains 'scout') {{ throw 'LLM_API_KEY={SECRET} forced scan failure' }}\n"
-        f"  if ($global:releaseFailure -eq 'candidate-up' -and $FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and -not $global:candidateUpFailed) {{ $global:candidateUpFailed=$true; throw 'LLM_API_KEY={SECRET} forced candidate up failure' }}\n"
+        f"  if (@('candidate-up','candidate-start') -contains $global:releaseFailure -and $FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and -not $global:candidateUpFailed) {{ $global:candidateUpFailed=$true; $global:appRunning=$true; $global:qdrantRunning=$false; $global:dataMutated=$true; throw 'LLM_API_KEY={SECRET} forced candidate up failure' }}\n"
         f"  if (@('deep-smoke','retag-app','retag-qdrant','restore') -contains $global:releaseFailure -and $FilePath -like '*python.exe' -and $ArgumentList -contains '--deep') {{ throw 'LLM_API_KEY={SECRET} forced deep smoke failure' }}\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'stop') { $global:appRunning = $false; $global:qdrantRunning = $false; return }\n"
+        f"  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'start') {{ if ($global:releaseFailure -eq 'candidate-start') {{ throw 'LLM_API_KEY={SECRET} forced service recovery failure' }}; $global:appRunning = $true; $global:qdrantRunning = $true; return }}\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up') { $global:appRunning = $true; $global:qdrantRunning = $true; return }\n"
         "}\n"
         "try {\n"
@@ -232,28 +237,84 @@ def test_unhealthy_baseline_stops_before_any_mutation(tmp_path: Path):
     assert "10GB" in source
 
 
-def test_candidate_up_failure_uses_image_only_rollback(tmp_path: Path):
-    result, calls, state, _ = run_update(tmp_path, "candidate-up")
+def test_partial_candidate_up_failure_runs_conservative_full_rollback(tmp_path: Path):
+    result, calls, state, archive = run_update(tmp_path, "candidate-up")
 
     assert result.returncode != 0
     items = actions(calls)
     candidate = find_action(items, "docker compose", "up", "-d", "--no-build")
-    assert sum("docker compose" in item and " up " in item for item in items) == 1
-    assert all("Restore-Deployment.ps1" not in item for item in items)
-    assert not any("docker compose" in item and " stop " in item for item in items)
-    retags = [
-        item
-        for item in items[candidate + 1 :]
-        if "docker image tag" in item and item.endswith(":local")
-    ]
-    assert len(retags) == 2
-    report = json.loads(
-        next((state / "reports").glob("update-*.json")).read_text(
-            encoding="utf-8-sig"
-        )
+    app_tag = find_action(
+        items,
+        "docker image tag",
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        APP_IMAGE,
+        start=candidate + 1,
     )
+    qdrant_tag = find_action(
+        items,
+        "docker image tag",
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        QDRANT_IMAGE,
+        start=app_tag + 1,
+    )
+    recover_running = find_action(
+        items, "docker compose", "start", "app", "qdrant", start=qdrant_tag + 1
+    )
+    restore = find_action(
+        items,
+        "Restore-Deployment.ps1",
+        "-Archive",
+        str(archive),
+        start=recover_running + 1,
+    )
+    recreate = find_action(
+        items,
+        "docker compose",
+        "up",
+        "-d",
+        "--no-build",
+        "--force-recreate",
+        start=restore + 1,
+    )
+    smoke = find_action(items, "deploy\\smoke_test.py", start=recreate + 1)
+    assert candidate < app_tag < qdrant_tag < recover_running < restore < recreate < smoke
+    assert calls[restore]["AppRunning"] is True
+    assert calls[restore]["QdrantRunning"] is True
+    assert calls[restore]["DataMutated"] is True
+    assert not any("docker compose" in item and " stop " in item for item in items)
+    assert "--deep" not in items[smoke]
+    report_text = next((state / "reports").glob("update-*.json")).read_text(
+        encoding="utf-8-sig"
+    )
+    assert SECRET not in report_text
+    report = json.loads(report_text)
     assert report["failure_stage"] == "candidate-up"
     assert report["rollback_succeeded"] is True
+
+
+def test_partial_candidate_service_recovery_failure_stops_before_restore(
+    tmp_path: Path,
+):
+    result, calls, state, _ = run_update(tmp_path, "candidate-start")
+
+    assert result.returncode != 0
+    items = actions(calls)
+    candidate = find_action(items, "docker compose", "up", "-d", "--no-build")
+    recover_running = find_action(
+        items, "docker compose", "start", "app", "qdrant", start=candidate + 1
+    )
+    assert all("Restore-Deployment.ps1" not in item for item in items[recover_running + 1 :])
+    assert not any(
+        "docker compose" in item and " up " in item
+        for item in items[recover_running + 1 :]
+    )
+    report_text = next((state / "reports").glob("update-*.json")).read_text(
+        encoding="utf-8-sig"
+    )
+    assert SECRET not in report_text
+    report = json.loads(report_text)
+    assert report["rollback_succeeded"] is False
+    assert report["rollback_failure_priority"] == "high"
 
 
 def test_deep_smoke_failure_retages_restores_then_force_recreates(tmp_path: Path):
@@ -293,6 +354,7 @@ def test_deep_smoke_failure_retages_restores_then_force_recreates(tmp_path: Path
     assert calls[restore]["AppRunning"] is True
     assert calls[restore]["QdrantRunning"] is True
     assert not any("docker compose" in item and " stop " in item for item in items)
+    assert not any("docker compose" in item and " start " in item for item in items)
     assert "--deep" not in items[smoke]
     report_text = next((state / "reports").glob("update-*.json")).read_text(
         encoding="utf-8-sig"
