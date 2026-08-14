@@ -9,6 +9,10 @@ backups/
 data/
 .runtime/
 .pytest_cache/
+.pytest-tmp-*/
+.pytest-*/
+.operations-test/
+.operations-test-*/
 __pycache__/
 *.py[cod]
 *.db
