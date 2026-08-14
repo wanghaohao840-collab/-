@@ -686,11 +686,15 @@ git commit -m "ci: verify hardened Docker deployment"
 ### Task 8: Validate, install, and exercise the complete operations package
 
 **Files:**
-- Modify only if test-discovered defects require surgical fixes in files from Tasks 1–7.
+- Modify: `deploy/windows/Install-Operations.ps1:107-155` only for the approved Docker Desktop wildcard-plus-loopback listener compatibility correction.
+- Test: `tests/deploy/test_windows_operations.py:1029-1080` for the synthetic ownership matrix and the existing installer prelude harness.
+- Modify other files only if a separate test-discovered defect is explicitly approved; do not fold unrelated refactoring into this correction.
 - Runtime writes outside Git: `D:\python_self_agent_backups`, Windows Task Scheduler, Windows Firewall, ACLs, and ignored `deploy-state`.
 
 **Interfaces:**
-- No new code interface; this task proves the approved completion criteria.
+- Preserve `Test-ListenerAddressCompatibleWithBinding -ListenerAddress <string> -HostIp <string> -> bool` and `Test-ComposePortListenerOwnership -Listeners <object[]> -PortBindings <object[]> -ProcessesById <hashtable> -> bool`.
+- Preserve `Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config <PSCustomObject>` as the boundary that requires exactly one Compose `app` container and obtains only that container's `7860/tcp` `PortBindings`.
+- No other new code interface; this task proves the approved completion criteria.
 
 - [ ] **Step 1: Run repository verification before system writes**
 
@@ -720,27 +724,385 @@ Expected: both commands exit 0. If a fixed Critical vulnerability exists, update
 
 Inspect `Get-NetConnectionProfile`. Because the current `TP-LINK_AEC0 2` profile is Public, stop and obtain the user's visible confirmation immediately before changing that trusted profile to Private. Perform the change only in an elevated PowerShell session, then re-read the exact profile and require `NetworkCategory = Private`.
 
-- [ ] **Step 4: Install idempotently as administrator**
+- [ ] **Step 4: Correct the approved Docker Desktop wildcard-plus-loopback listener defect with TDD**
 
-Run `Install-Operations.ps1` elevated twice. Verify the second run succeeds and there is exactly one of each task and one firewall rule. Inspect task principals/triggers/settings and firewall fields rather than trusting installer output.
+This correction implements design section 10.1.1 without changing the product exposure boundary. A Compose `HostIp` of empty string or `0.0.0.0` may cover loopback listeners only when the complete listener set also contains `0.0.0.0` or `::`, every listener PID resolves to an existing accepted forwarder (`com.docker.backend`, `docker-proxy`, or `wslrelay`), no PID is System PID 4, and `Assert-Tcp7860IsFreeOrOwnedByComposeApp` has already resolved exactly one `app` container and that container's TCP 7860 binding. Do not recognize Compose `HostIp='::'` in this correction; the current contract recognizes `::` only as a listener-side wildcard equivalent for an empty/IPv4-wildcard binding.
 
-- [ ] **Step 5: Exercise startup, health, notification, and backup**
+First add the acceptance and fail-closed cases beside the three existing listener tests in `tests/deploy/test_windows_operations.py`. The two parameterizations of the new acceptance test are the only expected red items; the loopback-only and mixed/non-forwarder tests already present must remain unchanged and green.
+
+```python
+@pytest.mark.parametrize(
+    ("wildcard_address", "loopback_address"),
+    [("0.0.0.0", "127.0.0.1"), ("::", "::1")],
+)
+def test_installer_listener_ownership_accepts_wildcard_and_loopback_forwarders(
+    wildcard_address: str, loopback_address: str
+):
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @("
+        + f"[PSCustomObject]@{{ LocalAddress='{wildcard_address}'; OwningProcess=101 }}, "
+        + f"[PSCustomObject]@{{ LocalAddress='{loopback_address}'; OwningProcess=202 }}); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' }; "
+        + "202=[PSCustomObject]@{ ProcessName='wslrelay' } }; "
+        + "if (-not (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes)) { exit 66 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("owning_process", "process_table"),
+    [
+        (4, "@{ 4=[PSCustomObject]@{ ProcessName='System' } }"),
+        (303, "@{}"),
+    ],
+)
+def test_installer_listener_ownership_rejects_system_or_unresolved_process(
+    owning_process: int, process_table: str
+):
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @("
+        + "[PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }, "
+        + f"[PSCustomObject]@{{ LocalAddress='127.0.0.1'; OwningProcess={owning_process} }}); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' } }; "
+        + f"$candidate = {process_table}; foreach ($key in $candidate.Keys) {{ $processes[$key] = $candidate[$key] }}; "
+        + "if (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes) { exit 67 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("container_ids", ["@()", "@('first','second')"])
+def test_installer_port_ownership_rejects_missing_or_multiple_app_containers(
+    container_ids: str,
+):
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; function Get-NetTCPConnection { "
+        + "@([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }) }; "
+        + "function Invoke-External { param($FilePath, $ArgumentList) "
+        + f"if ($ArgumentList -contains 'ps') {{ return {container_ids} }}; "
+        + "throw 'docker inspect must not run without exactly one app container' }; "
+        + "$config = [PSCustomObject]@{ RepositoryRoot='R'; ComposeFile='C'; EnvFile='E' }; "
+        + "try { Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config; exit 68 } "
+        + "catch { if ($_.Exception.Message -notlike '*exactly one container*') { exit 69 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_port_ownership_queries_only_expected_compose_app():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; function Get-NetTCPConnection { "
+        + "@([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }) }; "
+        + "function Invoke-External { param($FilePath, $ArgumentList) "
+        + "$signature = $ArgumentList -join '|'; "
+        + "if ($signature -eq 'compose|--project-directory|R|--file|C|--env-file|E|ps|-q|app') { return @() }; "
+        + "throw \"wrong Compose service selector: $signature\" }; "
+        + "$config = [PSCustomObject]@{ RepositoryRoot='R'; ComposeFile='C'; EnvFile='E' }; "
+        + "try { Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config; exit 70 } "
+        + "catch { if ($_.Exception.Message -notlike '*exactly one container*') { exit 71 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+```
+
+Pre-create a fresh repository-local base temp and run the listener slice red. Do not use the ACL-problematic `.runtime` paths or pytest's cache provider.
+
+```powershell
+$redBase = Join-Path (Get-Location) ('.operations-test-task8-listener-red-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($redBase) | Out-Null
+.\venv\Scripts\python.exe -m pytest tests/deploy/test_windows_operations.py -q `
+  -k "installer_listener_ownership or installer_port_ownership" `
+  -p no:cacheprovider --basetemp=$redBase
+```
+
+Expected: exit 1. Both parameterizations of `test_installer_listener_ownership_accepts_wildcard_and_loopback_forwarders` fail, with each PowerShell subprocess returning 66; loopback-only, mixed/unknown/non-forwarder, System PID, unresolved PID, expected-`app` selector, missing `app`, and multiple `app` cases pass.
+
+Then make only this minimal change in `deploy/windows/Install-Operations.ps1`:
+
+```powershell
+function Test-ListenerAddressCompatibleWithBinding {
+    param(
+        [Parameter(Mandatory)][string]$ListenerAddress,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$HostIp
+    )
+
+    $normalizedListener = $ListenerAddress.Trim().ToLowerInvariant()
+    $normalizedHost = $HostIp.Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($normalizedHost) -or $normalizedHost -eq '0.0.0.0') {
+        return $normalizedListener -in @('0.0.0.0', '::', '127.0.0.1', '::1')
+    }
+    return $normalizedListener -eq $normalizedHost
+}
+
+function Test-ComposePortListenerOwnership {
+    param(
+        [Parameter(Mandatory)][object[]]$Listeners,
+        [Parameter(Mandatory)][object[]]$PortBindings,
+        [Parameter(Mandatory)][hashtable]$ProcessesById
+    )
+
+    if ($Listeners.Count -eq 0) {
+        return $false
+    }
+
+    $wildcardBindings = @(
+        $PortBindings | Where-Object {
+            $_.HostPort -eq '7860' -and
+                ([string]::IsNullOrWhiteSpace([string]$_.HostIp) -or [string]$_.HostIp -eq '0.0.0.0')
+        }
+    )
+    if ($wildcardBindings.Count -gt 0) {
+        $wildcardListeners = @(
+            $Listeners | Where-Object { [string]$_.LocalAddress -in @('0.0.0.0', '::') }
+        )
+        if ($wildcardListeners.Count -eq 0) {
+            return $false
+        }
+    }
+
+    $acceptedProcessNames = @('com.docker.backend', 'docker-proxy', 'wslrelay')
+    foreach ($listener in $Listeners) {
+        $listenerAddress = [string]$listener.LocalAddress
+        $compatibleBindings = @(
+            $PortBindings | Where-Object {
+                $_.HostPort -eq '7860' -and
+                    (Test-ListenerAddressCompatibleWithBinding -ListenerAddress $listenerAddress -HostIp ([string]$_.HostIp))
+            }
+        )
+        if ($compatibleBindings.Count -eq 0) {
+            return $false
+        }
+
+        $processId = [int]$listener.OwningProcess
+        if ($processId -eq 4 -or -not $ProcessesById.ContainsKey($processId)) {
+            return $false
+        }
+        $processName = ([string]$ProcessesById[$processId].ProcessName).ToLowerInvariant()
+        if ($acceptedProcessNames -notcontains $processName) {
+            return $false
+        }
+    }
+    return $true
+}
+```
+
+The set-level wildcard check is mandatory: broadening only `Test-ListenerAddressCompatibleWithBinding` would incorrectly accept loopback-only listeners. Keep the exact-container and `PortBindings` lookup in `Assert-Tcp7860IsFreeOrOwnedByComposeApp` unchanged. Specific HostIP bindings remain exact-address matches, and `HostIp='::'` remains outside the supported wildcard-host contract.
+
+Run the focused tests green, the whole deployment suite, the full repository suite, the Windows PowerShell 5.1 parser, and the diff checks. Each pytest run gets its own fresh pre-created base temp.
+
+```powershell
+$focusedBase = Join-Path (Get-Location) ('.operations-test-task8-listener-green-' + [guid]::NewGuid().ToString('N'))
+$deployBase = Join-Path (Get-Location) ('.operations-test-task8-listener-deploy-' + [guid]::NewGuid().ToString('N'))
+$fullBase = Join-Path (Get-Location) ('.operations-test-task8-listener-full-' + [guid]::NewGuid().ToString('N'))
+@($focusedBase, $deployBase, $fullBase) | ForEach-Object { [IO.Directory]::CreateDirectory($_) | Out-Null }
+.\venv\Scripts\python.exe -m pytest tests/deploy/test_windows_operations.py -q `
+  -k "installer_listener_ownership or installer_port_ownership" `
+  -p no:cacheprovider --basetemp=$focusedBase
+.\venv\Scripts\python.exe -m pytest tests/deploy -q -p no:cacheprovider --basetemp=$deployBase
+.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider --basetemp=$fullBase
+$tokens = $null
+$parseErrors = $null
+[Management.Automation.Language.Parser]::ParseFile(
+  (Resolve-Path '.\deploy\windows\Install-Operations.ps1').Path,
+  [ref]$tokens,
+  [ref]$parseErrors
+) | Out-Null
+if ($parseErrors.Count -ne 0) { $parseErrors | Format-List; throw 'Windows PowerShell 5.1 parser errors detected.' }
+git diff --check
+git diff --name-only -- deploy/windows/Install-Operations.ps1 tests/deploy/test_windows_operations.py
+git status --short
+```
+
+Expected: all three pytest commands exit 0; the parser reports zero errors; `git diff --check` exits 0; the scoped diff contains exactly the installer and its test file while the four unrelated GraphRAG task-packet files and ignored/runtime paths remain untouched.
+
+Commit only the correction and its tests:
+
+```powershell
+git add -- deploy/windows/Install-Operations.ps1 tests/deploy/test_windows_operations.py
+git diff --cached --check
+git diff --cached --name-only
+git commit -m "fix: accept Docker Desktop loopback forwarder"
+```
+
+Expected: the staged file list contains exactly those two paths and the commit succeeds.
+
+- [ ] **Step 5: Retry the installer twice in one elevated process and verify every postcondition**
+
+Immediately before UAC, require Docker Server readiness, healthy `app` and `qdrant`, a passing default smoke test, InterfaceIndex 17 still `Private`, the current active WTS identity, the exact trusted repository/env/state/backup paths, and no existing object whose exact name or `PythonSelfAgent-` prefix collides with the four intended tasks or firewall rule unexpectedly. Never display `deploy/.env` contents.
+
+Launch one normal RunAs/UAC process; the user must approve it manually. Execute the installer twice with distinct failure codes and do not automate or bypass UAC:
+
+```powershell
+$elevatedScript = @'
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath 'D:\python_self_agent'
+try {
+    & '.\deploy\windows\Install-Operations.ps1' `
+      -RepositoryRoot 'D:\python_self_agent' `
+      -EnvFile 'D:\python_self_agent\deploy\.env' `
+      -StateRoot 'D:\python_self_agent\deploy-state' `
+      -BackupRoot 'D:\python_self_agent_backups'
+} catch { Write-Error $_.Exception.Message; exit 41 }
+try {
+    & '.\deploy\windows\Install-Operations.ps1' `
+      -RepositoryRoot 'D:\python_self_agent' `
+      -EnvFile 'D:\python_self_agent\deploy\.env' `
+      -StateRoot 'D:\python_self_agent\deploy-state' `
+      -BackupRoot 'D:\python_self_agent_backups'
+} catch { Write-Error $_.Exception.Message; exit 42 }
+exit 0
+'@
+$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedScript))
+$process = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+  -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+  -Wait -PassThru
+if ($process.ExitCode -ne 0) { throw "Elevated installer failed with exit code $($process.ExitCode)." }
+```
+
+Expected: the elevated process exits 0, proving both passes completed. Exit 41 means pass 1 failed; exit 42 means pass 2 failed. If UAC is declined or times out, stop without improvising.
+
+Independently re-read system state rather than trusting installer output. Require exactly these four tasks and no duplicate/prefix collision: `PythonSelfAgent-LoginRecovery`, `PythonSelfAgent-Health`, `PythonSelfAgent-DailyBackup`, and `PythonSelfAgent-MonthlyRestoreDrill`. Each principal must use the current active WTS `DOMAIN\user`, `Interactive`, and `Highest`; each action must invoke `powershell.exe` with the trusted script and effective absolute repository/env/state paths (plus the exact backup root for backup/drill). Require login at-logon, health daily from 00:00 with five-minute repetition for one day, backup daily 03:00, and restore drill first Sunday 04:00. All settings must have `StartWhenAvailable=True`, `MultipleInstances=IgnoreNew`; only backup and drill have `WakeToRun=True`.
+
+Require exactly one `Python Self Agent - Private Intranet 7860` rule with `Enabled=True`, `Inbound`, `Allow`, `TCP`, local port 7860, `Private`, and `LocalSubnet`; it must not enable Public. Verify `deploy/.env` inheritance is removed and its access entries are only the active WTS identity with Modify, plus SYSTEM and Administrators with Full Control. Compare the before/after inventories and prove no unrelated scheduled task, firewall rule, or ACL changed. Redact identities and paths in shared evidence where required, and never print environment values.
+
+Use assertions rather than visual inspection for the exact postconditions. Set `$expectedWtsIdentity` from the read-only active-WTS preflight, then run this in an elevated read-only verification shell:
+
+```powershell
+$expectedTaskNames = @(
+  'PythonSelfAgent-LoginRecovery',
+  'PythonSelfAgent-Health',
+  'PythonSelfAgent-DailyBackup',
+  'PythonSelfAgent-MonthlyRestoreDrill'
+)
+$expectedScripts = @{
+  'PythonSelfAgent-LoginRecovery' = 'D:\python_self_agent\deploy\windows\Start-Deployment.ps1'
+  'PythonSelfAgent-Health' = 'D:\python_self_agent\deploy\windows\Test-DeploymentHealth.ps1'
+  'PythonSelfAgent-DailyBackup' = 'D:\python_self_agent\deploy\windows\Backup-Deployment.ps1'
+  'PythonSelfAgent-MonthlyRestoreDrill' = 'D:\python_self_agent\deploy\windows\Invoke-RestoreDrill.ps1'
+}
+$tasks = @(Get-ScheduledTask | Where-Object { $_.TaskName -like 'PythonSelfAgent-*' })
+$nameDelta = @(Compare-Object ($expectedTaskNames | Sort-Object) ($tasks.TaskName | Sort-Object))
+if ($tasks.Count -ne 4 -or $nameDelta.Count -ne 0) { throw 'Unexpected operations task set.' }
+foreach ($task in $tasks) {
+  if ([string]$task.Principal.UserId -ne $expectedWtsIdentity -or
+      [string]$task.Principal.LogonType -ne 'Interactive' -or
+      [string]$task.Principal.RunLevel -ne 'Highest') { throw "Invalid principal: $($task.TaskName)" }
+  if ($task.Actions.Count -ne 1 -or [string]$task.Actions[0].Execute -ne 'powershell.exe') {
+    throw "Invalid action executable: $($task.TaskName)"
+  }
+  $arguments = [string]$task.Actions[0].Arguments
+  foreach ($required in @(
+    $expectedScripts[$task.TaskName],
+    'D:\python_self_agent',
+    'D:\python_self_agent\deploy\.env',
+    'D:\python_self_agent\deploy-state'
+  )) { if (-not $arguments.Contains($required)) { throw "Invalid action path: $($task.TaskName)" } }
+  if ($task.TaskName -in @('PythonSelfAgent-DailyBackup', 'PythonSelfAgent-MonthlyRestoreDrill') -and
+      -not $arguments.Contains('D:\python_self_agent_backups')) { throw "Missing backup root: $($task.TaskName)" }
+  $expectedWake = $task.TaskName -in @('PythonSelfAgent-DailyBackup', 'PythonSelfAgent-MonthlyRestoreDrill')
+  if (-not $task.Settings.StartWhenAvailable -or
+      [string]$task.Settings.MultipleInstances -ne 'IgnoreNew' -or
+      [bool]$task.Settings.WakeToRun -ne $expectedWake) { throw "Invalid settings: $($task.TaskName)" }
+}
+$login = $tasks | Where-Object TaskName -eq 'PythonSelfAgent-LoginRecovery'
+$health = $tasks | Where-Object TaskName -eq 'PythonSelfAgent-Health'
+$backup = $tasks | Where-Object TaskName -eq 'PythonSelfAgent-DailyBackup'
+$drill = $tasks | Where-Object TaskName -eq 'PythonSelfAgent-MonthlyRestoreDrill'
+if ($login.Triggers.Count -ne 1 -or $login.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger') {
+  throw 'Invalid login trigger.'
+}
+if ($health.Triggers.Count -ne 1 -or
+    ([datetime]$health.Triggers[0].StartBoundary).TimeOfDay -ne [timespan]'00:00:00' -or
+    [string]$health.Triggers[0].Repetition.Interval -ne 'PT5M' -or
+    [string]$health.Triggers[0].Repetition.Duration -ne 'P1D') { throw 'Invalid health trigger.' }
+if ($backup.Triggers.Count -ne 1 -or
+    ([datetime]$backup.Triggers[0].StartBoundary).TimeOfDay -ne [timespan]'03:00:00') {
+  throw 'Invalid backup trigger.'
+}
+if ($drill.Triggers.Count -ne 1 -or
+    $drill.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskMonthlyDOWTrigger' -or
+    [int]$drill.Triggers[0].DaysOfWeek -ne 1 -or
+    [int]$drill.Triggers[0].WeeksOfMonth -ne 1 -or
+    [int]$drill.Triggers[0].MonthsOfYear -ne 4095 -or
+    ([datetime]$drill.Triggers[0].StartBoundary).TimeOfDay -ne [timespan]'04:00:00') {
+  throw 'Invalid restore-drill trigger.'
+}
+
+$rules = @(Get-NetFirewallRule -DisplayName 'Python Self Agent - Private Intranet 7860' -ErrorAction SilentlyContinue)
+if ($rules.Count -ne 1) { throw 'Unexpected firewall rule count.' }
+$rule = $rules[0]
+$port = $rule | Get-NetFirewallPortFilter
+$address = $rule | Get-NetFirewallAddressFilter
+if ([string]$rule.Enabled -ne 'True' -or [string]$rule.Direction -ne 'Inbound' -or
+    [string]$rule.Action -ne 'Allow' -or [string]$rule.Profile -ne 'Private' -or
+    [string]$port.Protocol -ne 'TCP' -or [string]$port.LocalPort -ne '7860' -or
+    [string]$address.RemoteAddress -ne 'LocalSubnet') { throw 'Invalid firewall rule fields.' }
+
+$acl = Get-Acl -LiteralPath 'D:\python_self_agent\deploy\.env'
+if (-not $acl.AreAccessRulesProtected -or @($acl.Access | Where-Object IsInherited).Count -ne 0) {
+  throw 'Environment ACL inheritance was not removed.'
+}
+$expectedSids = @(
+  ([Security.Principal.NTAccount]$expectedWtsIdentity).Translate([Security.Principal.SecurityIdentifier]).Value,
+  'S-1-5-18',
+  'S-1-5-32-544'
+)
+$actualSids = @($acl.Access | ForEach-Object {
+  $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+} | Sort-Object -Unique)
+if (@(Compare-Object ($expectedSids | Sort-Object) $actualSids).Count -ne 0) {
+  throw 'Environment ACL contains an unexpected principal.'
+}
+$userRule = $acl.Access | Where-Object {
+  $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $expectedSids[0]
+}
+$fullRules = @($acl.Access | Where-Object {
+  $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -in @('S-1-5-18', 'S-1-5-32-544')
+})
+if (($userRule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::Modify) -ne
+      [Security.AccessControl.FileSystemRights]::Modify -or
+    @($fullRules | Where-Object {
+      ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+        [Security.AccessControl.FileSystemRights]::FullControl
+    }).Count -ne 0) { throw 'Environment ACL rights do not match the design.' }
+```
+
+Expected: the block exits 0 with no output. Compare canonical preflight/postflight snapshots for all non-`PythonSelfAgent-*` task definitions, all non-target firewall rules, and parent-directory ACLs; their hashes must be identical.
+
+- [ ] **Step 6: Exercise startup, health, notification, and backup**
 
 Manually start login recovery and health tasks and wait for completion. Require `app`/`qdrant` healthy and default smoke passing within 180 seconds. Trigger a test notification. Run the backup task and require one complete set under `D:\python_self_agent_backups\daily`, valid SHA-256, safe metadata, restarted healthy services, and a successful status/report entry.
 
-- [ ] **Step 6: Exercise retention and isolated restore drill**
+- [ ] **Step 7: Exercise retention and isolated restore drill**
 
 Use a dedicated test backup root beneath `D:\python_self_agent_backups\.acceptance` with synthetic complete sets to prove 7/4 retention without touching real backups. Run the restore drill against the real latest backup, confirm its project name and port differ from production, default smoke passes, production data timestamps/hashes are unchanged, temporary env is absent, and the report is successful.
 
-- [ ] **Step 7: Exercise upgrade success and rollback failure branch**
+- [ ] **Step 8: Exercise upgrade success and rollback failure branch**
 
 Run a normal `Update-Deployment.ps1` and require backup, tests, scans, default/deep smoke, and success report. Then invoke its documented test-only failure injection immediately after candidate startup; require old image IDs restored, pre-upgrade data restored, default smoke passing, and rollback artifacts retained.
 
-- [ ] **Step 8: Verify intranet exposure and port isolation**
+- [ ] **Step 9: Verify intranet exposure and port isolation**
 
 Inspect Docker mappings and local listeners. Confirm only TCP 7860 is published, the firewall rule is Private/LocalSubnet only, and 6333/6334/7474/7687 have no host mapping. Obtain the machine's current private IPv4 address and test port 7860 locally; ask the user to confirm access from one other trusted LAN device because the local machine cannot prove an external firewall path by itself.
 
-- [ ] **Step 9: Verify repository hygiene and final state**
+- [ ] **Step 10: Verify repository hygiene and final state**
 
 ```powershell
 git diff --check
@@ -751,7 +1113,7 @@ docker compose --env-file deploy/.env ps
 
 Confirm `deploy/.env`, `deploy-state`, `deploy-data`, backups, temporary drill data, and unrelated GraphRAG changes are not staged or committed. Confirm all intended commits exist and services remain healthy.
 
-- [ ] **Step 10: Complete the real reboot acceptance**
+- [ ] **Step 11: Complete the real reboot acceptance**
 
 Request a user-controlled Windows restart. After the user logs back in, measure from task history and logs that login recovery completed within 180 seconds; rerun default smoke and inspect task/firewall/backup state. Do not restart Windows automatically.
 
@@ -775,6 +1137,7 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 | Manual one-click upgrade and data/image rollback | 4, 6, 8 |
 | Deployment CI | 7 |
 | Idempotent install and narrow uninstall | 3, 8 |
+| Docker Desktop wildcard binding with fail-closed loopback forwarders | 8 |
 | Preserve single replica and business contracts | Global constraints, 8 |
 | Real reboot and LAN acceptance | 8 |
 
