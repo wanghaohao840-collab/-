@@ -14,7 +14,11 @@ from typing import Dict, Any, List, Optional
 
 from hello_agents.tools.base import Tool
 from hello_agents.core.llm import HelloAgentsLLM
-from hello_agents.memory.rag.contracts import DocumentSegment, RAGActionResult
+from hello_agents.memory.rag.contracts import (
+    DocumentSegment,
+    ImportControlSignal,
+    RAGActionResult,
+)
 from hello_agents.memory.rag.errors import (
     RAGAuthenticationError,
     RAGCollectionError,
@@ -27,7 +31,7 @@ from hello_agents.memory.rag.errors import (
     sanitize_qdrant_url,
 )
 from hello_agents.memory.rag.pipeline import create_rag_pipeline
-from hello_agents.memory.rag.prepare import report_progress
+from hello_agents.memory.rag.prepare import report_progress, run_control_checkpoint
 from hello_agents.memory.rag.result_utils import (
     normalize_document_scope,
     resolve_qa_mode,
@@ -397,6 +401,8 @@ class RAGTool(Tool):
 
             return f"❌ 不支持的 RAG 操作: {action}"
 
+        except ImportControlSignal:
+            raise
         except Exception as exc:
             self._last_action_error = exc
             safe_error = self._safe_action_error(exc, kwargs.get("file_path"))
@@ -774,6 +780,7 @@ class RAGTool(Tool):
         """添加本地 txt / md / pdf / docx 文档到知识库"""
 
         progress_callback = kwargs.pop("progress_callback", None)
+        control_checkpoint = kwargs.pop("control_checkpoint", None)
         path = Path(file_path)
 
         if not path.exists():
@@ -805,6 +812,7 @@ class RAGTool(Tool):
             return f"❌ 当前 add_document 只支持 .txt / .md / .pdf / .docx 文件，当前文件类型: {suffix}"
 
         document_id = document_id or path.stem
+        run_control_checkpoint(control_checkpoint, "parsing")
 
         if suffix == ".pdf":
             try:
@@ -839,6 +847,7 @@ class RAGTool(Tool):
                     }
                     segments.append(DocumentSegment(content=page_text, metadata=page_metadata))
 
+                run_control_checkpoint(control_checkpoint, "parsing")
                 if not segments:
                     return f"鉂?PDF 鏈彁鍙栧埌鏈夋晥鏂囨湰: {file_path}"
 
@@ -850,6 +859,8 @@ class RAGTool(Tool):
                     }
                     if progress_callback is not None:
                         pipeline_kwargs["progress_callback"] = progress_callback
+                    if control_checkpoint is not None:
+                        pipeline_kwargs["control_checkpoint"] = control_checkpoint
                     result = pipeline.replace_document(**pipeline_kwargs)
                 else:
                     pipeline_kwargs = {
@@ -867,6 +878,8 @@ class RAGTool(Tool):
                     }
                     if progress_callback is not None:
                         pipeline_kwargs["progress_callback"] = progress_callback
+                    if control_checkpoint is not None:
+                        pipeline_kwargs["control_checkpoint"] = control_checkpoint
                     result = pipeline.add_text(**pipeline_kwargs)
 
                 if not result.get("success"):
@@ -908,6 +921,8 @@ class RAGTool(Tool):
                     f"- graph_status: {graph_result.get('status')}"
                 )
 
+            except ImportControlSignal:
+                raise
             except Exception as exc:
                 self._last_action_error = exc
                 return f"鉂?鏂囦欢璇诲彇澶辫触: {self._safe_action_error(exc, file_path)}"
@@ -1006,6 +1021,9 @@ class RAGTool(Tool):
             else:
                 return f"❌ 不支持的文件类型: {suffix}"
 
+            run_control_checkpoint(control_checkpoint, "parsing")
+        except ImportControlSignal:
+            raise
         except Exception as exc:
             self._last_action_error = exc
             return f"❌ 文件读取失败: {self._safe_action_error(exc, file_path)}"
@@ -1038,6 +1056,8 @@ class RAGTool(Tool):
             }
             if progress_callback is not None:
                 pipeline_kwargs["progress_callback"] = progress_callback
+            if control_checkpoint is not None:
+                pipeline_kwargs["control_checkpoint"] = control_checkpoint
             result = pipeline.replace_document(**pipeline_kwargs)
         else:
             pipeline_kwargs = {
@@ -1048,6 +1068,8 @@ class RAGTool(Tool):
             }
             if progress_callback is not None:
                 pipeline_kwargs["progress_callback"] = progress_callback
+            if control_checkpoint is not None:
+                pipeline_kwargs["control_checkpoint"] = control_checkpoint
             result = pipeline.add_text(**pipeline_kwargs)
 
         if result.get("success"):

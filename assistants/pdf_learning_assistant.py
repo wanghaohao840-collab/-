@@ -11,6 +11,8 @@ from typing import Optional, Dict, Any, Sequence
 from app.history import HistoryRepository
 from app.summary_tasks import SummaryTaskManager
 from hello_agents.memory.base import MemoryConfig
+from hello_agents.memory.rag.contracts import ControlCheckpoint
+from hello_agents.memory.rag.prepare import run_control_checkpoint
 from hello_agents.memory.rag.result_utils import (
     MAX_SELECTED_DOCUMENTS,
     resolve_qa_mode,
@@ -165,6 +167,8 @@ class PDFLearningAssistant:
         original_name: Optional[str] = None,
         import_task_id: Optional[str] = None,
         progress_callback: Any = None,
+        *,
+        control_checkpoint: ControlCheckpoint | None = None,
     ) -> str:
         """导入文档，支持 PDF / TXT / Markdown"""
 
@@ -199,6 +203,8 @@ class PDFLearningAssistant:
         }
         if progress_callback is not None:
             add_kwargs["progress_callback"] = progress_callback
+        if control_checkpoint is not None:
+            add_kwargs["control_checkpoint"] = control_checkpoint
 
         history_item = {
             "document_id": document_id,
@@ -263,6 +269,7 @@ class PDFLearningAssistant:
 
                 # Commit History inside the same lock — fresh merge against
                 # the latest persisted snapshot.
+                run_control_checkpoint(control_checkpoint, "committing")
                 try:
                     if self.coordinator is not None:
                         def upsert(data):

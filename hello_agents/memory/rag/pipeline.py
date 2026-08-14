@@ -10,15 +10,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.import_models import ProgressCallback
 from hello_agents.memory.embedding import get_text_embedder, get_dimension
-from hello_agents.memory.rag.contracts import DocumentSegment
+from hello_agents.memory.rag.contracts import (
+    ControlCheckpoint,
+    DocumentSegment,
+    ProgressCallback,
+)
 from hello_agents.memory.rag.errors import RAGConfigError
 from hello_agents.memory.rag.prepare import (
     default_chunk_id,
     prepare_document_chunks,
     progress_with_chunking_boundary,
     report_progress,
+    run_control_checkpoint,
     utc_now_iso,
 )
 from hello_agents.memory.storage.vector_store import InMemoryVectorStore, VectorPoint
@@ -141,6 +145,8 @@ class SimpleRAGPipeline:
             replace_existing: bool = True,
             save_cache: bool = True,
             progress_callback: ProgressCallback | None = None,
+            *,
+            control_checkpoint: ControlCheckpoint | None = None,
     ) -> Dict[str, Any]:
         """添加文本到 RAG 知识库，并可选择是否立即持久化"""
 
@@ -161,6 +167,7 @@ class SimpleRAGPipeline:
         report_progress(progress_callback, "chunking", 0, 1, "chunking")
         chunk_texts = self._split_text(text)
         report_progress(progress_callback, "chunking", 1, 1, "chunking")
+        run_control_checkpoint(control_checkpoint, "chunking")
 
         added = 0
 
@@ -171,6 +178,7 @@ class SimpleRAGPipeline:
 
         points: list[VectorPoint] = []
         for index, chunk_text in enumerate(chunk_texts):
+            run_control_checkpoint(control_checkpoint, "embedding")
             chunk_id = f"{document_id}_{existing_count + index}"
 
             vector = self._to_vector(chunk_text)
@@ -202,6 +210,7 @@ class SimpleRAGPipeline:
         persisted = 0
         if points:
             self._ensure_store_ready()
+            run_control_checkpoint(control_checkpoint, "persisting")
             self._vector_store.upsert(self._collection, points)
             persisted += 1
             report_progress(
@@ -214,6 +223,7 @@ class SimpleRAGPipeline:
 
         # 关键：只有 save_cache=True 时才保存
         if save_cache:
+            run_control_checkpoint(control_checkpoint, "persisting")
             self._save_cache()
             persisted += 1
             report_progress(
@@ -244,6 +254,8 @@ class SimpleRAGPipeline:
         save_cache: bool = True,
         allow_empty: bool = False,
         progress_callback: ProgressCallback | None = None,
+        *,
+        control_checkpoint: ControlCheckpoint | None = None,
     ) -> Dict[str, Any]:
         """Replace all chunks for one document using shared preparation logic."""
 
@@ -269,6 +281,7 @@ class SimpleRAGPipeline:
             embed_text=self._to_vector,
             id_for_chunk=default_chunk_id,
             progress_callback=prepare_progress,
+            control_checkpoint=control_checkpoint,
         )
         complete_chunking()
         if not prepared and not allow_empty:
@@ -311,6 +324,7 @@ class SimpleRAGPipeline:
         persistence_steps = int(bool(new_points)) + int(save_cache)
         persisted = 0
         if new_points:
+            run_control_checkpoint(control_checkpoint, "persisting")
             self._vector_store.upsert(self._collection, new_points)
             persisted += 1
             report_progress(
@@ -322,6 +336,7 @@ class SimpleRAGPipeline:
             )
 
         if save_cache:
+            run_control_checkpoint(control_checkpoint, "persisting")
             self._save_cache()
             persisted += 1
             report_progress(

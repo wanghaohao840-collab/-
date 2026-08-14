@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-from app.import_models import ProgressCallback
 from hello_agents.memory.embedding import get_dimension, get_text_embedder
-from hello_agents.memory.rag.contracts import DocumentSegment
+from hello_agents.memory.rag.contracts import (
+    ControlCheckpoint,
+    DocumentSegment,
+    ProgressCallback,
+)
 from hello_agents.memory.rag.errors import (
     RAGConfigError,
     RAGDocumentTooLargeError,
@@ -16,6 +19,7 @@ from hello_agents.memory.rag.prepare import (
     progress_with_chunking_boundary,
     qdrant_point_id,
     report_progress,
+    run_control_checkpoint,
     utc_now_iso,
 )
 from hello_agents.memory.rag.result_utils import (
@@ -100,6 +104,8 @@ class RAGPipeline:
         replace_existing: bool = True,
         save_cache: bool = True,
         progress_callback: ProgressCallback | None = None,
+        *,
+        control_checkpoint: ControlCheckpoint | None = None,
     ) -> Dict[str, Any]:
         if not text or not text.strip():
             return {"success": False, "message": "text is empty", "chunks_added": 0, "chunks_removed": 0}
@@ -112,6 +118,7 @@ class RAGPipeline:
                 document_id,
                 [DocumentSegment(text, metadata or {})],
                 progress_callback=progress_callback,
+                control_checkpoint=control_checkpoint,
             )
 
         existing_count = self._max_chunk_index(document_id) + 1
@@ -129,11 +136,16 @@ class RAGPipeline:
             embed_text=self._to_vector,
             id_for_chunk=lambda ns, doc, index: qdrant_point_id(ns, doc, existing_count + index),
             progress_callback=prepare_progress,
+            control_checkpoint=control_checkpoint,
         )
         complete_chunking()
         for chunk in prepared:
             chunk.metadata["chunk_index"] = existing_count + int(chunk.metadata["chunk_index"])
-        self._upsert_chunks(prepared, progress_callback=progress_callback)
+        self._upsert_chunks(
+            prepared,
+            progress_callback=progress_callback,
+            control_checkpoint=control_checkpoint,
+        )
         return {
             "success": True,
             "document_id": document_id,
@@ -149,6 +161,8 @@ class RAGPipeline:
         save_cache: bool = True,
         allow_empty: bool = False,
         progress_callback: ProgressCallback | None = None,
+        *,
+        control_checkpoint: ControlCheckpoint | None = None,
     ) -> Dict[str, Any]:
         if not document_id:
             return {"success": False, "message": "document_id cannot be empty", "chunks_added": 0, "chunks_removed": 0}
@@ -167,6 +181,7 @@ class RAGPipeline:
             embed_text=self._to_vector,
             id_for_chunk=qdrant_point_id,
             progress_callback=prepare_progress,
+            control_checkpoint=control_checkpoint,
         )
         complete_chunking()
         existing_payloads = self._scroll_payloads(document_id=document_id)
@@ -189,7 +204,11 @@ class RAGPipeline:
                 updated_at=updated_at,
                 document_version=version,
             )
-        self._upsert_chunks(prepared, progress_callback=progress_callback)
+        self._upsert_chunks(
+            prepared,
+            progress_callback=progress_callback,
+            control_checkpoint=control_checkpoint,
+        )
         self._delete_orphan_chunks(document_id, len(prepared))
         return {
             "success": True,
@@ -385,6 +404,8 @@ class RAGPipeline:
         self,
         chunks,
         progress_callback: ProgressCallback | None = None,
+        *,
+        control_checkpoint: ControlCheckpoint | None = None,
     ) -> None:
         points: list[VectorPoint] = []
         for chunk in chunks:
@@ -404,6 +425,7 @@ class RAGPipeline:
             points.append(VectorPoint(chunk.id, chunk.vector, payload))
 
         if points:
+            run_control_checkpoint(control_checkpoint, "persisting")
             self.vector_store.upsert(self.collection_name, points)
             report_progress(progress_callback, "persisting", 1, 1, "persisting")
 

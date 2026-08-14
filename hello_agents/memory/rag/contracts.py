@@ -1,7 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Literal
+
+
+ControlAction = Literal["pause", "cancel"]
+ControlCheckpoint = Callable[[str], None]
+ProgressCallback = Callable[[str, int, int, str], None]
+
+
+class ImportControlSignal(RuntimeError):
+    retryable = False
+
+    def __init__(self, action: ControlAction):
+        super().__init__(action)
+        self.action = action
 
 
 @dataclass(frozen=True)

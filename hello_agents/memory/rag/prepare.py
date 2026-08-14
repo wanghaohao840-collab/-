@@ -7,8 +7,13 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
-from app.import_models import ProgressCallback
-from hello_agents.memory.rag.contracts import DocumentSegment, PreparedChunk
+from hello_agents.memory.rag.contracts import (
+    ControlCheckpoint,
+    DocumentSegment,
+    ImportControlSignal,
+    PreparedChunk,
+    ProgressCallback,
+)
 
 
 PROJECT_POINT_NAMESPACE_UUID = uuid.UUID("c273c00a-40ac-47a9-b475-164f135ada18")
@@ -67,8 +72,18 @@ def report_progress(
         return
     try:
         callback(stage, done, total, message)
+    except ImportControlSignal:
+        raise
     except Exception:
         logger.warning("RAG progress callback failed", exc_info=True)
+
+
+def run_control_checkpoint(
+    callback: ControlCheckpoint | None,
+    stage: str,
+) -> None:
+    if callback is not None:
+        callback(stage)
 
 
 def progress_with_chunking_boundary(
@@ -103,6 +118,8 @@ def prepare_document_chunks(
     embed_text: Callable[[str], list[float]],
     id_for_chunk: Callable[[str, str, int], str] | None = None,
     progress_callback: ProgressCallback | None = None,
+    *,
+    control_checkpoint: ControlCheckpoint | None = None,
 ) -> list[PreparedChunk]:
     if not document_id:
         raise ValueError("document_id is required")
@@ -122,9 +139,12 @@ def prepare_document_chunks(
 
             pending.append((segment_metadata, chunk_text))
 
+    run_control_checkpoint(control_checkpoint, "chunking")
+
     prepared: list[PreparedChunk] = []
     total_chunks = len(pending)
     for chunk_index, (segment_metadata, chunk_text) in enumerate(pending):
+        run_control_checkpoint(control_checkpoint, "embedding")
         chunk_id = id_for_chunk(rag_namespace, document_id, chunk_index)
         now = utc_now_iso()
         metadata = {
