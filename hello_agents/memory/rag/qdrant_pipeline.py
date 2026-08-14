@@ -209,6 +209,8 @@ class RAGPipeline:
             progress_callback=progress_callback,
             control_checkpoint=control_checkpoint,
         )
+        if old_count > len(prepared):
+            run_control_checkpoint(control_checkpoint, "persisting")
         self._delete_orphan_chunks(document_id, len(prepared))
         return {
             "success": True,

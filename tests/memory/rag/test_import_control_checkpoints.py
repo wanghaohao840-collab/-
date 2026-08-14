@@ -69,7 +69,14 @@ def test_json_import_checks_each_persistence_batch(tmp_path):
     )
 
     assert result["success"] is True
-    assert observed == ["chunking", "embedding", "embedding", "persisting", "persisting"]
+    assert observed == [
+        "chunking",
+        "embedding",
+        "embedding",
+        "persisting",
+        "persisting",
+        "persisting",
+    ]
 
 
 def test_json_add_text_forwards_checkpoint_to_each_import_batch(tmp_path):
@@ -85,7 +92,60 @@ def test_json_add_text_forwards_checkpoint_to_each_import_batch(tmp_path):
     )
 
     assert result["success"] is True
-    assert observed == ["chunking", "embedding", "embedding", "persisting", "persisting"]
+    assert observed == [
+        "persisting",
+        "chunking",
+        "embedding",
+        "embedding",
+        "persisting",
+        "persisting",
+    ]
+
+
+def test_json_add_text_checks_before_replacing_existing_chunks(tmp_path):
+    pipeline = SimpleRAGPipeline(cache_path=str(tmp_path / "rag.json"))
+    pipeline._split_text = lambda text: [text]
+    pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
+    pipeline.add_text("old", document_id="doc-1", replace_existing=False)
+    before = pipeline.get_document_chunks("doc-1")
+
+    def checkpoint(stage):
+        if stage == "persisting":
+            raise ImportControlSignal("pause")
+
+    with pytest.raises(ImportControlSignal, match="pause"):
+        pipeline.add_text(
+            "new",
+            document_id="doc-1",
+            replace_existing=True,
+            save_cache=False,
+            control_checkpoint=checkpoint,
+        )
+
+    assert pipeline.get_document_chunks("doc-1") == before
+
+
+def test_json_replace_checks_before_deletion_only_batch(tmp_path):
+    pipeline = SimpleRAGPipeline(cache_path=str(tmp_path / "rag.json"))
+    pipeline._split_text = lambda text: [text] if text.strip() else []
+    pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
+    pipeline.add_text("old", document_id="doc-1", replace_existing=False)
+    before = pipeline.get_document_chunks("doc-1")
+
+    def checkpoint(stage):
+        if stage == "persisting":
+            raise ImportControlSignal("cancel")
+
+    with pytest.raises(ImportControlSignal, match="cancel"):
+        pipeline.replace_document(
+            "doc-1",
+            [DocumentSegment(" ", {})],
+            allow_empty=True,
+            save_cache=False,
+            control_checkpoint=checkpoint,
+        )
+
+    assert pipeline.get_document_chunks("doc-1") == before
 
 
 def test_json_import_does_not_swallow_control_signal(tmp_path):
@@ -171,6 +231,61 @@ def test_qdrant_add_text_forwards_checkpoint_to_upsert_batch():
     assert observed == ["chunking", "embedding", "persisting"]
 
 
+def test_qdrant_replace_checks_before_orphan_deletion():
+    pipeline = RAGPipeline(
+        collection_name="control_orphan_delete",
+        rag_namespace="user-a",
+        vector_store=InMemoryVectorStore(),
+    )
+    pipeline._split_text = lambda text: text.split()
+    pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
+    pipeline.replace_document("doc-1", [DocumentSegment("old-0 old-1", {})])
+    persisting = 0
+
+    def checkpoint(stage):
+        nonlocal persisting
+        if stage == "persisting":
+            persisting += 1
+            if persisting == 2:
+                raise ImportControlSignal("pause")
+
+    with pytest.raises(ImportControlSignal, match="pause"):
+        pipeline.replace_document(
+            "doc-1",
+            [DocumentSegment("new", {})],
+            control_checkpoint=checkpoint,
+        )
+
+    chunks = pipeline.get_document_chunks("doc-1")
+    assert [chunk["content"] for chunk in chunks] == ["new", "old-1"]
+
+
+def test_qdrant_empty_replace_checks_before_orphan_deletion():
+    pipeline = RAGPipeline(
+        collection_name="control_empty_orphan_delete",
+        rag_namespace="user-a",
+        vector_store=InMemoryVectorStore(),
+    )
+    pipeline._split_text = lambda text: text.split()
+    pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
+    pipeline.replace_document("doc-1", [DocumentSegment("old-0 old-1", {})])
+    before = pipeline.get_document_chunks("doc-1")
+
+    def checkpoint(stage):
+        if stage == "persisting":
+            raise ImportControlSignal("cancel")
+
+    with pytest.raises(ImportControlSignal, match="cancel"):
+        pipeline.replace_document(
+            "doc-1",
+            [DocumentSegment(" ", {})],
+            allow_empty=True,
+            control_checkpoint=checkpoint,
+        )
+
+    assert pipeline.get_document_chunks("doc-1") == before
+
+
 class _RecordingPipeline:
     def __init__(self):
         self.control_checkpoint = None
@@ -236,9 +351,11 @@ def test_rag_tool_broad_handlers_do_not_wrap_control_signal(tmp_path):
 
 
 class _AssistantRAGTool:
-    def __init__(self):
+    def __init__(self, document_ids=()):
         self.calls = []
-        self.pipeline = SimpleNamespace(list_document_ids=lambda: [])
+        self.pipeline = SimpleNamespace(
+            list_document_ids=lambda: list(document_ids)
+        )
 
     def _get_pipeline(self):
         return self.pipeline
@@ -259,6 +376,10 @@ class _AssistantMemoryTool:
 
     def execute(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        return "ok"
+
+    def ensure_import_event(self, **kwargs):
+        self.calls.append(("ensure_import_event", kwargs))
         return "ok"
 
 
@@ -298,3 +419,48 @@ def test_assistant_forwards_checkpoint_and_checks_before_history_commit(tmp_path
     assert observed == ["committing"]
     assert assistant.history_repository.load()["documents"] == []
     assert assistant.memory_tool.calls == []
+
+
+def test_assistant_idempotent_retry_checks_before_memory_repair(tmp_path):
+    source = tmp_path / "document.md"
+    source.write_text("body", encoding="utf-8")
+    existing = {
+        "document_id": "doc-1",
+        "document_name": "document.md",
+        "document_path": str(source),
+        "import_task_id": "task-1",
+        "loaded_at": "original",
+    }
+    assistant = PDFLearningAssistant.__new__(PDFLearningAssistant)
+    assistant.user_id = "user-a"
+    assistant.session_id = "session-a"
+    assistant.rag_tool = _AssistantRAGTool(["doc-1"])
+    assistant.memory_tool = _AssistantMemoryTool()
+    assistant.history_repository = HistoryRepository(tmp_path / "history.json")
+    assistant.history_repository.save(
+        {"documents": [existing], "questions": [], "notes": [], "sessions": []}
+    )
+    assistant.coordinator = None
+    assistant.history = assistant.history_repository.load()
+    assistant.current_document = None
+    assistant.current_document_id = None
+    assistant.stats = {"documents_loaded": 0}
+    observed = []
+
+    def checkpoint(stage):
+        observed.append(stage)
+        if stage == "committing":
+            raise ImportControlSignal("pause")
+
+    with pytest.raises(ImportControlSignal, match="pause"):
+        assistant.load_document(
+            str(source),
+            document_id="doc-1",
+            import_task_id="task-1",
+            control_checkpoint=checkpoint,
+        )
+
+    assert assistant.rag_tool.calls == []
+    assert assistant.history_repository.load()["documents"] == [existing]
+    assert assistant.memory_tool.calls == []
+    assert observed == ["committing"]

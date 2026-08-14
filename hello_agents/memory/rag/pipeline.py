@@ -162,6 +162,7 @@ class SimpleRAGPipeline:
         # 同一个 document_id 默认覆盖旧版本，防止重复导入
         removed = 0
         if replace_existing:
+            run_control_checkpoint(control_checkpoint, "persisting")
             removed = self._remove_document_chunks(document_id)
 
         report_progress(progress_callback, "chunking", 0, 1, "chunking")
@@ -306,6 +307,7 @@ class SimpleRAGPipeline:
 
         # Count before removal.
         before = self._vector_store.count(self._collection)
+        run_control_checkpoint(control_checkpoint, "persisting")
         removed = self._remove_document_chunks(document_id)
 
         # Upsert new chunks.

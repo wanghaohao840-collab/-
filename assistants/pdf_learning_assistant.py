@@ -309,6 +309,7 @@ class PDFLearningAssistant:
                 "file_suffix": suffix,
                 "import_task_id": import_task_id,
             }
+            run_control_checkpoint(control_checkpoint, "committing")
             try:
                 if import_task_id and hasattr(
                     self.memory_tool, "ensure_import_event"
