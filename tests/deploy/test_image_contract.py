@@ -32,6 +32,25 @@ def test_dockerignore_excludes_acl_prone_test_and_runtime_roots():
     } <= patterns
 
 
+def test_dockerignore_excludes_local_environment_and_generated_roots():
+    patterns = set((ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines())
+
+    assert {
+        "venv/",
+        ".venv/",
+        ".superpowers/",
+        ".worktrees/",
+        ".idea/",
+        "deploy-state/",
+        "memory_data/",
+        "**/memory_data/",
+        "**/rag_cache/",
+        "ui/knowledge_base/uploads/",
+        "ui/reports/",
+        "knowledge_base/.graph/",
+    } <= patterns
+
+
 def test_qdrant_probe_image_preserves_the_pinned_base():
     source = (ROOT / "deploy" / "qdrant.Dockerfile").read_text(encoding="utf-8")
 
