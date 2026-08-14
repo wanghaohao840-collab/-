@@ -113,7 +113,7 @@ function Test-ListenerAddressCompatibleWithBinding {
     $normalizedListener = $ListenerAddress.Trim().ToLowerInvariant()
     $normalizedHost = $HostIp.Trim().ToLowerInvariant()
     if ([string]::IsNullOrWhiteSpace($normalizedHost) -or $normalizedHost -eq '0.0.0.0') {
-        return $normalizedListener -eq '0.0.0.0' -or $normalizedListener -eq '::'
+        return $normalizedListener -in @('0.0.0.0', '::', '127.0.0.1', '::1')
     }
     return $normalizedListener -eq $normalizedHost
 }
@@ -127,6 +127,21 @@ function Test-ComposePortListenerOwnership {
 
     if ($Listeners.Count -eq 0) {
         return $false
+    }
+
+    $wildcardBindings = @(
+        $PortBindings | Where-Object {
+            $_.HostPort -eq '7860' -and
+                ([string]::IsNullOrWhiteSpace([string]$_.HostIp) -or [string]$_.HostIp -eq '0.0.0.0')
+        }
+    )
+    if ($wildcardBindings.Count -gt 0) {
+        $wildcardListeners = @(
+            $Listeners | Where-Object { [string]$_.LocalAddress -in @('0.0.0.0', '::') }
+        )
+        if ($wildcardListeners.Count -eq 0) {
+            return $false
+        }
     }
 
     $acceptedProcessNames = @('com.docker.backend', 'docker-proxy', 'wslrelay')

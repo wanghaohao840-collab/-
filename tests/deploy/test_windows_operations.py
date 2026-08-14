@@ -1080,6 +1080,115 @@ def test_installer_listener_ownership_accepts_only_matching_docker_forwarder():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize(
+    ("wildcard_address", "loopback_address"),
+    [("0.0.0.0", "127.0.0.1"), ("::", "::1")],
+)
+def test_installer_listener_ownership_accepts_wildcard_and_loopback_forwarders(
+    wildcard_address: str, loopback_address: str
+):
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @("
+        + f"[PSCustomObject]@{{ LocalAddress='{wildcard_address}'; OwningProcess=101 }}, "
+        + f"[PSCustomObject]@{{ LocalAddress='{loopback_address}'; OwningProcess=202 }}); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' }; "
+        + "202=[PSCustomObject]@{ ProcessName='wslrelay' } }; "
+        + "if (-not (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes)) { exit 66 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("owning_process", "process_table"),
+    [
+        (4, "@{ 4=[PSCustomObject]@{ ProcessName='System' } }"),
+        (303, "@{}"),
+    ],
+)
+def test_installer_listener_ownership_rejects_system_or_unresolved_process(
+    owning_process: int, process_table: str
+):
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='0.0.0.0'; HostPort='7860' }); "
+        + "$listeners = @("
+        + "[PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }, "
+        + f"[PSCustomObject]@{{ LocalAddress='127.0.0.1'; OwningProcess={owning_process} }}); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' } }; "
+        + f"$candidate = {process_table}; foreach ($key in $candidate.Keys) {{ $processes[$key] = $candidate[$key] }}; "
+        + "if (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes) { exit 67 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_listener_ownership_does_not_expand_ipv6_hostip_wildcard_semantics():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; $bindings = @([PSCustomObject]@{ HostIp='::'; HostPort='7860' }); "
+        + "$listeners = @("
+        + "[PSCustomObject]@{ LocalAddress='::'; OwningProcess=101 }, "
+        + "[PSCustomObject]@{ LocalAddress='::1'; OwningProcess=202 }); "
+        + "$processes = @{ 101=[PSCustomObject]@{ ProcessName='com.docker.backend' }; "
+        + "202=[PSCustomObject]@{ ProcessName='wslrelay' } }; "
+        + "if (Test-ComposePortListenerOwnership -Listeners $listeners "
+        + "-PortBindings $bindings -ProcessesById $processes) { exit 72 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("container_ids", ["@()", "@('first','second')"])
+def test_installer_port_ownership_rejects_missing_or_multiple_app_containers(
+    container_ids: str,
+):
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; function Get-NetTCPConnection { "
+        + "@([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }) }; "
+        + "function Invoke-External { param($FilePath, $ArgumentList) "
+        + f"if ($ArgumentList -contains 'ps') {{ return {container_ids} }}; "
+        + "throw 'docker inspect must not run without exactly one app container' }; "
+        + "$config = [PSCustomObject]@{ RepositoryRoot='R'; ComposeFile='C'; EnvFile='E' }; "
+        + "try { Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config; exit 68 } "
+        + "catch { if ($_.Exception.Message -notlike '*exactly one container*') { exit 69 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_port_ownership_queries_only_expected_compose_app():
+    prelude = installer_prelude()
+    result = run_ps(
+        "& { "
+        + prelude
+        + "; function Get-NetTCPConnection { "
+        + "@([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }) }; "
+        + "function Invoke-External { param($FilePath, $ArgumentList) "
+        + "$signature = $ArgumentList -join '|'; "
+        + "if ($signature -eq 'compose|--project-directory|R|--file|C|--env-file|E|ps|-q|app') { return @() }; "
+        + "throw \"wrong Compose service selector: $signature\" }; "
+        + "$config = [PSCustomObject]@{ RepositoryRoot='R'; ComposeFile='C'; EnvFile='E' }; "
+        + "try { Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config; exit 70 } "
+        + "catch { if ($_.Exception.Message -notlike '*exactly one container*') { exit 71 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_installer_rejects_absent_interactive_identity():
     prelude = installer_prelude()
     result = run_ps(
