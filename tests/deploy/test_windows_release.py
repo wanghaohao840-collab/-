@@ -154,8 +154,8 @@ def test_release_inputs_are_digest_pinned_and_stably_named():
         in dockerfile
     )
     assert (
-        "qdrant/qdrant:v1.18.2@sha256:"
-        "75eab8c4ba42096724fdcfde8b4de0b5713d529dde32f285a1f86fdcb2c9e50c"
+        "qdrant/qdrant:v1.18.3@sha256:"
+        "0bd98fa7977f1e75694779359ca4e212822e5a71334e28421182f72f209d5286"
         in qdrant
     )
     assert (

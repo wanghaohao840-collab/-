@@ -6,6 +6,12 @@ administrator session after preparing `deploy\.env` and starting the deployment.
 It creates scheduled tasks and one inbound firewall rule; it does not create an
 Internet-facing deployment.
 
+Qdrant Dashboard is intentionally unavailable in this deployment. The Qdrant
+HTTP API is the supported interface and remains private to the Compose network;
+Qdrant ports are not published on the host. The derived image removes the
+upstream static Web UI as a targeted remediation. This does not make the
+unmodified upstream image vulnerability-free.
+
 ## Network preflight and installation
 
 The installer refuses to continue when any active Internet-connected profile is

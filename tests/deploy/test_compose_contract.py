@@ -17,7 +17,7 @@ def test_compose_contains_default_app_and_qdrant_and_optional_graph():
     qdrant_image = (
         ROOT / "deploy" / "qdrant.Dockerfile"
     ).read_text(encoding="utf-8")
-    assert "qdrant/qdrant:v1.18.2" in qdrant_image
+    assert "qdrant/qdrant:v1.18.3" in qdrant_image
     assert "neo4j:5.26.28-community" in source
 
 
@@ -31,6 +31,8 @@ def test_only_app_publishes_a_host_port():
     assert "ports:" in app_block
     assert "ports:" not in qdrant_block
     assert "ports:" not in neo4j_block
+    assert 'expose:\n      - "6333"' in qdrant_block
+    assert "http://127.0.0.1:6333/readyz" in qdrant_block
 
 
 def test_app_runs_as_the_deployment_account():

@@ -51,9 +51,22 @@ def test_dockerignore_excludes_local_environment_and_generated_roots():
     } <= patterns
 
 
-def test_qdrant_probe_image_preserves_the_pinned_base():
+def test_qdrant_probe_image_uses_pinned_base_and_removes_complete_web_ui():
     source = (ROOT / "deploy" / "qdrant.Dockerfile").read_text(encoding="utf-8")
 
-    assert "FROM qdrant/qdrant:v1.18.2" in source
+    expected_base = (
+        "FROM qdrant/qdrant:v1.18.3@sha256:"
+        "0bd98fa7977f1e75694779359ca4e212822e5a71334e28421182f72f209d5286"
+    )
+    expected_inventory = "/qdrant/static/qdrant-web-ui.spdx.json"
+
+    assert expected_base in source
+    assert f"test -f {expected_inventory}" in source
+    assert "rm -rf /qdrant/static" in source
+    assert "rm -f /qdrant/static/qdrant-web-ui.spdx.json" not in source
+    assert "install -d -o 0 -g 0 -m 0755 /qdrant/static" in source
+    assert source.index(f"test -f {expected_inventory}") < source.index(
+        "rm -rf /qdrant/static"
+    )
     assert "wget" in source
     assert "rm -rf /var/lib/apt/lists/*" in source

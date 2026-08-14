@@ -51,6 +51,13 @@ def test_operator_docs_describe_windows_operations_contract():
         assert value.lower() in windows.lower()
 
     assert windows.count("Set-Location -LiteralPath 'D:\\python_self_agent'") >= 3
+    normalized_windows = " ".join(windows.split())
+    assert "Qdrant Dashboard is intentionally unavailable" in normalized_windows
+    assert "Qdrant HTTP API is the supported interface" in normalized_windows
+    assert (
+        "does not make the unmodified upstream image vulnerability-free"
+        in normalized_windows
+    )
 
     assert "docker compose --env-file deploy/.env up -d --build" in deploy
     assert "deploy/windows/README.md" in deploy
