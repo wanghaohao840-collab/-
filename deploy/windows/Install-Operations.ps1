@@ -4,8 +4,8 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EnvFile = 'deploy\.env',
-    [string]$StateRoot = 'deploy-state',
-    [string]$BackupRoot = 'D:\python_self_agent_backups'
+    [string]$StateRoot = $null,
+    [string]$BackupRoot = $null
 )
 
 Set-StrictMode -Version Latest

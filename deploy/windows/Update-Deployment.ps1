@@ -3,8 +3,8 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EnvFile = 'deploy\.env',
-    [string]$StateRoot = 'deploy-state',
-    [string]$BackupRoot = 'D:\python_self_agent_backups',
+    [string]$StateRoot = $null,
+    [string]$BackupRoot = $null,
     [ValidateRange(1, 600)][int]$HealthTimeoutSeconds = 180,
     [scriptblock]$CommandRunner,
     [switch]$SkipNotification

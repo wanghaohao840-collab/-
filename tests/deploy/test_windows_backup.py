@@ -724,3 +724,59 @@ def test_restore_drill_preflight_failures_are_reported_without_mutation(
     assert str(production_data) not in json.dumps(recorded)
     assert marker.read_text(encoding="utf-8") == "unchanged"
     assert not (backups / ".drills").exists()
+
+
+@pytest.mark.parametrize("explicit_fallback", [False, True])
+def test_restore_drill_report_uses_omitted_env_or_explicit_state_root(
+    tmp_path: Path, explicit_fallback: bool
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    shutil.copyfile(ROOT / "compose.yaml", repository / "compose.yaml")
+    data = tmp_path / "deployment-data"
+    data.mkdir()
+    environment_state = tmp_path / "environment-state"
+    backups = tmp_path / "backups"
+    (backups / "daily").mkdir(parents=True)
+    env_file = repository / "deploy.env"
+    env_file.write_text(
+        f"DEPLOY_DATA_ROOT={data}\n"
+        f"DEPLOY_STATE_ROOT={environment_state}\n"
+        f"DEPLOY_BACKUP_ROOT={backups}\n",
+        encoding="utf-8",
+    )
+    state_argument = " -StateRoot 'deploy-state'" if explicit_fallback else ""
+
+    result = run_ps(
+        f"& '{ps_quote(DRILL)}' -RepositoryRoot '{ps_quote(repository)}' "
+        f"-EnvFile '{ps_quote(env_file)}'{state_argument} -HealthTimeoutSeconds 5"
+    )
+
+    assert result.returncode != 0
+    expected_state = repository / "deploy-state" if explicit_fallback else environment_state
+    reports = list((expected_state / "reports").glob("restore-drill-*.json"))
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text(encoding="utf-8-sig"))
+    assert report["failure_stage"] == "backup-discovery"
+
+
+def test_restore_drill_configuration_failure_uses_safe_report_fallback(tmp_path: Path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    shutil.copyfile(ROOT / "compose.yaml", repository / "compose.yaml")
+    env_file = repository / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\nOPERATIONS_NOTIFY_COOLDOWN_MINUTES=invalid\n",
+        encoding="utf-8",
+    )
+
+    result = run_ps(
+        f"& '{ps_quote(DRILL)}' -RepositoryRoot '{ps_quote(repository)}' "
+        f"-EnvFile '{ps_quote(env_file)}' -HealthTimeoutSeconds 5"
+    )
+
+    assert result.returncode != 0
+    reports = list((repository / "deploy-state" / "reports").glob("restore-drill-*.json"))
+    assert len(reports) == 1
+    report = json.loads(reports[0].read_text(encoding="utf-8-sig"))
+    assert report["failure_stage"] == "configuration"

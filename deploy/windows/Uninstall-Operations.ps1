@@ -4,24 +4,14 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EnvFile = 'deploy\.env',
-    [string]$StateRoot = 'deploy-state',
-    [string]$BackupRoot = 'D:\python_self_agent_backups'
+    [string]$StateRoot = $null,
+    [string]$BackupRoot = $null
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-function Resolve-UninstallPath {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$BasePath
-    )
-
-    if ([IO.Path]::IsPathRooted($Path)) {
-        return [IO.Path]::GetFullPath($Path)
-    }
-    return [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
-}
+Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 
 $firewallName = 'Python Self Agent - Private Intranet 7860'
 $taskNames = @(
@@ -30,11 +20,7 @@ $taskNames = @(
     'PythonSelfAgent-DailyBackup',
     'PythonSelfAgent-MonthlyRestoreDrill'
 )
-$repositoryPath = (Resolve-Path -LiteralPath $RepositoryRoot).Path
-$envPath = Resolve-UninstallPath -Path $EnvFile -BasePath $repositoryPath
-$statePath = Resolve-UninstallPath -Path $StateRoot -BasePath $repositoryPath
-$backupPath = Resolve-UninstallPath -Path $BackupRoot -BasePath $repositoryPath
-$dataPath = Join-Path $repositoryPath 'deploy-data'
+$config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
 
 foreach ($taskName in $taskNames) {
     $matchingTasks = @(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue |
@@ -50,8 +36,8 @@ if ($matchingRules.Count -gt 0 -and $PSCmdlet.ShouldProcess($firewallName, 'Remo
     $matchingRules | Remove-NetFirewallRule -ErrorAction Stop
 }
 
-Write-Output "Preserved environment file: $envPath"
-Write-Output "Preserved deployment data: $dataPath"
-Write-Output "Preserved operations state: $statePath"
-Write-Output "Preserved backup location: $backupPath"
+Write-Output "Preserved environment file: $($config.EnvFile)"
+Write-Output "Preserved deployment data: $($config.DataRoot)"
+Write-Output "Preserved operations state: $($config.StateRoot)"
+Write-Output "Preserved backup location: $($config.BackupRoot)"
 Write-Output 'Preserved containers and images.'

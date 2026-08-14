@@ -123,14 +123,14 @@ function Get-OperationsConfig {
     $backupSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'DEPLOY_BACKUP_ROOT'
     $cooldownSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'OPERATIONS_NOTIFY_COOLDOWN_MINUTES'
 
-    if ([string]::IsNullOrWhiteSpace($StateRoot) -or $StateRoot -eq $defaultStateRoot) {
+    if ([string]::IsNullOrWhiteSpace($StateRoot)) {
         $StateRoot = if ([string]::IsNullOrWhiteSpace($stateSetting)) {
             $defaultStateRoot
         } else {
             $stateSetting
         }
     }
-    if ([string]::IsNullOrWhiteSpace($BackupRoot) -or $BackupRoot -eq $defaultBackupRoot) {
+    if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
         $BackupRoot = if ([string]::IsNullOrWhiteSpace($backupSetting)) {
             $defaultBackupRoot
         } else {

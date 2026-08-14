@@ -17,6 +17,10 @@ START = ROOT / "deploy" / "windows" / "Start-Deployment.ps1"
 HEALTH = ROOT / "deploy" / "windows" / "Test-DeploymentHealth.ps1"
 INSTALL = ROOT / "deploy" / "windows" / "Install-Operations.ps1"
 UNINSTALL = ROOT / "deploy" / "windows" / "Uninstall-Operations.ps1"
+BACKUP = ROOT / "deploy" / "windows" / "Backup-Deployment.ps1"
+RESTORE = ROOT / "deploy" / "windows" / "Restore-Deployment.ps1"
+DRILL = ROOT / "deploy" / "windows" / "Invoke-RestoreDrill.ps1"
+UPDATE = ROOT / "deploy" / "windows" / "Update-Deployment.ps1"
 
 
 def run_ps(
@@ -248,8 +252,25 @@ def test_configuration_uses_safe_operations_defaults_when_env_values_are_absent(
     assert result.returncode == 0, result.stderr
     config = json.loads(result.stdout)
     assert Path(config["StateRoot"]) == repo / "deploy-state"
-    assert config["BackupRoot"] == "D:\\python_self_agent_backups"
     assert config["NotificationCooldownMinutes"] == 30
+
+
+@pytest.mark.skipif(os.name != "nt", reason="asserts Windows drive-path semantics")
+def test_configuration_uses_safe_windows_backup_default(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repo / "deploy.env"
+    env_file.write_text("DEPLOY_DATA_ROOT=data\n", encoding="utf-8")
+
+    result = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' | ConvertTo-Json -Compress"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["BackupRoot"] == "D:\\python_self_agent_backups"
 
 
 def test_configuration_uses_validated_environment_defaults_and_explicit_overrides(
@@ -291,6 +312,39 @@ def test_configuration_uses_validated_environment_defaults_and_explicit_override
     explicit_config = json.loads(explicit.stdout)
     assert Path(explicit_config["StateRoot"]) == explicit_state
     assert Path(explicit_config["BackupRoot"]) == explicit_backups
+
+    fallback_collision = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' -StateRoot 'deploy-state' "
+        + f"-BackupRoot '{ps_quote(explicit_backups)}' | ConvertTo-Json -Compress"
+    )
+    assert fallback_collision.returncode == 0, fallback_collision.stderr
+    collision_config = json.loads(fallback_collision.stdout)
+    assert Path(collision_config["StateRoot"]) == repo / "deploy-state"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="asserts Windows drive-path semantics")
+def test_explicit_windows_backup_fallback_value_overrides_environment(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repo / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\n"
+        f"DEPLOY_BACKUP_ROOT={tmp_path / 'environment-backups'}\n",
+        encoding="utf-8",
+    )
+
+    result = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' "
+        + "-BackupRoot 'D:\\python_self_agent_backups' | ConvertTo-Json -Compress"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["BackupRoot"] == "D:\\python_self_agent_backups"
 
 
 @pytest.mark.parametrize("cooldown", ["zero", "0", "1441"])
@@ -799,6 +853,64 @@ def test_operations_uninstaller_removes_only_its_exact_tasks_and_rule():
         "del /",
     ):
         assert forbidden not in source
+
+
+def test_operations_entry_points_forward_only_honest_optional_root_values():
+    for script in (START, HEALTH, BACKUP, RESTORE, DRILL, UPDATE, INSTALL, UNINSTALL):
+        source = script.read_text(encoding="utf-8")
+        assert "[string]$StateRoot = $null" in source
+        assert "Get-OperationsConfig" in source
+    for script in (BACKUP, RESTORE, DRILL, UPDATE, INSTALL, UNINSTALL):
+        source = script.read_text(encoding="utf-8")
+        assert "[string]$BackupRoot = $null" in source
+
+    installer = INSTALL.read_text(encoding="utf-8")
+    assert "-StateRoot \"{3}\"" in installer
+    assert "$Config.StateRoot" in installer
+    assert "-BackupRoot \"{0}\"" in installer
+    assert "$Config.BackupRoot" in installer
+
+
+def test_uninstall_uses_environment_roots_and_reports_effective_preserved_paths(
+    tmp_path: Path,
+):
+    copied_windows = tmp_path / "copied" / "deploy" / "windows"
+    copied_windows.mkdir(parents=True)
+    copied_uninstall = copied_windows / UNINSTALL.name
+    copied_uninstall.write_text(
+        UNINSTALL.read_text(encoding="utf-8").replace(
+            "#Requires -RunAsAdministrator\n", ""
+        ),
+        encoding="utf-8",
+    )
+    shutil.copyfile(MODULE, copied_windows / MODULE.name)
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    data = tmp_path / "environment-data"
+    state = tmp_path / "environment-state"
+    backups = tmp_path / "environment-backups"
+    env_file = repository / "deploy.env"
+    env_file.write_text(
+        f"DEPLOY_DATA_ROOT={data}\n"
+        f"DEPLOY_STATE_ROOT={state}\n"
+        f"DEPLOY_BACKUP_ROOT={backups}\n",
+        encoding="utf-8",
+    )
+    result = run_ps(
+        "function global:Get-ScheduledTask { @() }; "
+        "function global:Get-NetFirewallRule { @() }; "
+        + f"& '{ps_quote(copied_uninstall)}' "
+        + f"-RepositoryRoot '{ps_quote(repository)}' "
+        + f"-EnvFile '{ps_quote(env_file)}'"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"Preserved environment file: {env_file}" in result.stdout
+    assert f"Preserved deployment data: {data}" in result.stdout
+    assert f"Preserved operations state: {state}" in result.stdout
+    assert f"Preserved backup location: {backups}" in result.stdout
 
 
 def installer_prelude() -> str:

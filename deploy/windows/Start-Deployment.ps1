@@ -3,7 +3,7 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EnvFile = 'deploy\.env',
-    [string]$StateRoot = 'deploy-state',
+    [string]$StateRoot = $null,
     [ValidateRange(30, 600)][int]$TimeoutSeconds = 180
 )
 

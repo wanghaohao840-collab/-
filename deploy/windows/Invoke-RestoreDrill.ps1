@@ -3,8 +3,8 @@
 param(
     [string]$RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
     [string]$EnvFile = 'deploy\.env',
-    [string]$StateRoot = 'deploy-state',
-    [string]$BackupRoot = 'D:\python_self_agent_backups',
+    [string]$StateRoot = $null,
+    [string]$BackupRoot = $null,
     [ValidateRange(1, 600)][int]$HealthTimeoutSeconds = 180,
     [scriptblock]$ExternalInvoker,
     [scriptblock]$HealthProbe
@@ -191,17 +191,30 @@ function Remove-ValidatedDrillDirectory {
 }
 
 $reportRepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot)
-$reportStateRoot = if ([IO.Path]::IsPathRooted($StateRoot)) {
-    [IO.Path]::GetFullPath($StateRoot)
-} else {
-    [IO.Path]::GetFullPath((Join-Path $reportRepositoryRoot $StateRoot))
+function New-RestoreDrillReportPath {
+    param([Parameter(Mandatory)][string]$StateRoot)
+
+    $reportStateRoot = [IO.Path]::GetFullPath($StateRoot)
+    $reportRoot = Join-Path $reportStateRoot 'reports'
+    Assert-SafePath -Path $reportRoot -AllowedRoot $reportStateRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $reportRoot | Out-Null
+    $reportStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffffffZ')
+    $reportPath = Join-Path $reportRoot "restore-drill-$reportStamp.json"
+    Assert-SafePath -Path $reportPath -AllowedRoot $reportRoot | Out-Null
+    return $reportPath
 }
-$reportRoot = Join-Path $reportStateRoot 'reports'
-Assert-SafePath -Path $reportRoot -AllowedRoot $reportStateRoot | Out-Null
-New-Item -ItemType Directory -Force -Path $reportRoot | Out-Null
-$reportStamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssfffffffZ')
-$reportPath = Join-Path $reportRoot "restore-drill-$reportStamp.json"
-Assert-SafePath -Path $reportPath -AllowedRoot $reportRoot | Out-Null
+
+$fallbackStateSetting = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+    'deploy-state'
+} else {
+    $StateRoot
+}
+$fallbackReportStateRoot = if ([IO.Path]::IsPathRooted($fallbackStateSetting)) {
+    [IO.Path]::GetFullPath($fallbackStateSetting)
+} else {
+    [IO.Path]::GetFullPath((Join-Path $reportRepositoryRoot $fallbackStateSetting))
+}
+$reportPath = $null
 $redactionEnvFile = if ([IO.Path]::IsPathRooted($EnvFile)) {
     [IO.Path]::GetFullPath($EnvFile)
 } else {
@@ -227,6 +240,7 @@ $category = 'preflight'
 
 try {
     $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+    $reportPath = New-RestoreDrillReportPath -StateRoot $config.StateRoot
     $redactionEnvFile = $config.EnvFile
     $backupPath = [IO.Path]::GetFullPath($config.BackupRoot).TrimEnd('\', '/')
     $backupParent = [IO.Path]::GetDirectoryName($backupPath)
@@ -382,6 +396,9 @@ $report = [ordered]@{
     retained_data = $retainedData
     error = $safeFailure
 } | ConvertTo-Json
+if ($null -eq $reportPath) {
+    $reportPath = New-RestoreDrillReportPath -StateRoot $fallbackReportStateRoot
+}
 [IO.File]::WriteAllText($reportPath, $report, (New-Object System.Text.UTF8Encoding($false)))
 
 if ($null -ne $failureMessage) {
