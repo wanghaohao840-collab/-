@@ -177,6 +177,7 @@ def test_deployment_workflow_is_pinned_and_offline_from_secrets():
     )
 
     assert "ubuntu-24.04" in workflow
+    assert '"requirements.txt"' in workflow
     assert "permissions:" in workflow
     assert "contents: read" in workflow
     assert "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd" in workflow
@@ -194,6 +195,9 @@ def test_deployment_workflow_is_pinned_and_offline_from_secrets():
     assert workflow.count("--ignore-unfixed --severity CRITICAL --exit-code 1") == 2
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in workflow
     assert ".trivy-cache" in workflow
+    assert workflow.count('--user "$(id -u):$(id -g)"') == 2
+    assert workflow.count("--group-add") == 2
+    assert workflow.count("--cache-dir /tmp/trivy-cache") == 2
     assert "trap 'rm -rf .trivy-cache' EXIT" in workflow
     assert "actions/cache" not in workflow
     assert "smoke_test.py" not in workflow

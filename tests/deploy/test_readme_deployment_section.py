@@ -36,6 +36,7 @@ def test_operator_docs_describe_windows_operations_contract():
         "Update-Deployment.ps1",
         "Uninstall-Operations.ps1",
         "Get-NetFirewallRule",
+        "Enabled, Direction, Action, Profile",
         "Get-ScheduledTask",
         "Private",
         "LocalSubnet",
@@ -48,6 +49,8 @@ def test_operator_docs_describe_windows_operations_contract():
         "does not delete",
     ):
         assert value.lower() in windows.lower()
+
+    assert windows.count("Set-Location -LiteralPath 'D:\\python_self_agent'") >= 3
 
     assert "docker compose --env-file deploy/.env up -d --build" in deploy
     assert "deploy/windows/README.md" in deploy

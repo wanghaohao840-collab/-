@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -93,6 +94,9 @@ def test_status_json_contains_no_secret_values(tmp_path: Path):
     assert "[REDACTED]" in json.dumps(payload)
 
 
+@pytest.mark.skipif(
+    os.name != "nt", reason="Windows Runtime toast types exist only on Windows"
+)
 def test_notification_types_resolve_in_clean_windows_powershell():
     source = MODULE.read_text(encoding="utf-8")
     manager_type = (
@@ -224,6 +228,128 @@ def test_configuration_rejects_missing_env_when_compose_exists(tmp_path: Path):
 
     assert result.returncode != 0
     assert "environment file was not found" in result.stderr.lower()
+
+
+def test_configuration_uses_safe_operations_defaults_when_env_values_are_absent(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repo / "deploy.env"
+    env_file.write_text("DEPLOY_DATA_ROOT=data\n", encoding="utf-8")
+
+    result = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' | ConvertTo-Json -Compress"
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = json.loads(result.stdout)
+    assert Path(config["StateRoot"]) == repo / "deploy-state"
+    assert config["BackupRoot"] == "D:\\python_self_agent_backups"
+    assert config["NotificationCooldownMinutes"] == 30
+
+
+def test_configuration_uses_validated_environment_defaults_and_explicit_overrides(
+    tmp_path: Path,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repo / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\n"
+        "DEPLOY_STATE_ROOT=environment-state\n"
+        f"DEPLOY_BACKUP_ROOT={tmp_path / 'environment-backups'}\n"
+        "OPERATIONS_NOTIFY_COOLDOWN_MINUTES=45\n",
+        encoding="utf-8",
+    )
+
+    defaults = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' | ConvertTo-Json -Compress"
+    )
+    assert defaults.returncode == 0, defaults.stderr
+    default_config = json.loads(defaults.stdout)
+    assert Path(default_config["StateRoot"]) == repo / "environment-state"
+    assert Path(default_config["BackupRoot"]) == tmp_path / "environment-backups"
+    assert default_config["NotificationCooldownMinutes"] == 45
+
+    explicit_state = tmp_path / "explicit-state"
+    explicit_backups = tmp_path / "explicit-backups"
+    explicit = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' "
+        + f"-StateRoot '{ps_quote(explicit_state)}' "
+        + f"-BackupRoot '{ps_quote(explicit_backups)}' | ConvertTo-Json -Compress"
+    )
+    assert explicit.returncode == 0, explicit.stderr
+    explicit_config = json.loads(explicit.stdout)
+    assert Path(explicit_config["StateRoot"]) == explicit_state
+    assert Path(explicit_config["BackupRoot"]) == explicit_backups
+
+
+@pytest.mark.parametrize("cooldown", ["zero", "0", "1441"])
+def test_configuration_rejects_invalid_notification_cooldown(
+    tmp_path: Path, cooldown: str
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repo / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\n"
+        f"DEPLOY_BACKUP_ROOT={tmp_path / 'backups'}\n"
+        f"OPERATIONS_NOTIFY_COOLDOWN_MINUTES={cooldown}\n",
+        encoding="utf-8",
+    )
+
+    result = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}'"
+    )
+
+    assert result.returncode != 0
+    assert "OPERATIONS_NOTIFY_COOLDOWN_MINUTES" in result.stderr
+
+
+def test_configured_notification_cooldown_is_applied(tmp_path: Path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repo / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\n"
+        f"DEPLOY_BACKUP_ROOT={tmp_path / 'backups'}\n"
+        "OPERATIONS_NOTIFY_COOLDOWN_MINUTES=1\n",
+        encoding="utf-8",
+    )
+    state = tmp_path / "state"
+    result = run_ps(
+        import_module()
+        + f"Get-OperationsConfig -RepositoryRoot '{ps_quote(repo)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' | Out-Null; "
+        + f"$state='{ps_quote(state)}'; "
+        + "$sent = Send-OperationsNotification -StateRoot $state "
+        + "-Category 'test' -Title 'title' -Message 'message' "
+        + "-NotificationAction { param($title, $message) }; "
+        + "if (-not $sent) { exit 11 }; "
+        + "$stamp = Join-Path $state 'notifications\\test.json'; "
+        + "$payload = Get-Content -LiteralPath $stamp -Raw | ConvertFrom-Json; "
+        + "$payload.last_sent_at = (Get-Date).ToUniversalTime().AddMinutes(-2).ToString('o'); "
+        + "$payload | ConvertTo-Json | Set-Content -LiteralPath $stamp; "
+        + "$sent = Send-OperationsNotification -StateRoot $state "
+        + "-Category 'test' -Title 'title' -Message 'message' "
+        + "-NotificationAction { param($title, $message) }; "
+        + "if (-not $sent) { exit 12 }"
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_compose_health_uses_config_context_and_only_required_services(
@@ -527,6 +653,10 @@ def test_module_import_failure_uses_the_script_repository_fallback(tmp_path: Pat
         assert "caller-state" not in status_text + log_text
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="uses a Windows .cmd shim, PATH separator, and taskkill process cleanup",
+)
 def test_startup_global_deadline_stops_a_hanging_docker_command(
     tmp_path: Path, trusted_fallback_state: Path
 ):

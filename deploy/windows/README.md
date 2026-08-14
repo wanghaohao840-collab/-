@@ -38,6 +38,8 @@ The firewall rule is restricted to TCP 7860 with `Private` and `LocalSubnet`:
 
 ```powershell
 Get-NetFirewallRule -DisplayName 'Python Self Agent - Private Intranet 7860' |
+  Format-List DisplayName, Enabled, Direction, Action, Profile
+Get-NetFirewallRule -DisplayName 'Python Self Agent - Private Intranet 7860' |
   Get-NetFirewallPortFilter
 Get-NetFirewallRule -DisplayName 'Python Self Agent - Private Intranet 7860' |
   Get-NetFirewallAddressFilter
@@ -79,7 +81,13 @@ Use explicit roots in manual commands. They override the documented defaults:
 state is `D:\python_self_agent\deploy-state` and backups are stored outside the
 repository at `D:\python_self_agent_backups`.
 
+`DEPLOY_STATE_ROOT`, `DEPLOY_BACKUP_ROOT`, and
+`OPERATIONS_NOTIFY_COOLDOWN_MINUTES` are loaded from `deploy\.env` when explicit
+state or backup parameters are not supplied. The notification cooldown must be
+an integer from 1 through 1440 minutes; its safe default is 30 minutes.
+
 ```powershell
+Set-Location -LiteralPath 'D:\python_self_agent'
 $state = 'D:\python_self_agent\deploy-state'
 $backups = 'D:\python_self_agent_backups'
 & .\deploy\windows\Backup-Deployment.ps1 -RepositoryRoot 'D:\python_self_agent' -EnvFile 'deploy\.env' -StateRoot $state -BackupRoot $backups
@@ -101,6 +109,7 @@ Operational logs and the latest status are
 View live application logs separately:
 
 ```powershell
+Set-Location -LiteralPath 'D:\python_self_agent'
 docker compose --env-file deploy\.env logs --tail 200 app qdrant
 ```
 
@@ -110,6 +119,7 @@ Run the following from an elevated PowerShell session to remove the four tasks
 and the Private-intranet firewall rule:
 
 ```powershell
+Set-Location -LiteralPath 'D:\python_self_agent'
 & .\deploy\windows\Uninstall-Operations.ps1 -RepositoryRoot 'D:\python_self_agent' -EnvFile 'deploy\.env' -StateRoot 'D:\python_self_agent\deploy-state' -BackupRoot 'D:\python_self_agent_backups'
 ```
 

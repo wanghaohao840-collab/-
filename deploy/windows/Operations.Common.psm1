@@ -1,4 +1,5 @@
 Set-StrictMode -Version Latest
+$script:OperationsNotifyCooldownMinutes = 30
 
 function Protect-LogText {
     [CmdletBinding()]
@@ -116,12 +117,38 @@ function Get-OperationsConfig {
     }
     $dataRoot = Resolve-OperationsPath -Path $dataSetting -BasePath $repositoryPath
 
-    if ([string]::IsNullOrWhiteSpace($StateRoot)) {
-        $StateRoot = 'deploy-state'
+    $defaultStateRoot = 'deploy-state'
+    $defaultBackupRoot = 'D:\python_self_agent_backups'
+    $stateSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'DEPLOY_STATE_ROOT'
+    $backupSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'DEPLOY_BACKUP_ROOT'
+    $cooldownSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'OPERATIONS_NOTIFY_COOLDOWN_MINUTES'
+
+    if ([string]::IsNullOrWhiteSpace($StateRoot) -or $StateRoot -eq $defaultStateRoot) {
+        $StateRoot = if ([string]::IsNullOrWhiteSpace($stateSetting)) {
+            $defaultStateRoot
+        } else {
+            $stateSetting
+        }
     }
-    if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
-        $BackupRoot = 'D:\python_self_agent_backups'
+    if ([string]::IsNullOrWhiteSpace($BackupRoot) -or $BackupRoot -eq $defaultBackupRoot) {
+        $BackupRoot = if ([string]::IsNullOrWhiteSpace($backupSetting)) {
+            $defaultBackupRoot
+        } else {
+            $backupSetting
+        }
     }
+
+    $notificationCooldownMinutes = 30
+    if (-not [string]::IsNullOrWhiteSpace($cooldownSetting)) {
+        $parsedCooldown = 0
+        if (-not [int]::TryParse($cooldownSetting, [ref]$parsedCooldown) -or
+            $parsedCooldown -lt 1 -or $parsedCooldown -gt 1440) {
+            throw 'OPERATIONS_NOTIFY_COOLDOWN_MINUTES must be an integer from 1 through 1440'
+        }
+        $notificationCooldownMinutes = $parsedCooldown
+    }
+    $script:OperationsNotifyCooldownMinutes = $notificationCooldownMinutes
+
     $statePath = Resolve-OperationsPath -Path $StateRoot -BasePath $repositoryPath
     $backupPath = Resolve-OperationsPath -Path $BackupRoot -BasePath $repositoryPath
 
@@ -138,6 +165,7 @@ function Get-OperationsConfig {
         StateRoot = $statePath
         BackupRoot = $backupPath
         DataRoot = $dataRoot
+        NotificationCooldownMinutes = $notificationCooldownMinutes
         Python = Join-Path $repositoryPath 'venv\Scripts\python.exe'
     }
 }
@@ -244,7 +272,7 @@ function Send-OperationsNotification {
             $previous = Get-Content -LiteralPath $stampFile -Raw | ConvertFrom-Json
             if ($previous.last_sent_at) {
                 $lastSent = [DateTime]::Parse($previous.last_sent_at).ToUniversalTime()
-                if (($now - $lastSent).TotalMinutes -lt 30) {
+                if (($now - $lastSent).TotalMinutes -lt $script:OperationsNotifyCooldownMinutes) {
                     return $false
                 }
             }

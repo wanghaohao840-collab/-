@@ -5,6 +5,7 @@ on:
     paths:
       - "Dockerfile"
       - "compose.yaml"
+      - "requirements.txt"
       - "deploy/**"
       - ".github/workflows/deployment.yml"
       - "tests/deploy/**"
@@ -14,6 +15,7 @@ on:
     paths:
       - "Dockerfile"
       - "compose.yaml"
+      - "requirements.txt"
       - "deploy/**"
       - ".github/workflows/deployment.yml"
       - "tests/deploy/**"
@@ -43,10 +45,14 @@ jobs:
           trap 'rm -rf .trivy-cache' EXIT
           trivy_image='aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f'
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --group-add "$(stat -c '%g' /var/run/docker.sock)" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
-            -v "$PWD/.trivy-cache:/root/.cache/" \
-            "$trivy_image" image --ignore-unfixed --severity CRITICAL --exit-code 1 python_self_agent-app:local
+            -v "$PWD/.trivy-cache:/tmp/trivy-cache" \
+            "$trivy_image" image --ignore-unfixed --severity CRITICAL --exit-code 1 --cache-dir /tmp/trivy-cache python_self_agent-app:local
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --group-add "$(stat -c '%g' /var/run/docker.sock)" \
             -v /var/run/docker.sock:/var/run/docker.sock:ro \
-            -v "$PWD/.trivy-cache:/root/.cache/" \
-            "$trivy_image" image --ignore-unfixed --severity CRITICAL --exit-code 1 python_self_agent-qdrant:local
+            -v "$PWD/.trivy-cache:/tmp/trivy-cache" \
+            "$trivy_image" image --ignore-unfixed --severity CRITICAL --exit-code 1 --cache-dir /tmp/trivy-cache python_self_agent-qdrant:local
