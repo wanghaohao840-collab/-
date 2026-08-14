@@ -913,6 +913,119 @@ def test_uninstall_uses_environment_roots_and_reports_effective_preserved_paths(
     assert f"Preserved backup location: {backups}" in result.stdout
 
 
+@pytest.mark.parametrize(
+    "config_failure",
+    (
+        "missing-repository",
+        "missing-compose",
+        "missing-env",
+        "unreadable-env",
+        "missing-data-root",
+        "invalid-cooldown",
+        "overlapping-roots",
+    ),
+)
+def test_uninstall_configuration_failure_still_removes_only_exact_objects(
+    tmp_path: Path, config_failure: str
+):
+    copied_windows = tmp_path / "copied" / "deploy" / "windows"
+    copied_windows.mkdir(parents=True)
+    copied_uninstall = copied_windows / UNINSTALL.name
+    copied_uninstall.write_text(
+        UNINSTALL.read_text(encoding="utf-8").replace(
+            "#Requires -RunAsAdministrator\n", ""
+        ),
+        encoding="utf-8",
+    )
+    shutil.copyfile(MODULE, copied_windows / MODULE.name)
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    compose = repository / "compose.yaml"
+    compose.write_text("services: {}\n", encoding="utf-8")
+    env_file = repository / "deploy.env"
+    env_file.write_text("DEPLOY_DATA_ROOT=data\n", encoding="utf-8")
+    repository_argument = repository
+    env_argument: Path | str = env_file
+    explicit_arguments = ""
+    explicit_state = tmp_path / "explicit-state"
+    explicit_backups = tmp_path / "explicit-backups"
+    if config_failure == "missing-repository":
+        repository_argument = tmp_path / "missing-repository"
+    elif config_failure == "missing-compose":
+        compose.unlink()
+    elif config_failure == "missing-env":
+        env_file.unlink()
+        env_argument = repository / "TOKEN=must-not-leak"
+        explicit_arguments = (
+            f" -StateRoot '{ps_quote(explicit_state)}'"
+            f" -BackupRoot '{ps_quote(explicit_backups)}'"
+        )
+    elif config_failure == "unreadable-env":
+        env_file.unlink()
+        env_file.mkdir()
+    elif config_failure == "missing-data-root":
+        env_file.write_text("OPERATIONS_NOTIFY_COOLDOWN_MINUTES=30\n", encoding="utf-8")
+    elif config_failure == "invalid-cooldown":
+        env_file.write_text(
+            "DEPLOY_DATA_ROOT=data\nOPERATIONS_NOTIFY_COOLDOWN_MINUTES=invalid\n",
+            encoding="utf-8",
+        )
+    elif config_failure == "overlapping-roots":
+        env_file.write_text(
+            "DEPLOY_DATA_ROOT=shared\nDEPLOY_STATE_ROOT=shared\n",
+            encoding="utf-8",
+        )
+
+    calls = tmp_path / "removals.txt"
+    marker = tmp_path / "preserve-me.txt"
+    marker.write_text("unchanged", encoding="utf-8")
+    result = run_ps(
+        f"$global:removalCalls='{ps_quote(calls)}'; "
+        "function global:Get-ScheduledTask { param([string]$TaskName) "
+        "[PSCustomObject]@{ TaskName=$TaskName } }; "
+        "function global:Unregister-ScheduledTask { [CmdletBinding(SupportsShouldProcess)] "
+        "param([string]$TaskName) "
+        "Add-Content -LiteralPath $global:removalCalls -Value \"task:$TaskName\" }; "
+        "function global:Get-NetFirewallRule { param([string]$DisplayName) "
+        "[PSCustomObject]@{ DisplayName=$DisplayName } }; "
+        "function global:Remove-NetFirewallRule { [CmdletBinding()] param("
+        "[Parameter(ValueFromPipeline=$true)]$InputObject) process { "
+        "Add-Content -LiteralPath $global:removalCalls -Value "
+        "\"rule:$($InputObject.DisplayName)\" } }; "
+        + f"& '{ps_quote(copied_uninstall)}' "
+        + f"-RepositoryRoot '{ps_quote(repository_argument)}' "
+        + f"-EnvFile '{ps_quote(env_argument)}'{explicit_arguments}"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Configuration warning:" in result.stdout
+    assert "must-not-leak" not in result.stdout + result.stderr
+    assert "Preserved environment file label:" in result.stdout
+    assert "Preserved deployment data label:" in result.stdout
+    assert "Preserved operations state label:" in result.stdout
+    assert "Preserved backup location label:" in result.stdout
+    if config_failure == "missing-env":
+        assert f"Preserved operations state label: {explicit_state}" in result.stdout
+        assert f"Preserved backup location label: {explicit_backups}" in result.stdout
+    assert marker.read_text(encoding="utf-8") == "unchanged"
+    assert not (repository / "deploy-state").exists()
+    assert not (repository / "deploy-data").exists()
+    assert not (tmp_path / "environment-state").exists()
+    assert not (tmp_path / "environment-backups").exists()
+    assert not explicit_state.exists()
+    assert not explicit_backups.exists()
+
+    removals = calls.read_text(encoding="utf-8-sig").splitlines()
+    assert removals == [
+        "task:PythonSelfAgent-LoginRecovery",
+        "task:PythonSelfAgent-Health",
+        "task:PythonSelfAgent-DailyBackup",
+        "task:PythonSelfAgent-MonthlyRestoreDrill",
+        "rule:Python Self Agent - Private Intranet 7860",
+    ]
+
+
 def installer_prelude() -> str:
     source = INSTALL.read_text(encoding="utf-8")
     helpers = source.split("$modulePath = Join-Path", maxsplit=1)[0]

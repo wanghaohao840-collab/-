@@ -20,7 +20,13 @@ $taskNames = @(
     'PythonSelfAgent-DailyBackup',
     'PythonSelfAgent-MonthlyRestoreDrill'
 )
-$config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+$config = $null
+$configurationWarning = $null
+try {
+    $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+} catch {
+    $configurationWarning = Protect-LogText ([string]$_.Exception.Message)
+}
 
 foreach ($taskName in $taskNames) {
     $matchingTasks = @(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue |
@@ -36,8 +42,27 @@ if ($matchingRules.Count -gt 0 -and $PSCmdlet.ShouldProcess($firewallName, 'Remo
     $matchingRules | Remove-NetFirewallRule -ErrorAction Stop
 }
 
-Write-Output "Preserved environment file: $($config.EnvFile)"
-Write-Output "Preserved deployment data: $($config.DataRoot)"
-Write-Output "Preserved operations state: $($config.StateRoot)"
-Write-Output "Preserved backup location: $($config.BackupRoot)"
+if ($null -ne $config) {
+    Write-Output "Preserved environment file: $($config.EnvFile)"
+    Write-Output "Preserved deployment data: $($config.DataRoot)"
+    Write-Output "Preserved operations state: $($config.StateRoot)"
+    Write-Output "Preserved backup location: $($config.BackupRoot)"
+} else {
+    $envLabel = Protect-LogText ([string]$EnvFile)
+    $stateLabel = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+        'deploy-state (safe default; not resolved)'
+    } else {
+        Protect-LogText ([string]$StateRoot)
+    }
+    $backupLabel = if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
+        'D:\python_self_agent_backups (safe default; not resolved)'
+    } else {
+        Protect-LogText ([string]$BackupRoot)
+    }
+    Write-Output "Configuration warning: $configurationWarning"
+    Write-Output "Preserved environment file label: $envLabel"
+    Write-Output 'Preserved deployment data label: deploy-data (safe default; not resolved)'
+    Write-Output "Preserved operations state label: $stateLabel"
+    Write-Output "Preserved backup location label: $backupLabel"
+}
 Write-Output 'Preserved containers and images.'
