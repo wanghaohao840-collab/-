@@ -340,6 +340,11 @@ python3 deploy/smoke_test.py --env-file deploy/.env
 [`deploy/README.md`](deploy/README.md)。该部署保持单副本、单 worker，直接
 HTTP 仅适用于受控内网；公网访问必须由外部 HTTPS 网关保护。
 
+Windows operators should use the documented task, firewall, backup, restore,
+upgrade, and uninstall procedures in
+[`deploy/windows/README.md`](deploy/windows/README.md). The installer refuses
+active Public network profiles; it never silently changes their classification.
+
 ## 使用流程
 
 1. 注册或登录。用户名长度为 3–32，密码长度为 8–128。

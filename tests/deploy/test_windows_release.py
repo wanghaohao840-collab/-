@@ -171,6 +171,38 @@ def test_update_script_exists():
     assert UPDATE.is_file()
 
 
+def test_deployment_workflow_is_pinned_and_offline_from_secrets():
+    workflow = (ROOT / ".github" / "workflows" / "deployment.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ubuntu-24.04" in workflow
+    assert "permissions:" in workflow
+    assert "contents: read" in workflow
+    assert "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd" in workflow
+    assert (
+        "aquasec/trivy:0.72.0@sha256:"
+        "cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+        in workflow
+    )
+    assert "pytest tests/deploy" in workflow
+    assert 'sudo ln -s "$(command -v pwsh)" /usr/local/bin/powershell.exe' in workflow
+    assert "docker compose --env-file deploy/.env config --quiet" in workflow
+    assert "docker compose --env-file deploy/.env build app qdrant" in workflow
+    assert "python_self_agent-app:local" in workflow
+    assert "python_self_agent-qdrant:local" in workflow
+    assert workflow.count("--ignore-unfixed --severity CRITICAL --exit-code 1") == 2
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in workflow
+    assert ".trivy-cache" in workflow
+    assert "trap 'rm -rf .trivy-cache' EXIT" in workflow
+    assert "actions/cache" not in workflow
+    assert "smoke_test.py" not in workflow
+    assert "--deep" not in workflow
+    assert "docker compose --env-file deploy/.env up" not in workflow
+    for forbidden in ("secrets.", "LLM_", "OPENAI_", "NEO4J_"):
+        assert forbidden not in workflow
+
+
 def test_success_orders_all_release_gates_and_writes_report(tmp_path: Path):
     result, calls, state, archive = run_update(tmp_path)
 

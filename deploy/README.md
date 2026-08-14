@@ -4,6 +4,14 @@
 启动 Gradio 应用与 Qdrant；Neo4j 通过 `graph` Profile 按需启动。当前
 Session 和用户锁位于进程内，因此必须保持一个应用容器、一个 worker。
 
+## Windows operations
+
+For the supported Windows single-node operator workflow, including the Private
+network preflight, scheduled backups, restore drills, upgrades, and uninstall
+boundaries, see [deploy/windows/README.md](windows/README.md). The Windows
+operations defaults are documented in `.env.example`; use explicit script
+parameters for an operator-selected state or backup root.
+
 ## 前置条件
 
 - Linux 主机；

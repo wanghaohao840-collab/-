@@ -1,0 +1,52 @@
+name: Deployment verification
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "compose.yaml"
+      - "deploy/**"
+      - ".github/workflows/deployment.yml"
+      - "tests/deploy/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "Dockerfile"
+      - "compose.yaml"
+      - "deploy/**"
+      - ".github/workflows/deployment.yml"
+      - "tests/deploy/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Install deployment test dependencies
+        run: python3 -m pip install -r requirements.txt
+      - name: Provide the deployment tests' PowerShell command
+        run: sudo ln -s "$(command -v pwsh)" /usr/local/bin/powershell.exe
+      - name: Verify deployment contracts and Compose configuration
+        run: |
+          cp deploy/.env.example deploy/.env
+          python3 -m pytest tests/deploy -q
+          docker compose --env-file deploy/.env config --quiet
+      - name: Build local deployment images
+        run: docker compose --env-file deploy/.env build app qdrant
+      - name: Scan local deployment images
+        run: |
+          mkdir -p .trivy-cache
+          trap 'rm -rf .trivy-cache' EXIT
+          trivy_image='aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f'
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v "$PWD/.trivy-cache:/root/.cache/" \
+            "$trivy_image" image --ignore-unfixed --severity CRITICAL --exit-code 1 python_self_agent-app:local
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v "$PWD/.trivy-cache:/root/.cache/" \
+            "$trivy_image" image --ignore-unfixed --severity CRITICAL --exit-code 1 python_self_agent-qdrant:local
