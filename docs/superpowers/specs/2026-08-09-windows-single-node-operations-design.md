@@ -201,6 +201,87 @@ ScheduledTasks action、principal、settings 和注册路径，迫使月度任�
 对象与错误处理语义。该决定只修复 CIM 架构兼容性，不放宽 principal、幂等性或
 fail-closed 边界。
 
+#### 8.3.1 月度任务注册路径的真实主机决策协议
+
+2026-08-15 的真实主机安装证明：四个内存任务定义均可构造且外层
+`ShouldProcess` 均为 true，但 `Register-ScheduledTask -InputObject` 对最后一个
+月度定义在每次安装中都触发一次
+`PS_ScheduledTask::RegisterByObject` / `0x80041001`，最终只持久化三个任务。
+由于该生成式 ScheduledTasks 函数的非终止错误没有被当前调用提升，安装脚本仍然
+输出完成，包装器也错误写入两次通过。此状态不是成功，也不得仅凭命令返回或包装器
+标记接受安装。
+
+在再次修改生产注册路径或重试安装前，必须先执行一个独立、临时、可证明清理的月度
+canary。canary 名称只能是单一精确白名单前缀
+`PythonSelfAgent-Canary-MonthlyRestoreDrill-` 加密码学随机的 32 位小写十六进制后缀；
+后缀必须来自 `RandomNumberGenerator` 填充的 16 个新字节，不得使用 `Random`、时间戳
+或 GUID 文本代替。生成后必须再次按该精确语法校验，不得接受调用方给出的任意名称、
+通配符或前缀删除。
+canary 必须复用已经验证的月度 trigger、`Invoke-RestoreDrill.ps1` action、settings，
+以及从当前活动 WTS 会话解析出的同一用户。principal 必须显式构造为该 WTS 用户的
+`Interactive` / `Highest` 等价语义。canary 只验证定义与持久化，不得启动任务，
+因此不得执行恢复演练、访问备份数据或改变应用数据。
+
+canary 仅测试 ScheduledTasks 的 `RegisterByPrincipal` 参数路径：
+
+```powershell
+$registered = @(Register-ScheduledTask `
+    -TaskName $canaryName `
+    -Action $validatedMonthlyAction `
+    -Trigger $validatedMonthlyTrigger `
+    -Settings $validatedMonthlySettings `
+    -Principal $validatedWtsPrincipal `
+    -Force -ErrorAction Stop)
+```
+
+调用前后不得创建或修改防火墙规则、环境文件 ACL、状态数据、备份或生产任务。
+命令必须返回恰好一个非空对象；随后必须通过 ScheduledTasks provider 和
+`schtasks`/精确任务 XML 独立重查根路径下恰好一个同名 canary。持久化定义必须逐项
+验证：`ScheduleByMonthDayOfWeek`、星期日、第一周、全年十二个月、本地 04:00:00，
+同一 WTS principal 的 `InteractiveToken` / `HighestAvailable`，可信的精确 action
+脚本与参数，以及既定 `StartWhenAvailable`、`WakeToRun`、`IgnoreNew` settings。
+任何缺失、重复、路径错误、值漂移、空输出或非终止错误都算 canary 失败。
+
+清理必须置于 `finally`，且只能在名称仍满足本次随机 canary 的精确值和白名单语法、
+provider 重查也只返回该一个对象时，调用
+`Unregister-ScheduledTask -TaskName $canaryName -Confirm:$false -ErrorAction Stop`。
+随后必须用 provider 与 `schtasks` 双重证明该精确 canary 已不存在。不得枚举前缀后
+批量删除；清理失败本身是阻断性失败，必须报告并由人工处理，不能继续生产安装。
+
+若 canary 的注册、完整持久化验证和 finally 清理全部成功，生产月度任务可以采用该
+最小 `RegisterByPrincipal` 参数路径；其余三个任务继续使用现有的已验证路径。若
+canary 返回 `0x80041001`、无法持久化，或不能保持完全相同的 principal/trigger/
+action/settings 语义，则不得改变任何生产任务，设计退回到一个另行评审的“仅月度任务
+使用文档化 Task Scheduler XML”方案。该 fallback 必须表达真正的
+`ScheduleByMonthDayOfWeek`，仍使用同一 WTS principal/action/settings，并经过同样的
+精确重查；本节只定义 fallback 边界，不授权直接实现它，也不恢复已拒绝的 COM 注册
+双路径。
+
+无论最终采用哪条注册路径，每一次 ScheduledTasks/NetSecurity 写调用都必须显式
+`-ErrorAction Stop`，检查命令结果基数与身份，并立即重查持久化对象。安装成功输出前
+还必须独立要求：四个精确任务各一个且无额外 `PythonSelfAgent-*` 对象；每个任务的
+action、trigger、principal、settings 与合同一致；精确防火墙规则只有一个并且仍为
+Enabled / Inbound / Allow / TCP 7860 / Private / LocalSubnet；环境文件 ACL 仍为受保护
+的三个预期非继承主体。包装器只有在安装脚本返回 0 且上述最终状态全部成立时才能写
+`success`。这项要求必须单独验证 wrapper marker truthfulness。三任务或其他部分状态
+必须返回失败、写真实失败标记并原地保留，以便后续
+幂等 `-Force` 收敛；不得把部分状态清理成不可诊断状态，也不得再次 false-success。
+
+验证矩阵至少包括：
+
+| 场景 | 预期结果 |
+|---|---|
+| 随机 canary 经 `RegisterByPrincipal` 返回一个对象，provider/XML 全部精确，finally 双重证明已删除 | 允许单独评审生产月度任务采用该参数路径；生产状态在 canary 阶段不变 |
+| canary 复现 WMI `RegisterByPrincipal`/`RegisterByObject` `0x80041001`、产生非终止错误或零输出 | 提升为失败；finally 只清理精确 canary；不进行生产写入；进入 XML fallback 设计评审 |
+| canary 存在但 XML 的首个星期日、04:00、全年月份、principal、action 或 settings 任一不符 | 失败并精确清理；不得接受“接近”等价语义 |
+| canary 清理失败或清理后仍能由任一查询路径找到 | 阻断并报告精确名称；不得继续生产安装或扩大删除范围 |
+| 生产注册调用返回对象但重查缺少任一任务、名称/路径重复或只有三个任务 | 安装非零失败；包装器写失败而非 success；保留可幂等恢复的部分状态 |
+| Windows 11 Home / PowerShell 5.1 连续两次安装 | 每次均显式捕获 provider 错误并验证四任务、一规则、精确 ACL；第二次无重复；包装器标记与真实状态一致 |
+
+继续拒绝每周触发器近似“每月第一个星期日”，因为月份长度会造成漂移。也拒绝在脚本
+内部计算下一个日期、注册一次性任务后自行重排的方案；它引入跨月状态、自修改与崩溃
+恢复语义，不能替代 Task Scheduler 原生月度合同。
+
 ## 9. 备份、保留与恢复演练
 
 ### 9.1 Windows 冷备份
