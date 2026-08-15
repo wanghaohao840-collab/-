@@ -1,7 +1,7 @@
 ---
 id: "document-library-vertical-slice-01"
 title: "Create the verified Penpot document-library source"
-status: "ready"
+status: "blocked"
 parallel-safe: true
 depends-on: []
 base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
@@ -132,4 +132,52 @@ Stop and report `blocked` if any standard reality-conflict condition in `docs/ag
 
 ## Implementation handoff
 
-Replace this section with the exact handoff format from `docs/agent-workflow/TASK_PACKET_TEMPLATE.md`, including Penpot revision, created IDs, export hashes/dimensions, verification counts, scope confirmation and commit.
+- Packet: `document-library-vertical-slice-01`
+- Status: `blocked`
+- Delivered:
+  - Verified the repository prerequisite state and stopped before implementation because this session exposes no Penpot MCP/connector capable of fresh-reading or writing the required file.
+- Files changed:
+  - `docs/agent-workflow/task-packets/2026-08-15-document-library-vertical-slice/01-penpot-design-source.md` — records the blocked handoff and reality conflict.
+- Interfaces added or changed:
+  - `none`
+- Acceptance evidence:
+  - [ ] Seven named boards exist — not attempted because the Penpot connector prerequisite is unavailable.
+  - [ ] Direct PNG exports and ID-complete handoff exist — not attempted because board identity cannot be verified or safely written.
+  - [ ] Focused contract passes — no contract was written because TDD implementation may not begin past the external-prerequisite stop condition.
+- Verification:
+  - `git rev-parse HEAD` — PASS (`7ae7314d09acfddf91653db644649fa0b55add9d`, the planning commit specified by the assignment)
+  - `git status --short` — PASS (clean before this blocked-report update)
+  - `ALL_TOOLS.filter(tool => /penpot/i.test(tool.name))` — FAIL prerequisite (zero Penpot tools exposed)
+  - `list_mcp_resources({})` and `list_mcp_resource_templates({})` — FAIL prerequisite (no Penpot server/resource; no resource templates)
+- Scope confirmation:
+  - changed only allowed files: yes
+  - forbidden areas untouched: yes
+- Deviations:
+  - `none`; implementation stopped exactly at the connector-unavailable stop condition.
+- Residual risks/follow-ups:
+  - Connect an authenticated Penpot MCP session with file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c` open, then return this packet to `ready` only after the file and all seven page IDs can be fresh-read.
+- Commit:
+  - `not committed`
+
+## Reality-conflict report
+
+- Packet: `document-library-vertical-slice-01`
+- Status: blocked
+- Expected by packet:
+  - A user-authenticated Penpot tab with an MCP plugin connected and target file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c` open.
+  - A connector that can fresh-read the active file, the seven recorded page IDs, component IDs and parent IDs before every write.
+- Observed in repository:
+  - `docs/product-ui/penpot-handoff.md:8-24` records the expected file ID and all seven expected page IDs.
+  - Current tool discovery returned zero tool names containing `penpot`.
+  - Current MCP discovery returned no Penpot server or resource, and no MCP resource templates.
+  - The available recommended-plugin list contains no Penpot plugin, so no approved install path is available in this session.
+- Impact:
+  - The active file/page/component/parent identities cannot be asserted. Continuing would require guessing IDs or substituting a non-Penpot authoring path, both explicitly forbidden by this packet.
+- Work completed before pause:
+  - Read `PROJECT_KNOWLEDGE.md`, the assigned packet, workflow protocol and task-packet template.
+  - Verified HEAD `7ae7314d09acfddf91653db644649fa0b55add9d` and a clean initial worktree.
+  - No Penpot nodes, handoff documentation, tests or PNG exports were created or modified.
+- Recommended resolution:
+  - revise packet
+- Decision required:
+  - Expose/connect the Penpot MCP connector in this Codex session with the authenticated target file open, then confirm the packet may be returned to `ready` and resumed.
