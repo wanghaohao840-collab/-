@@ -153,6 +153,54 @@ Desktop。
 首次失败时只运行一次 `docker compose up -d` 并重新检查。再次失败则退出非零、
 记录诊断和发送去重通知。健康任务不执行备份恢复、镜像重建或递归重启。
 
+### 8.3 月度触发器的 Task Scheduler CIM 兼容性（真实主机决策）
+
+2026-08-15 的 Windows 11 Home / Windows PowerShell 5.1 真实主机验收采用
+Task Scheduler CIM 兼容方案。安装脚本必须用 `Get-CimClass` 从
+`Root/Microsoft/Windows/TaskScheduler` 解析名称精确等于
+`MSFT_TaskMonthlyDOWTrigger` 的类，再把该 `CimClass` 传给一次
+`New-CimInstance -CimClass ... -ClientOnly -Property ...` 调用。不得改用只按
+`-ClassName` 创建的空实例。生成的对象必须物化继承的触发器属性，运行时类仍精确
+为 `MSFT_TaskMonthlyDOWTrigger`，并包含 ScheduledTasks 参数绑定要求的
+`Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger` 类型身份；
+任一条件不满足都在系统写入前失败。
+
+月份掩码字段只接受以下两个大小写精确的架构名称之一：Task Scheduler 文档使用的
+`MonthsOfYear`，或本机 CIM 架构实际暴露的兼容名称 `MonthOfYear`。解析结果必须
+恰好命中一个名称；两者都没有、两者同时存在、名称不精确、类型不可赋值或其他
+歧义都 fail-closed，不推测别名。属性表在同一次 `New-CimInstance` 调用中设置并在
+返回后逐项断言：`Enabled = $true`；`StartBoundary` 为安装当日本地时间
+`04:00:00` 的 ISO 8601 秒精度值，作为不晚于后续有效触发时间的下界与时刻锚点；
+`DaysOfWeek = [uint16]1`（星期日）；`WeeksOfMonth = [uint16]1`（第一个星期）；
+以及实际解析出的月份字段为 `[uint16]4095`（全年十二个月）。第一个星期日由日、
+周和月份掩码共同定义，不用代码近似计算下一次日期；由此保持每月第一个星期日
+04:00 的现有语义。
+
+安装脚本必须在创建状态目录、修改环境文件 ACL、防火墙或任务计划程序之前，完成
+当前 WTS 活动会话用户的 `Interactive` / `Highest` principal、四个 action、全部
+trigger、settings 和四个内存任务定义的构建与验证。月度定义必须通过
+`New-ScheduledTask` 的内存参数绑定，且验证后的触发器类型、字段和值与上述断言
+一致；这一验证不得注册任务。只有四个定义全部有效后才能进入既有写入阶段，实际
+注册仍使用当前 WTS principal，不改变登录恢复、5 分钟健康、每日 03:00 或月度
+演练的其他语义。
+
+验证矩阵必须覆盖：
+
+| 架构/场景 | 预期结果 |
+|---|---|
+| 仅有 `MonthsOfYear` 且继承属性与类型完整 | 通过；写入文档字段，精确掩码为 `1 / 1 / 4095`，`Enabled` 为 true |
+| 仅有 `MonthOfYear` 且继承属性与类型完整 | 通过；写入本机兼容字段，其他断言完全相同 |
+| 两个月份字段都缺失或同时存在 | 在任何系统写入前拒绝 |
+| `Enabled` 或其他必需字段未物化、类型不可赋值、值回读不一致 | 在任何系统写入前拒绝 |
+| 对象缺少精确派生类或继承的 `MSFT_TaskTrigger` 类型身份 | 在任何系统写入前拒绝 |
+| Windows 11 Home / PowerShell 5.1 真实安装 | 安装脚本连续运行两次均成功；只有四个精确任务、一个精确防火墙规则，月度任务仍为第一个星期日 04:00 |
+
+不采用每周触发器近似月度计划，因为固定周间隔不能表达“每月第一个星期日”，会随
+月份长度漂移。也不采用直接 Task Scheduler COM API，因为它会绕过当前统一的
+ScheduledTasks action、principal、settings 和注册路径，迫使月度任务维护第二套
+对象与错误处理语义。该决定只修复 CIM 架构兼容性，不放宽 principal、幂等性或
+fail-closed 边界。
+
 ## 9. 备份、保留与恢复演练
 
 ### 9.1 Windows 冷备份
