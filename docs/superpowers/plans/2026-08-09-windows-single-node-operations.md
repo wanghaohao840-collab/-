@@ -686,27 +686,33 @@ git commit -m "ci: verify hardened Docker deployment"
 ### Task 8: Validate, install, and exercise the complete operations package
 
 **Files:**
-- Modify: `deploy/windows/Install-Operations.ps1:107-155` only for the approved Docker Desktop wildcard-plus-loopback listener compatibility correction.
-- Test: `tests/deploy/test_windows_operations.py:1029-1080` for the synthetic ownership matrix and the existing installer prelude harness.
+- Modify: `deploy/windows/Install-Operations.ps1:107-169` for the approved Docker Desktop wildcard-plus-loopback listener compatibility correction, and `deploy/windows/Install-Operations.ps1:223-339` for the approved monthly-trigger CIM compatibility correction and pre-mutation task-definition validation.
+- Test: `tests/deploy/test_windows_operations.py:763-830` for installer/task static contracts and `tests/deploy/test_windows_operations.py:1029-1205` for executable listener, container-inspect, monthly-trigger, and WTS cases using the existing installer prelude harness.
 - Modify other files only if a separate test-discovered defect is explicitly approved; do not fold unrelated refactoring into this correction.
 - Runtime writes outside Git: `D:\python_self_agent_backups`, Windows Task Scheduler, Windows Firewall, ACLs, and ignored `deploy-state`.
 
 **Interfaces:**
 - Preserve `Test-ListenerAddressCompatibleWithBinding -ListenerAddress <string> -HostIp <string> -> bool` and `Test-ComposePortListenerOwnership -Listeners <object[]> -PortBindings <object[]> -ProcessesById <hashtable> -> bool`.
 - Preserve `Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config <PSCustomObject>` as the boundary that requires exactly one Compose `app` container and obtains only that container's `7860/tcp` `PortBindings`.
-- No other new code interface; this task proves the approved completion criteria.
+- Add `Resolve-OperationsMonthlyTriggerSchema -CimClass [object] -> [string]`, returning exactly `MonthsOfYear` or `MonthOfYear` only after exact class, namespace, required-property, and CIM-type validation.
+- Add `Assert-OperationsMonthlyRestoreDrillTrigger -Trigger [object] -MonthPropertyName [string] -ExpectedStartBoundary [string] -> void`, rejecting a non-CIM object, missing `MSFT_TaskTrigger` ETS identity, missing materialized fields, or any value/mask mismatch.
+- Add `New-OperationsMonthlyRestoreDrillTrigger -StartBoundary [datetime] -> Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger`, using one schema-validating `New-CimInstance -CimClass -ClientOnly -Property` call.
+- Each entry in `$taskDefinitions` gains `Definition`, an in-memory `MSFT_ScheduledTask` returned by `New-ScheduledTask`; registration consumes `-InputObject $task.Definition` only after all four definitions validate before the write boundary.
 
 - [ ] **Step 1: Run repository verification before system writes**
 
 ```powershell
-$env:TEMP = (Resolve-Path '.runtime').Path
-$env:TMP = $env:TEMP
-.\venv\Scripts\python.exe -m pytest tests/deploy -q --basetemp=.runtime/pytest-ops-deploy
-.\venv\Scripts\python.exe -m pytest -q --basetemp=.runtime/pytest-ops-full
+$deployBase = Join-Path (Get-Location) ('.operations-test-task8-stage1-deploy-' + [guid]::NewGuid().ToString('N'))
+$fullBase = Join-Path (Get-Location) ('.operations-test-task8-stage1-full-' + [guid]::NewGuid().ToString('N'))
+@($deployBase, $fullBase) | ForEach-Object { [IO.Directory]::CreateDirectory($_) | Out-Null }
+.\venv\Scripts\python.exe -m pytest tests/deploy -q `
+  -p no:cacheprovider --basetemp=$deployBase
+.\venv\Scripts\python.exe -m pytest -q `
+  -p no:cacheprovider --basetemp=$fullBase
 docker compose --env-file deploy/.env config --quiet
 docker compose --env-file deploy/.env build app qdrant
-python deploy/smoke_test.py --env-file deploy/.env
-python deploy/smoke_test.py --env-file deploy/.env --deep
+.\venv\Scripts\python.exe deploy/smoke_test.py --env-file deploy/.env
+.\venv\Scripts\python.exe deploy/smoke_test.py --env-file deploy/.env --deep
 ```
 
 Expected: deployment tests and full regression pass; Compose validates/builds; default and deep smoke pass. Record any demonstrably unrelated pre-existing failure rather than masking it.
@@ -943,40 +949,542 @@ git commit -m "fix: accept Docker Desktop loopback forwarder"
 
 Expected: the staged file list contains exactly those two paths and the commit succeeds.
 
-- [ ] **Step 5: Retry the installer twice in one elevated process and verify every postcondition**
+- [ ] **Step 5: Correct the approved Task Scheduler monthly-trigger CIM defect with TDD, review it independently, and commit it**
+
+The real Windows 11 Home / Windows PowerShell 5.1 pass failed before its first mutation because the current line 283 uses `New-CimInstance -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClassName MSFT_TaskMonthlyDOWTrigger -ClientOnly` without a property map. That form returns an empty `MSFT_TaskMonthlyDOWTrigger` instance with neither a materialized `Enabled` property nor the inherited `Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger` ETS identity, so line 284 throws `SetValueInvocationException`. The same host's resolved CIM schema exposes `MonthOfYear` while the documented Task Scheduler API calls the member `MonthsOfYear`. Implement design section 8.3 only; do not use a weekly approximation, direct COM registration, XML registration, or a validation-free `-ClassName -Property` workaround.
+
+First replace the three brittle source assertions for direct `$monthlyTrigger` assignments in `test_operations_installer_has_private_intranet_and_exact_task_contracts` with assertions for the three approved helper names, `New-ScheduledTask`, `-InputObject $task.Definition`, and the exact masks in the property map. Add these executable tests beside `installer_prelude()` in `tests/deploy/test_windows_operations.py`:
+
+```python
+def assert_installer_monthly_static_contracts(source: str) -> None:
+    for helper_name in (
+        "Resolve-OperationsMonthlyTriggerSchema",
+        "Assert-OperationsMonthlyRestoreDrillTrigger",
+        "New-OperationsMonthlyRestoreDrillTrigger",
+    ):
+        assert helper_name in source
+    for exact_contract in (
+        "Enabled = $true",
+        "DaysOfWeek = [uint16]1",
+        "WeeksOfMonth = [uint16]1",
+        "$properties[$monthPropertyName] = [uint16]4095",
+        "-InputObject $task.Definition",
+    ):
+        assert exact_contract in source
+
+
+def fake_monthly_cim_class(
+    month_members: tuple[str, ...],
+    *,
+    enabled_type: str = "Boolean",
+    days_type: str = "UInt16",
+) -> str:
+    properties = [
+        ("Enabled", enabled_type),
+        ("StartBoundary", "String"),
+        ("DaysOfWeek", days_type),
+        ("WeeksOfMonth", "UInt16"),
+        *((name, "UInt16") for name in month_members),
+    ]
+    property_script = ",".join(
+        f"[PSCustomObject]@{{ Name='{name}'; CimType='{cim_type}' }}"
+        for name, cim_type in properties
+    )
+    return (
+        "[PSCustomObject]@{ "
+        "CimClassName='MSFT_TaskMonthlyDOWTrigger'; "
+        "CimSystemProperties=[PSCustomObject]@{ "
+        "Namespace='Root/Microsoft/Windows/TaskScheduler' }; "
+        f"CimClassProperties=@({property_script}) }}"
+    )
+
+
+@pytest.mark.parametrize("month_name", ["MonthsOfYear", "MonthOfYear"])
+def test_installer_monthly_schema_accepts_documented_or_local_month_member(
+    month_name: str,
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + f"; $class = {fake_monthly_cim_class((month_name,))}; "
+        + "$actual = Resolve-OperationsMonthlyTriggerSchema -CimClass $class; "
+        + f"if ($actual -cne '{month_name}') {{ exit 80 }} }}"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "month_members",
+    [(), ("MonthsOfYear", "MonthOfYear"), ("monthsofyear",)],
+)
+def test_installer_monthly_schema_rejects_neither_or_both_month_members(
+    month_members: tuple[str, ...],
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + f"; $class = {fake_monthly_cim_class(month_members)}; "
+        + "try { Resolve-OperationsMonthlyTriggerSchema -CimClass $class | Out-Null; exit 81 } "
+        + "catch { if ($_.Exception.Message -notlike "
+        + "'*exactly one MonthOfYear/MonthsOfYear*') { exit 82 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("class_script", "expected_message"),
+    [
+        (
+            fake_monthly_cim_class(("MonthOfYear",)).replace(
+                "[PSCustomObject]@{ Name='Enabled'; CimType='Boolean' },", ""
+            ),
+            "*missing required property: Enabled*",
+        ),
+        (
+            fake_monthly_cim_class(("MonthOfYear",), days_type="String"),
+            "*invalid CIM type for DaysOfWeek*",
+        ),
+    ],
+)
+def test_installer_monthly_schema_rejects_missing_or_wrong_typed_required_property(
+    class_script: str, expected_message: str
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + f"; $class = {class_script}; "
+        + "try { Resolve-OperationsMonthlyTriggerSchema -CimClass $class | Out-Null; exit 83 } "
+        + f"catch {{ if ($_.Exception.Message -notlike '{expected_message}') {{ exit 84 }}; exit 0 }} }}"
+    )
+
+    assert result.returncode == 0, result.stderr
+```
+
+Inside `test_operations_installer_has_private_intranet_and_exact_task_contracts`, remove the old direct-assignment assertions and call `assert_installer_monthly_static_contracts(source)` once immediately after `source` is loaded; keep all unrelated task/firewall/WTS assertions unchanged.
+
+Also add these concrete cases; every rejection test must assert the named diagnostic rather than treating any exception as success, so a missing helper remains red:
+
+| Test name | Setup and exact expectation |
+|---|---|
+| `test_installer_monthly_trigger_rejects_missing_enabled_or_inherited_type` | Parameterize an exact client-only `-ClassName -Property` instance with `Enabled` omitted but the base ETS name inserted, and a complete property instance without that ETS name. Call `Assert-OperationsMonthlyRestoreDrillTrigger`; require respectively `missing materialized property: Enabled` and `missing required MSFT_TaskTrigger type` diagnostics. No task is registered. |
+| `test_installer_monthly_trigger_rejects_invalid_materialized_contract` | Start from `New-OperationsMonthlyRestoreDrillTrigger -StartBoundary ([datetime]'2026-08-02T04:00:00')`; separately mutate `Enabled` to false, `DaysOfWeek` to 2, `WeeksOfMonth` to 2, the resolved month field to 2047, and `StartBoundary` to `2026-08-02T05:00:00`. Re-run the assertion helper and require the corresponding exact diagnostic: `Invalid monthly trigger value: Enabled`, `DaysOfWeek`, `WeeksOfMonth`, the selected `MonthOfYear`/`MonthsOfYear`, or `StartBoundary`. |
+| `test_installer_monthly_trigger_uses_exact_first_sunday_0400_contract_on_current_host` | In the current Windows PowerShell host, call the constructor with `2026-08-02T04:00:00` (a known first Sunday), require runtime type `Microsoft.Management.Infrastructure.CimInstance`, derived class `MSFT_TaskMonthlyDOWTrigger`, inherited `MSFT_TaskTrigger` ETS name, `Enabled=True`, masks `1 / 1 / 4095`, and exact boundary. Pass it to `New-ScheduledTask -Action (New-ScheduledTaskAction -Execute 'powershell.exe') -Trigger $trigger`; do not call `Register-ScheduledTask`. |
+| `test_installer_monthly_trigger_rejects_non_0400_start_boundary` | Call the constructor with `2026-08-02T05:00:00`; require `monthly restore drill StartBoundary must be 04:00:00` before `Get-CimClass` or `New-CimInstance` can be reached. |
+| `test_operations_installer_builds_all_task_definitions_before_system_mutations` | Require `$taskDefinitions = @(` and all four `Definition` values produced by `New-ScheduledTask` before the renamed write-boundary comment and before `New-Item`, `icacls.exe`, `New-NetFirewallRule`, or `Register-ScheduledTask`. Require registration text to contain `-InputObject $task.Definition` and no component-wise `-Action $task.Action -Trigger $task.Trigger` registration. |
+
+Implement the four executable trigger rows exactly as follows:
+
+```python
+@pytest.mark.parametrize(
+    ("omit_enabled", "insert_base_type", "expected_message"),
+    [
+        (True, True, "*missing materialized property: Enabled*"),
+        (False, False, "*missing required MSFT_TaskTrigger type*"),
+    ],
+)
+def test_installer_monthly_trigger_rejects_missing_enabled_or_inherited_type(
+    omit_enabled: bool, insert_base_type: bool, expected_message: str
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $properties = @{ StartBoundary='2026-08-02T04:00:00'; "
+        + "DaysOfWeek=[uint16]1; WeeksOfMonth=[uint16]1; "
+        + "MonthOfYear=[uint16]4095 }; "
+        + ("" if omit_enabled else "$properties.Enabled = $true; ")
+        + "$trigger = New-CimInstance -Namespace "
+        + "'Root/Microsoft/Windows/TaskScheduler' "
+        + "-ClassName MSFT_TaskMonthlyDOWTrigger -ClientOnly -Property $properties; "
+        + (
+            "$trigger.PSTypeNames.Insert(0, "
+            "'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger'); "
+            if insert_base_type
+            else ""
+        )
+        + "try { Assert-OperationsMonthlyRestoreDrillTrigger -Trigger $trigger "
+        + "-MonthPropertyName MonthOfYear "
+        + "-ExpectedStartBoundary '2026-08-02T04:00:00'; exit 87 } "
+        + f"catch {{ if ($_.Exception.Message -notlike '{expected_message}') "
+        + "{ exit 88 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutation", "field_name"),
+    [
+        ("$trigger.Enabled = $false", "Enabled"),
+        ("$trigger.DaysOfWeek = [uint16]2", "DaysOfWeek"),
+        ("$trigger.WeeksOfMonth = [uint16]2", "WeeksOfMonth"),
+        ("$trigger.$monthName = [uint16]2047", "month"),
+        ("$trigger.StartBoundary = '2026-08-02T05:00:00'", "StartBoundary"),
+    ],
+)
+def test_installer_monthly_trigger_rejects_invalid_materialized_contract(
+    mutation: str, field_name: str
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $trigger = New-OperationsMonthlyRestoreDrillTrigger "
+        + "-StartBoundary ([datetime]'2026-08-02T04:00:00'); "
+        + "$monthNames = @(@('MonthsOfYear','MonthOfYear') | Where-Object { "
+        + "$null -ne $trigger.PSObject.Properties[$_] }); "
+        + "if ($monthNames.Count -ne 1) { exit 89 }; $monthName = $monthNames[0]; "
+        + mutation
+        + "; $expectedField = if ('"
+        + field_name
+        + "' -eq 'month') { $monthName } else { '"
+        + field_name
+        + "' }; try { Assert-OperationsMonthlyRestoreDrillTrigger "
+        + "-Trigger $trigger -MonthPropertyName $monthName "
+        + "-ExpectedStartBoundary '2026-08-02T04:00:00'; exit 90 } "
+        + "catch { if ($_.Exception.Message -cne "
+        + "\"Invalid monthly trigger value: $expectedField.\") { exit 91 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_monthly_trigger_uses_exact_first_sunday_0400_contract_on_current_host():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $boundary = '2026-08-02T04:00:00'; "
+        + "$trigger = New-OperationsMonthlyRestoreDrillTrigger "
+        + "-StartBoundary ([datetime]$boundary); "
+        + "$monthNames = @(@('MonthsOfYear','MonthOfYear') | Where-Object { "
+        + "$null -ne $trigger.PSObject.Properties[$_] }); "
+        + "if ($trigger.GetType().FullName -cne "
+        + "'Microsoft.Management.Infrastructure.CimInstance' -or "
+        + "$trigger.CimClass.CimClassName -cne 'MSFT_TaskMonthlyDOWTrigger' -or "
+        + "$trigger.PSTypeNames -notcontains "
+        + "'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger' -or "
+        + "$monthNames.Count -ne 1 -or -not $trigger.Enabled -or "
+        + "[int]$trigger.DaysOfWeek -ne 1 -or "
+        + "[int]$trigger.WeeksOfMonth -ne 1 -or "
+        + "[int]$trigger.PSObject.Properties[$monthNames[0]].Value -ne 4095 -or "
+        + "[string]$trigger.StartBoundary -cne $boundary) { exit 92 }; "
+        + "$action = New-ScheduledTaskAction -Execute 'powershell.exe'; "
+        + "New-ScheduledTask -Action $action -Trigger $trigger | Out-Null }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_monthly_trigger_rejects_non_0400_start_boundary():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; try { New-OperationsMonthlyRestoreDrillTrigger "
+        + "-StartBoundary ([datetime]'2026-08-02T05:00:00') | Out-Null; exit 93 } "
+        + "catch { if ($_.Exception.Message -cne "
+        + "'Monthly restore drill StartBoundary must be 04:00:00.') "
+        + "{ exit 94 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+```
+
+Use this exact source-order test for the last row, and update `test_operations_installer_preflights_before_system_mutations` to use the same new boundary string:
+
+```python
+def test_operations_installer_builds_all_task_definitions_before_system_mutations():
+    source = INSTALL.read_text(encoding="utf-8")
+    definition_start = source.index("$taskDefinitions = @(")
+    validation = source.index("New-ScheduledTask -Action $task.Action", definition_start)
+    write_boundary = source.index(
+        "# All preflight checks and in-memory task validation are above this line."
+    )
+    registration = source.index(
+        "Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition"
+    )
+
+    assert definition_start < validation < write_boundary < registration
+    for mutation in (
+        "New-Item -ItemType Directory",
+        "icacls.exe",
+        "Remove-NetFirewallRule",
+        "New-NetFirewallRule",
+        "Register-ScheduledTask",
+    ):
+        assert source.index(mutation) > write_boundary
+    assert "-Action $task.Action -Trigger $task.Trigger" not in source[registration:]
+```
+
+Fold the independent-review Minor regression into the same test-only correction without changing listener logic:
+
+```python
+def test_installer_port_ownership_rejects_wrong_host_port_after_exact_one_container():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; function Get-NetTCPConnection { "
+        + "@([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }) }; "
+        + "function Invoke-External { param($FilePath, $ArgumentList) "
+        + "$signature = $ArgumentList -join '|'; "
+        + "if ($signature -eq "
+        + "'compose|--project-directory|R|--file|C|--env-file|E|ps|-q|app') "
+        + "{ return @('only-app-id') }; "
+        + "if ($signature -eq "
+        + "'inspect|--format|{{json .HostConfig.PortBindings}}|only-app-id') "
+        + "{ return '{\"7860/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"17860\"}]}' }; "
+        + "throw \"unexpected Docker path: $signature\" }; "
+        + "$config = [PSCustomObject]@{ RepositoryRoot='R'; ComposeFile='C'; EnvFile='E' }; "
+        + "try { Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config; exit 85 } "
+        + "catch { if ($_.Exception.Message -notlike "
+        + "'*outside the current Compose app mapping*') { exit 86 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+```
+
+Pre-create a unique repository-local base temp and run the new slice red. Do not use `.runtime`, do not let pytest create its cache, and do not delete any retained runtime directory:
+
+```powershell
+$redBase = Join-Path (Get-Location) ('.operations-test-task8-cim-red-' + [guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($redBase) | Out-Null
+.\venv\Scripts\python.exe -m pytest tests/deploy/test_windows_operations.py -q `
+  -k "monthly_trigger or task_definitions_before_system_mutations or wrong_host_port_after_exact_one_container" `
+  -p no:cacheprovider --basetemp=$redBase
+```
+
+Expected: exit 1. Both accepted-schema cases, exact first-Sunday/current-host construction, strict rejection diagnostics, and pre-mutation definition ordering fail against the old installer for the specific missing behavior. The wrong-HostPort/exact-one-container inspect-path regression exits 0 and proves the unrelated listener path remains green.
+
+Then add these helpers before `$modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'` in `deploy/windows/Install-Operations.ps1`:
+
+```powershell
+function Resolve-OperationsMonthlyTriggerSchema {
+    param([Parameter(Mandatory)]$CimClass)
+
+    $expectedNamespace = 'Root/Microsoft/Windows/TaskScheduler'
+    $expectedClass = 'MSFT_TaskMonthlyDOWTrigger'
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+            [string]$CimClass.CimSystemProperties.Namespace,
+            $expectedNamespace
+        ) -or [string]$CimClass.CimClassName -cne $expectedClass) {
+        throw 'Monthly trigger CIM class or namespace did not match the exact contract.'
+    }
+
+    $properties = @($CimClass.CimClassProperties)
+    $expectedTypes = [ordered]@{
+        Enabled = 'Boolean'
+        StartBoundary = 'String'
+        DaysOfWeek = 'UInt16'
+        WeeksOfMonth = 'UInt16'
+    }
+    foreach ($entry in $expectedTypes.GetEnumerator()) {
+        $matches = @($properties | Where-Object { [string]$_.Name -ceq $entry.Key })
+        if ($matches.Count -ne 1) {
+            throw "Monthly trigger schema is missing required property: $($entry.Key)."
+        }
+        if ([string]$matches[0].CimType -cne $entry.Value) {
+            throw "Monthly trigger schema has invalid CIM type for $($entry.Key)."
+        }
+    }
+
+    $monthCandidates = @($properties | Where-Object {
+        [string]$_.Name -ieq 'MonthsOfYear' -or [string]$_.Name -ieq 'MonthOfYear'
+    })
+    $monthMatches = @($monthCandidates | Where-Object {
+        [string]$_.Name -ceq 'MonthsOfYear' -or [string]$_.Name -ceq 'MonthOfYear'
+    })
+    if ($monthCandidates.Count -ne 1 -or $monthMatches.Count -ne 1) {
+        throw 'Monthly trigger schema must expose exactly one MonthOfYear/MonthsOfYear property.'
+    }
+    if ([string]$monthMatches[0].CimType -cne 'UInt16') {
+        throw "Monthly trigger schema has invalid CIM type for $($monthMatches[0].Name)."
+    }
+    return [string]$monthMatches[0].Name
+}
+
+function Assert-OperationsMonthlyRestoreDrillTrigger {
+    param(
+        [Parameter(Mandatory)]$Trigger,
+        [Parameter(Mandatory)][ValidateSet('MonthsOfYear', 'MonthOfYear')]
+        [string]$MonthPropertyName,
+        [Parameter(Mandatory)][string]$ExpectedStartBoundary
+    )
+
+    if ($Trigger.GetType().FullName -cne 'Microsoft.Management.Infrastructure.CimInstance' -or
+        [string]$Trigger.CimClass.CimClassName -cne 'MSFT_TaskMonthlyDOWTrigger') {
+        throw 'Monthly trigger did not materialize the exact CIM instance type.'
+    }
+    $requiredTriggerType = 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger'
+    if ($Trigger.PSTypeNames -notcontains $requiredTriggerType) {
+        throw 'Monthly trigger is missing required MSFT_TaskTrigger type.'
+    }
+    foreach ($name in @('Enabled', 'StartBoundary', 'DaysOfWeek', 'WeeksOfMonth', $MonthPropertyName)) {
+        if ($null -eq $Trigger.PSObject.Properties[$name]) {
+            throw "Monthly trigger is missing materialized property: $name."
+        }
+    }
+
+    $expected = [ordered]@{
+        Enabled = $true
+        StartBoundary = $ExpectedStartBoundary
+        DaysOfWeek = [uint16]1
+        WeeksOfMonth = [uint16]1
+    }
+    $expected[$MonthPropertyName] = [uint16]4095
+    foreach ($entry in $expected.GetEnumerator()) {
+        $actual = $Trigger.PSObject.Properties[$entry.Key].Value
+        if ($actual -ne $entry.Value) {
+            throw "Invalid monthly trigger value: $($entry.Key)."
+        }
+    }
+}
+
+function New-OperationsMonthlyRestoreDrillTrigger {
+    param([Parameter(Mandatory)][datetime]$StartBoundary)
+
+    if ($StartBoundary.Hour -ne 4 -or $StartBoundary.Minute -ne 0 -or
+        $StartBoundary.Second -ne 0) {
+        throw 'Monthly restore drill StartBoundary must be 04:00:00.'
+    }
+    $namespace = 'Root/Microsoft/Windows/TaskScheduler'
+    $className = 'MSFT_TaskMonthlyDOWTrigger'
+    $classes = @(Get-CimClass -Namespace $namespace -ClassName $className -ErrorAction Stop)
+    if ($classes.Count -ne 1) {
+        throw 'Monthly trigger CIM class resolution did not return exactly one class.'
+    }
+    $monthPropertyName = Resolve-OperationsMonthlyTriggerSchema -CimClass $classes[0]
+    $boundary = $StartBoundary.ToString('s', [Globalization.CultureInfo]::InvariantCulture)
+    $properties = @{
+        Enabled = $true
+        StartBoundary = $boundary
+        DaysOfWeek = [uint16]1
+        WeeksOfMonth = [uint16]1
+    }
+    $properties[$monthPropertyName] = [uint16]4095
+    $trigger = New-CimInstance -CimClass $classes[0] -ClientOnly `
+        -Property $properties -ErrorAction Stop
+    Assert-OperationsMonthlyRestoreDrillTrigger -Trigger $trigger `
+        -MonthPropertyName $monthPropertyName -ExpectedStartBoundary $boundary
+    return $trigger
+}
+```
+
+Keep the existing WTS-derived principal and exact actions/settings, but replace the direct monthly assignments with:
+
+```powershell
+$monthlyTrigger = New-OperationsMonthlyRestoreDrillTrigger `
+    -StartBoundary (Get-Date -Hour 4 -Minute 0 -Second 0)
+```
+
+Move the complete `$taskDefinitions` construction above every mutation. After the array is complete, validate all four definitions in memory and move the write-boundary comment below this loop:
+
+```powershell
+foreach ($task in $taskDefinitions) {
+    $definition = New-ScheduledTask -Action $task.Action -Trigger $task.Trigger `
+        -Settings $task.Settings -Principal $principal -ErrorAction Stop
+    $task | Add-Member -NotePropertyName Definition -NotePropertyValue $definition
+}
+
+# All preflight checks and in-memory task validation are above this line.
+# System changes below are intentional.
+```
+
+Leave state-directory, ACL, and firewall mutations after that boundary. Replace only the registration call inside the existing `ShouldProcess` loop:
+
+```powershell
+Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition `
+    -Force | Out-Null
+```
+
+Run focused green, the complete operations file, deployment suite, full repository suite, Windows PowerShell 5.1 parser, and scoped diff checks. Every pytest command uses its own fresh pre-created base temp:
+
+```powershell
+$focusedBase = Join-Path (Get-Location) ('.operations-test-task8-cim-green-' + [guid]::NewGuid().ToString('N'))
+$operationsBase = Join-Path (Get-Location) ('.operations-test-task8-cim-operations-' + [guid]::NewGuid().ToString('N'))
+$deployBase = Join-Path (Get-Location) ('.operations-test-task8-cim-deploy-' + [guid]::NewGuid().ToString('N'))
+$fullBase = Join-Path (Get-Location) ('.operations-test-task8-cim-full-' + [guid]::NewGuid().ToString('N'))
+@($focusedBase, $operationsBase, $deployBase, $fullBase) | ForEach-Object {
+    [IO.Directory]::CreateDirectory($_) | Out-Null
+}
+.\venv\Scripts\python.exe -m pytest tests/deploy/test_windows_operations.py -q `
+  -k "monthly_trigger or task_definitions_before_system_mutations or wrong_host_port_after_exact_one_container" `
+  -p no:cacheprovider --basetemp=$focusedBase
+.\venv\Scripts\python.exe -m pytest tests/deploy/test_windows_operations.py -q `
+  -p no:cacheprovider --basetemp=$operationsBase
+.\venv\Scripts\python.exe -m pytest tests/deploy -q `
+  -p no:cacheprovider --basetemp=$deployBase
+.\venv\Scripts\python.exe -m pytest -q `
+  -p no:cacheprovider --basetemp=$fullBase
+$tokens = $null
+$parseErrors = $null
+[Management.Automation.Language.Parser]::ParseFile(
+  (Resolve-Path '.\deploy\windows\Install-Operations.ps1').Path,
+  [ref]$tokens,
+  [ref]$parseErrors
+) | Out-Null
+if ($parseErrors.Count -ne 0) {
+  $parseErrors | Format-List
+  throw 'Windows PowerShell 5.1 parser errors detected.'
+}
+git diff --check
+git diff --name-only -- deploy/windows/Install-Operations.ps1 tests/deploy/test_windows_operations.py
+git status --short
+```
+
+Expected: all four green pytest commands exit 0; the current-host test proves the exact formerly failing construction without registering anything; parser errors are zero; the scoped diff contains exactly the installer and operations test. Preserve all unrelated GraphRAG dirt and retained runtime directories.
+
+Commit only the surgical correction and tests:
+
+```powershell
+git add -- deploy/windows/Install-Operations.ps1 tests/deploy/test_windows_operations.py
+git diff --cached --check
+git diff --cached --name-only
+git commit -m "fix: support Windows monthly trigger CIM schema"
+```
+
+Expected: the staged list contains exactly those two files. Before any UAC launch, obtain an independent review of this commit against design section 8.3, the test matrix above, and the unchanged listener/principal/task schedules. The reviewer must return PASS. If it returns a concrete defect, remain before system writes, correct only these same two files with a new red/green cycle and scoped follow-up commit, then repeat the independent review; do not retry the installer on an unapproved commit.
+
+- [ ] **Step 6: Retry the installer twice through the visible manual-admin wrapper and verify every postcondition**
 
 Immediately before UAC, require Docker Server readiness, healthy `app` and `qdrant`, a passing default smoke test, InterfaceIndex 17 still `Private`, the current active WTS identity, the exact trusted repository/env/state/backup paths, and no existing object whose exact name or `PythonSelfAgent-` prefix collides with the four intended tasks or firewall rule unexpectedly. Never display `deploy/.env` contents.
 
-Launch one normal RunAs/UAC process; the user must approve it manually. Execute the installer twice with distinct failure codes and do not automate or bypass UAC:
+Reuse the already validated, ignored runtime wrapper at `D:\python_self_agent\deploy-state\task8-install-operations-wrapper.ps1`; do not stage or commit it. Before launch, require `git check-ignore` to identify it, a clean Windows PowerShell 5.1 AST, no credential assignment or environment value in its text, and the retained approved SHA-256 `ce3172b87719660bed93225aac1b651c13f7b5fd67ed4191bd32994933bdff31`. The wrapper must still accept mandatory `RunId` and `ResultPath`, validate an exact matching child under the trusted state root, verify elevation and the interactive desktop session, call the current installer twice with the exact repository/env/state/backup paths, and atomically write only its redacted JSON result marker.
+
+Launch one visible normal RunAs/UAC process with a new cryptographically random RunId and nonexistent exact marker; the user must approve UAC manually. Do not automate, bypass, hide, or synthesize the prompt:
 
 ```powershell
-$elevatedScript = @'
-$ErrorActionPreference = 'Stop'
-Set-Location -LiteralPath 'D:\python_self_agent'
-try {
-    & '.\deploy\windows\Install-Operations.ps1' `
-      -RepositoryRoot 'D:\python_self_agent' `
-      -EnvFile 'D:\python_self_agent\deploy\.env' `
-      -StateRoot 'D:\python_self_agent\deploy-state' `
-      -BackupRoot 'D:\python_self_agent_backups'
-} catch { Write-Error $_.Exception.Message; exit 41 }
-try {
-    & '.\deploy\windows\Install-Operations.ps1' `
-      -RepositoryRoot 'D:\python_self_agent' `
-      -EnvFile 'D:\python_self_agent\deploy\.env' `
-      -StateRoot 'D:\python_self_agent\deploy-state' `
-      -BackupRoot 'D:\python_self_agent_backups'
-} catch { Write-Error $_.Exception.Message; exit 42 }
-exit 0
-'@
-$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevatedScript))
-$process = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-  -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
-  -Wait -PassThru
-if ($process.ExitCode -ne 0) { throw "Elevated installer failed with exit code $($process.ExitCode)." }
+$runId = [Guid]::NewGuid().ToString('N')
+$wrapper = 'D:\python_self_agent\deploy-state\task8-install-operations-wrapper.ps1'
+$resultPath = Join-Path 'D:\python_self_agent\deploy-state' `
+  ("task8-install-result-{0}.json" -f $runId)
+if (Test-Path -LiteralPath $resultPath) { throw 'Fresh result marker already exists.' }
+$arguments = @(
+  '-NoProfile',
+  '-ExecutionPolicy', 'Bypass',
+  '-File', $wrapper,
+  '-RunId', $runId,
+  '-ResultPath', $resultPath
+)
+$process = Start-Process `
+  "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+  -Verb RunAs -WindowStyle Normal -WorkingDirectory 'D:\python_self_agent' `
+  -ArgumentList $arguments -Wait -PassThru
+if ($process.ExitCode -ne 0) {
+  throw "Elevated wrapper failed with exit code $($process.ExitCode)."
+}
+$utf8 = New-Object Text.UTF8Encoding($false, $true)
+$marker = [IO.File]::ReadAllText($resultPath, $utf8) | ConvertFrom-Json
+if ($marker.RunId -cne $runId -or $marker.Outcome -cne 'success' -or
+    [int]$marker.WrapperExitCode -ne 0 -or [int]$marker.Pass1ExitCode -ne 0 -or
+    [int]$marker.Pass2ExitCode -ne 0 -or
+    [string]::IsNullOrWhiteSpace([string]$marker.Pass1StartedUtc) -or
+    [string]::IsNullOrWhiteSpace([string]$marker.Pass1CompletedUtc) -or
+    [string]::IsNullOrWhiteSpace([string]$marker.Pass2StartedUtc) -or
+    [string]::IsNullOrWhiteSpace([string]$marker.Pass2CompletedUtc)) {
+  throw 'Elevated wrapper marker did not prove two successful installer passes.'
+}
 ```
 
-Expected: the elevated process exits 0, proving both passes completed. Exit 41 means pass 1 failed; exit 42 means pass 2 failed. If UAC is declined or times out, stop without improvising.
+Expected: the visible elevated child exits 0 and the strict UTF-8 marker has the exact RunId, `Outcome=success`, wrapper code 0, pass-1 code 0, and pass-2 code 0 with nonempty timestamps. Exit 41 means pass 1 failed; exit 42 means pass 2 failed. If UAC is declined, times out, the marker is absent/malformed, or any code differs, stop without editing, retrying, or improvising. Retain the wrapper and marker as ignored redacted evidence.
 
 Independently re-read system state rather than trusting installer output. Require exactly these four tasks and no duplicate/prefix collision: `PythonSelfAgent-LoginRecovery`, `PythonSelfAgent-Health`, `PythonSelfAgent-DailyBackup`, and `PythonSelfAgent-MonthlyRestoreDrill`. Each principal must use the current active WTS `DOMAIN\user`, `Interactive`, and `Highest`; each action must invoke `powershell.exe` with the trusted script and effective absolute repository/env/state paths (plus the exact backup root for backup/drill). Require login at-logon, health daily from 00:00 with five-minute repetition for one day, backup daily 03:00, and restore drill first Sunday 04:00. All settings must have `StartWhenAvailable=True`, `MultipleInstances=IgnoreNew`; only backup and drill have `WakeToRun=True`.
 
@@ -1036,12 +1544,23 @@ if ($backup.Triggers.Count -ne 1 -or
     ([datetime]$backup.Triggers[0].StartBoundary).TimeOfDay -ne [timespan]'03:00:00') {
   throw 'Invalid backup trigger.'
 }
-if ($drill.Triggers.Count -ne 1 -or
-    $drill.Triggers[0].CimClass.CimClassName -ne 'MSFT_TaskMonthlyDOWTrigger' -or
-    [int]$drill.Triggers[0].DaysOfWeek -ne 1 -or
-    [int]$drill.Triggers[0].WeeksOfMonth -ne 1 -or
-    [int]$drill.Triggers[0].MonthsOfYear -ne 4095 -or
-    ([datetime]$drill.Triggers[0].StartBoundary).TimeOfDay -ne [timespan]'04:00:00') {
+if ($drill.Triggers.Count -ne 1) { throw 'Invalid restore-drill trigger count.' }
+$drillTrigger = $drill.Triggers[0]
+$drillMonthNames = @(
+  @('MonthsOfYear', 'MonthOfYear') | Where-Object {
+    $null -ne $drillTrigger.PSObject.Properties[$_]
+  }
+)
+if ($drillMonthNames.Count -ne 1) { throw 'Invalid restore-drill month schema.' }
+$drillMonthValue = $drillTrigger.PSObject.Properties[$drillMonthNames[0]].Value
+$requiredDrillType = 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger'
+if ($drillTrigger.CimClass.CimClassName -ne 'MSFT_TaskMonthlyDOWTrigger' -or
+    $drillTrigger.PSTypeNames -notcontains $requiredDrillType -or
+    [bool]$drillTrigger.Enabled -ne $true -or
+    [int]$drillTrigger.DaysOfWeek -ne 1 -or
+    [int]$drillTrigger.WeeksOfMonth -ne 1 -or
+    [int]$drillMonthValue -ne 4095 -or
+    ([datetime]$drillTrigger.StartBoundary).TimeOfDay -ne [timespan]'04:00:00') {
   throw 'Invalid restore-drill trigger.'
 }
 
@@ -1086,23 +1605,23 @@ if (($userRule.FileSystemRights -band [Security.AccessControl.FileSystemRights]:
 
 Expected: the block exits 0 with no output. Compare canonical preflight/postflight snapshots for all non-`PythonSelfAgent-*` task definitions, all non-target firewall rules, and parent-directory ACLs; their hashes must be identical.
 
-- [ ] **Step 6: Exercise startup, health, notification, and backup**
+- [ ] **Step 7: Exercise startup, health, notification, and backup**
 
 Manually start login recovery and health tasks and wait for completion. Require `app`/`qdrant` healthy and default smoke passing within 180 seconds. Trigger a test notification. Run the backup task and require one complete set under `D:\python_self_agent_backups\daily`, valid SHA-256, safe metadata, restarted healthy services, and a successful status/report entry.
 
-- [ ] **Step 7: Exercise retention and isolated restore drill**
+- [ ] **Step 8: Exercise retention and isolated restore drill**
 
 Use a dedicated test backup root beneath `D:\python_self_agent_backups\.acceptance` with synthetic complete sets to prove 7/4 retention without touching real backups. Run the restore drill against the real latest backup, confirm its project name and port differ from production, default smoke passes, production data timestamps/hashes are unchanged, temporary env is absent, and the report is successful.
 
-- [ ] **Step 8: Exercise upgrade success and rollback failure branch**
+- [ ] **Step 9: Exercise upgrade success and rollback failure branch**
 
 Run a normal `Update-Deployment.ps1` and require backup, tests, scans, default/deep smoke, and success report. Then invoke its documented test-only failure injection immediately after candidate startup; require old image IDs restored, pre-upgrade data restored, default smoke passing, and rollback artifacts retained.
 
-- [ ] **Step 9: Verify intranet exposure and port isolation**
+- [ ] **Step 10: Verify intranet exposure and port isolation**
 
 Inspect Docker mappings and local listeners. Confirm only TCP 7860 is published, the firewall rule is Private/LocalSubnet only, and 6333/6334/7474/7687 have no host mapping. Obtain the machine's current private IPv4 address and test port 7860 locally; ask the user to confirm access from one other trusted LAN device because the local machine cannot prove an external firewall path by itself.
 
-- [ ] **Step 10: Verify repository hygiene and final state**
+- [ ] **Step 11: Verify repository hygiene and final state**
 
 ```powershell
 git diff --check
@@ -1113,7 +1632,7 @@ docker compose --env-file deploy/.env ps
 
 Confirm `deploy/.env`, `deploy-state`, `deploy-data`, backups, temporary drill data, and unrelated GraphRAG changes are not staged or committed. Confirm all intended commits exist and services remain healthy.
 
-- [ ] **Step 11: Complete the real reboot acceptance**
+- [ ] **Step 12: Complete the real reboot acceptance**
 
 Request a user-controlled Windows restart. After the user logs back in, measure from task history and logs that login recovery completed within 180 seconds; rerun default smoke and inspect task/firewall/backup state. Do not restart Windows automatically.
 
@@ -1138,6 +1657,7 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 | Deployment CI | 7 |
 | Idempotent install and narrow uninstall | 3, 8 |
 | Docker Desktop wildcard binding with fail-closed loopback forwarders | 8 |
+| Task Scheduler monthly-DOW CIM schema compatibility and pre-mutation task validation | 8 |
 | Preserve single replica and business contracts | Global constraints, 8 |
 | Real reboot and LAN acceptance | 8 |
 
@@ -1149,6 +1669,7 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 - The restore drill and deep smoke share an explicit Compose project-name interface and do not target production.
 - CI uses a full checkout SHA and a digest-pinned Trivy image, avoiding mutable action/scanner tags.
 - System changes occur only after repository tests and explicit network/admin gates.
+- The monthly trigger accepts exactly one documented/local month-mask field, preserves masks `1 / 1 / 4095` and 04:00, and all four task definitions validate in memory before the first system write.
 - No task authorizes touching the existing GraphRAG task-packet modifications or committing secrets/runtime data.
 
 **Plan complete and saved to `docs/superpowers/plans/2026-08-09-windows-single-node-operations.md`.**
