@@ -1443,7 +1443,525 @@ git commit -m "fix: support Windows monthly trigger CIM schema"
 
 Expected: the staged list contains exactly those two files. Before any UAC launch, obtain an independent review of this commit against design section 8.3, the test matrix above, and the unchanged listener/principal/task schedules. The reviewer must return PASS. If it returns a concrete defect, remain before system writes, correct only these same two files with a new red/green cycle and scoped follow-up commit, then repeat the independent review; do not retry the installer on an unapproved commit.
 
-- [ ] **Step 6: Retry the installer twice through the visible manual-admin wrapper and verify every postcondition**
+- [ ] **Step 6: Prove the approved isolated monthly RegisterByPrincipal canary before any production correction**
+
+This is a hard decision gate implementing design section 8.3.1. Do not edit
+`deploy/windows/Install-Operations.ps1`, do not retry the production installer,
+and do not change the existing three production tasks, firewall rule, env ACL,
+backup, or application data in this step. Create only this ignored runtime
+artifact with `apply_patch`; never stage or commit it:
+
+```text
+D:\python_self_agent\deploy-state\task8-monthly-registerbyprincipal-canary.ps1
+```
+
+The wrapper interface is:
+
+```powershell
+param(
+  [Parameter(Mandatory)]
+  [ValidatePattern('^[0-9a-f]{32}$')]
+  [string]$RunId,
+  [Parameter(Mandatory)][string]$ResultPath,
+  [switch]$ValidateOnly
+)
+```
+
+It must derive, never accept, the task name as
+`PythonSelfAgent-Canary-MonthlyRestoreDrill-$RunId`. The only allowed result
+path is
+`D:\python_self_agent\deploy-state\task8-monthly-canary-result-$RunId.json`.
+Resolve and compare ordinal-ignore-case full paths; require the repository,
+`deploy-state`, env file, installer, restore-drill script, and backup root to be
+the exact trusted non-reparse locations already accepted in Task 8. Require the
+result file not to exist. The canary task prefix and full-name regex are exactly:
+
+```powershell
+$canaryPrefix = 'PythonSelfAgent-Canary-MonthlyRestoreDrill-'
+$canaryName = $canaryPrefix + $RunId
+if ($canaryName -cnotmatch '^PythonSelfAgent-Canary-MonthlyRestoreDrill-[0-9a-f]{32}$') {
+  throw 'Canary task name is outside the exact allowlist.'
+}
+```
+
+The wrapper must parse the trusted current installer with the Windows
+PowerShell AST and require exactly one definition of each of these existing
+helpers before evaluating only those function extents in memory:
+
+```text
+Get-OperationsWtsNativeMethods
+Get-OperationsInteractiveUserName
+New-OperationsTaskAction
+New-OperationsTaskSettings
+Resolve-OperationsMonthlyTriggerSchema
+Assert-OperationsMonthlyRestoreDrillTrigger
+New-OperationsMonthlyRestoreDrillTrigger
+```
+
+This avoids running the installer main body and guarantees that the canary uses
+the current validated construction rather than a hand-copied approximation.
+Build these exact inputs:
+
+```powershell
+$config = [pscustomobject]@{
+  RepositoryRoot = 'D:\python_self_agent'
+  EnvFile = 'D:\python_self_agent\deploy\.env'
+  StateRoot = 'D:\python_self_agent\deploy-state'
+  BackupRoot = 'D:\python_self_agent_backups'
+}
+$wtsUser = Get-OperationsInteractiveUserName
+$principal = New-ScheduledTaskPrincipal -UserId $wtsUser `
+  -LogonType Interactive -RunLevel Highest
+$trigger = New-OperationsMonthlyRestoreDrillTrigger `
+  -StartBoundary (Get-Date -Hour 4 -Minute 0 -Second 0)
+$action = New-OperationsTaskAction `
+  -ScriptPath 'D:\python_self_agent\deploy\windows\Invoke-RestoreDrill.ps1' `
+  -Config $config -IncludeBackupRoot
+$settings = New-OperationsTaskSettings -WakeToRun $true
+$candidate = New-ScheduledTask -Action $action -Trigger $trigger `
+  -Settings $settings -Principal $principal -ErrorAction Stop
+```
+
+Assert the same CIM/ETS/masks and in-memory definition fields from Step 5.
+`-ValidateOnly` stops after these assertions, requires that the exact canary is
+absent, writes an atomic redacted marker with `Outcome=validation_only`, and
+never calls either registration cmdlet. Normal mode must additionally require
+an elevated interactive desktop session and use only this registration call:
+
+```powershell
+$registered = @(Register-ScheduledTask -TaskName $canaryName `
+  -Action $action -Trigger $trigger -Settings $settings -Principal $principal `
+  -Force -ErrorAction Stop)
+if ($registered.Count -ne 1 -or $null -eq $registered[0]) {
+  throw 'Canary registration did not return exactly one task.'
+}
+```
+
+Do not call `Start-ScheduledTask`, `Invoke-RestoreDrill.ps1`, or the registered
+action. Immediately require exactly one root-path provider object with the
+exact name. Export it through both `Export-ScheduledTask` and
+`schtasks.exe /Query /TN ("\\" + $canaryName) /XML`; parse both XML documents
+with the Task Scheduler namespace and assert:
+
+```text
+CalendarTrigger/ScheduleByMonthDayOfWeek
+StartBoundary local time = 04:00:00
+DaysOfWeek contains only Sunday
+Weeks contains only Week=1
+Months contains January through December exactly once
+Exec Command = powershell.exe
+Exec Arguments contain only the trusted Invoke-RestoreDrill.ps1 and exact
+  repository/env/state/backup paths required by New-OperationsTaskAction
+Principal resolves to the same WTS SID
+LogonType = InteractiveToken
+RunLevel = HighestAvailable
+StartWhenAvailable = true
+WakeToRun = true
+MultipleInstancesPolicy = IgnoreNew
+```
+
+Use a `try/catch/finally` that records a sanitized exception category/type/
+message and never includes usernames, env contents, command lines, or stack
+traces. In `finally`, if either exact query finds the generated canary, first
+revalidate the full name against the exact prefix/RunId, require no second
+matching object, then call only:
+
+```powershell
+Unregister-ScheduledTask -TaskName $canaryName -Confirm:$false -ErrorAction Stop
+```
+
+After cleanup, require provider count zero and `schtasks.exe /Query` exit 1 for
+that exact name. Never enumerate a prefix and delete its results. Atomic UTF-8
+JSON under the exact ResultPath must contain `RunId`, `CanaryTaskName`,
+`Outcome`, wrapper exit code, registration output count, provider/XML/schtasks
+validation booleans, cleanup attempted/succeeded, both absence booleans, and
+timestamps. `Outcome=canary_passed` and exit 0 require successful registration,
+all persisted checks, exact cleanup, and double absence. Registration/provider
+failure exits 51, semantic validation failure 52, and cleanup/absence failure
+53. A cleanup failure is a hard blocker and must preserve/report the exact
+canary name; do not broaden cleanup.
+
+Before creating the wrapper, capture the current baseline without printing an
+identity or env contents:
+
+```powershell
+$productionNames = @(
+  'PythonSelfAgent-LoginRecovery',
+  'PythonSelfAgent-Health',
+  'PythonSelfAgent-DailyBackup'
+)
+$taskXmlHashes = @{}
+foreach ($name in $productionNames) {
+  $xml = Export-ScheduledTask -TaskName $name -ErrorAction Stop
+  $taskXmlHashes[$name] = [Convert]::ToBase64String(
+    [Security.Cryptography.SHA256]::Create().ComputeHash(
+      [Text.Encoding]::UTF8.GetBytes($xml)))
+}
+$envContentHash = (Get-FileHash 'D:\python_self_agent\deploy\.env' -Algorithm SHA256).Hash
+$envAcl = Get-Acl 'D:\python_self_agent\deploy\.env'
+$envAclHash = [Convert]::ToBase64String(
+  [Security.Cryptography.SHA256]::Create().ComputeHash(
+    [Text.Encoding]::UTF8.GetBytes($envAcl.Sddl)))
+$productionTaskCount = @(Get-ScheduledTask | Where-Object {
+  $_.TaskName -like 'PythonSelfAgent-*' -and
+  $_.TaskName -notlike 'PythonSelfAgent-Canary-*'
+}).Count
+$canaryCount = @(Get-ScheduledTask | Where-Object {
+  $_.TaskName -like 'PythonSelfAgent-Canary-*'
+}).Count
+$firewallCount = @(Get-NetFirewallRule -DisplayName `
+  'Python Self Agent - Private Intranet 7860' -ErrorAction SilentlyContinue).Count
+$firewallRule = Get-NetFirewallRule -DisplayName `
+  'Python Self Agent - Private Intranet 7860' -ErrorAction Stop
+$firewallPort = $firewallRule | Get-NetFirewallPortFilter -ErrorAction Stop
+$firewallAddress = $firewallRule | Get-NetFirewallAddressFilter -ErrorAction Stop
+$firewallCanonical = [ordered]@{
+  Enabled = [string]$firewallRule.Enabled
+  Direction = [string]$firewallRule.Direction
+  Action = [string]$firewallRule.Action
+  Profile = [string]$firewallRule.Profile
+  Protocol = [string]$firewallPort.Protocol
+  LocalPort = [string]$firewallPort.LocalPort
+  RemoteAddress = [string]$firewallAddress.RemoteAddress
+} | ConvertTo-Json -Compress
+$firewallHash = [Convert]::ToBase64String(
+  [Security.Cryptography.SHA256]::Create().ComputeHash(
+    [Text.Encoding]::UTF8.GetBytes($firewallCanonical)))
+```
+
+Expected baseline on this host: the three exact production names and hashes,
+`productionTaskCount=3`, `canaryCount=0`, `firewallCount=1`, unchanged env
+content hash, and the protected three-ACE ACL hash already recorded in the Task
+8 report. Also capture canonical firewall port/address/profile fields and the
+total unrelated task/rule counts. After canary completion, recompute every
+value and require byte-for-byte/hash/count equality plus canary count zero.
+
+Validate the runtime wrapper before UAC:
+
+```powershell
+$canaryWrapper = 'D:\python_self_agent\deploy-state\task8-monthly-registerbyprincipal-canary.ps1'
+git check-ignore -v -- deploy-state/task8-monthly-registerbyprincipal-canary.ps1
+git status --short
+$tokens = $null
+$parseErrors = $null
+[Management.Automation.Language.Parser]::ParseFile(
+  $canaryWrapper, [ref]$tokens, [ref]$parseErrors) | Out-Null
+if ($parseErrors.Count -ne 0) { throw 'Canary wrapper has PS5.1 parse errors.' }
+if (Select-String -LiteralPath $canaryWrapper `
+    -Pattern '(?i)(api[_-]?key|token|password|secret)\s*=') {
+  throw 'Canary wrapper contains a possible secret assignment.'
+}
+foreach ($forbidden in @(
+  'Start-ScheduledTask', 'New-NetFirewallRule', 'Remove-NetFirewallRule',
+  'icacls.exe', 'Set-Acl', 'Backup-Deployment.ps1'
+)) {
+  if (Select-String -LiteralPath $canaryWrapper -SimpleMatch $forbidden) {
+    throw "Forbidden canary mutation: $forbidden"
+  }
+}
+$canarySource = Get-Content -LiteralPath $canaryWrapper -Raw
+if ($canarySource -match '(?m)(?:^|[;{])\s*[&.]\s+[^\r\n]*Invoke-RestoreDrill\.ps1' -or
+    $canarySource -match '(?is)Start-Process[^\r\n]*Invoke-RestoreDrill\.ps1') {
+  throw 'Canary wrapper can execute the restore action.'
+}
+```
+
+The static scan must allow the restore-drill script path only as action data;
+it must find no call operator or `Start-Process` that executes it. Require the
+wrapper to contain exactly one `Register-ScheduledTask`, exactly one
+`Unregister-ScheduledTask`, both with `-ErrorAction Stop`, and no generic task
+name input. The file remains ignored and unstaged.
+
+Generate a dry-run RunId from 16 new cryptographic bytes, not GUID/time/Random,
+and run normal Windows PowerShell non-elevated:
+
+```powershell
+$bytes = New-Object byte[] 16
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$dryRunId = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+$dryResult = "D:\python_self_agent\deploy-state\task8-monthly-canary-result-$dryRunId.json"
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File $canaryWrapper -RunId $dryRunId -ResultPath $dryResult -ValidateOnly
+if ($LASTEXITCODE -ne 0) { throw 'Canary validation-only dry run failed.' }
+$dryMarker = Get-Content -LiteralPath $dryResult -Raw | ConvertFrom-Json
+if ($dryMarker.RunId -cne $dryRunId -or
+    $dryMarker.Outcome -cne 'validation_only') {
+  throw 'Canary dry-run marker is not truthful.'
+}
+```
+
+Retain the ignored dry-run marker; never delete runtime evidence. Reconfirm all
+baseline hashes/counts before the real canary. Generate a second RunId with the
+same RNG code and launch exactly one visible elevated process; the user must
+approve UAC manually:
+
+```powershell
+$bytes = New-Object byte[] 16
+$rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+$runId = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+$resultPath = "D:\python_self_agent\deploy-state\task8-monthly-canary-result-$runId.json"
+$arguments = @(
+  '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $canaryWrapper,
+  '-RunId', $runId, '-ResultPath', $resultPath
+)
+$process = Start-Process `
+  "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+  -Verb RunAs -WindowStyle Normal -WorkingDirectory 'D:\python_self_agent' `
+  -ArgumentList $arguments -Wait -PassThru
+```
+
+Never reuse the dry-run bytes and never automate/bypass UAC. Parse the strict
+UTF-8 marker and accept
+Option A only when child exit is 0, RunId/name are exact,
+`Outcome=canary_passed`, output count is 1, every provider/XML/schtasks boolean
+is true, cleanup succeeded, double absence is true, and every baseline hash/
+count remains identical. Record WMI Activity events for the exact time window.
+
+If the canary returns `0x80041001`, exits 51/52/53, has a malformed/false
+marker, leaves any canary, changes any production hash/count, or cannot retain
+the exact principal/trigger/action/settings semantics: stop. Do not edit
+production code or retry. Append the evidence and request a separately reviewed
+monthly-only documented XML design; never substitute a weekly trigger or an
+internally calculated/rescheduled date.
+
+- [ ] **Step 7: Only if the canary passes, implement the monthly RegisterByPrincipal path with TDD, then retry the installer twice**
+
+This step is forbidden unless Step 6 produced the exact passing marker,
+double-absence proof, unchanged production hashes, and a clean WMI window. If
+Step 6 failed, end Task 8 at the XML fallback design gate without changing
+`deploy/windows/Install-Operations.ps1` or its tests.
+
+**Files:**
+
+- Modify: `deploy/windows/Install-Operations.ps1`
+- Modify: `tests/deploy/test_windows_operations.py`
+- Runtime evidence only: `deploy-state/task8-install-operations-wrapper.ps1`
+- Append only: `.superpowers/sdd/task-8-report.md`
+
+Add focused synthetic tests first. The test harness must stub
+`Register-ScheduledTask`, `Get-ScheduledTask`, `Export-ScheduledTask`, firewall
+queries, and `Get-Acl` so no system mutation occurs. Required red cases are:
+
+```text
+monthly task uses -Action/-Trigger/-Settings/-Principal/-ErrorAction Stop,
+  not -InputObject; the other three retain the validated InputObject path
+every Register-ScheduledTask call binds -ErrorAction Stop
+provider emits a nonterminating 0x80041001-equivalent error -> installer fails
+provider returns zero or two objects -> installer fails
+provider returns one object but requery omits monthly -> installer fails
+persisted task has wrong name/path/action/principal/settings/trigger/XML -> fail
+only three exact tasks or an extra PythonSelfAgent-* task -> installer fails
+wrong/missing firewall or env ACL postcondition -> installer fails
+all four exact persisted tasks/rule/ACL -> completion output allowed
+current three-task partial state plus successful monthly registration -> four
+second identical pass -> still exactly four tasks, one rule, exact ACL
+```
+
+Add these minimum installer interfaces before changing the registration loop:
+
+```powershell
+function Register-OperationsTask {
+  param(
+    [Parameter(Mandatory)]$Task,
+    [Parameter(Mandatory)]$Principal,
+    [switch]$UsePrincipalParameterSet
+  )
+  if ($UsePrincipalParameterSet) {
+    $result = @(Register-ScheduledTask -TaskName $Task.Name `
+      -Action $Task.Action -Trigger $Task.Trigger -Settings $Task.Settings `
+      -Principal $Principal -Force -ErrorAction Stop)
+  } else {
+    $result = @(Register-ScheduledTask -TaskName $Task.Name `
+      -InputObject $Task.Definition -Force -ErrorAction Stop)
+  }
+  if ($result.Count -ne 1 -or $null -eq $result[0]) {
+    throw "Scheduled task registration returned an invalid result: $($Task.Name)"
+  }
+  return $result[0]
+}
+
+function Assert-OperationsPersistedTask {
+  param(
+    [Parameter(Mandatory)]$ExpectedTask,
+    [Parameter(Mandatory)]$ExpectedPrincipal,
+    [switch]$RequireMonthlyXml
+  )
+  $matches = @(Get-ScheduledTask -TaskName $ExpectedTask.Name `
+    -ErrorAction Stop | Where-Object { $_.TaskPath -eq '\' })
+  if ($matches.Count -ne 1) {
+    throw "Persisted task count is invalid: $($ExpectedTask.Name)"
+  }
+  $actual = $matches[0]
+  $expectedSid = ([Security.Principal.NTAccount]
+    ([string]$ExpectedPrincipal.UserId)).Translate(
+      [Security.Principal.SecurityIdentifier]).Value
+  $actualSid = ([Security.Principal.NTAccount]
+    ([string]$actual.Principal.UserId)).Translate(
+      [Security.Principal.SecurityIdentifier]).Value
+  if ($actualSid -ne $expectedSid -or
+      [string]$actual.Principal.LogonType -ne 'Interactive' -or
+      [string]$actual.Principal.RunLevel -ne 'Highest') {
+    throw "Persisted principal is invalid: $($ExpectedTask.Name)"
+  }
+  if (@($actual.Actions).Count -ne 1 -or
+      [string]$actual.Actions[0].Execute -ne [string]$ExpectedTask.Action.Execute -or
+      [string]$actual.Actions[0].Arguments -ne [string]$ExpectedTask.Action.Arguments) {
+    throw "Persisted action is invalid: $($ExpectedTask.Name)"
+  }
+  if ([bool]$actual.Settings.StartWhenAvailable -ne $true -or
+      [string]$actual.Settings.MultipleInstances -ne 'IgnoreNew' -or
+      [bool]$actual.Settings.WakeToRun -ne [bool]$ExpectedTask.Settings.WakeToRun) {
+    throw "Persisted settings are invalid: $($ExpectedTask.Name)"
+  }
+  if (@($actual.Triggers).Count -ne 1) {
+    throw "Persisted trigger count is invalid: $($ExpectedTask.Name)"
+  }
+  if ($RequireMonthlyXml) {
+    [xml]$xml = Export-ScheduledTask -TaskName $ExpectedTask.Name `
+      -TaskPath '\' -ErrorAction Stop
+    $ns = New-Object Xml.XmlNamespaceManager($xml.NameTable)
+    $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+    $monthly = $xml.SelectSingleNode(
+      '/t:Task/t:Triggers/t:CalendarTrigger/t:ScheduleByMonthDayOfWeek', $ns)
+    if ($null -eq $monthly) { throw 'Persisted monthly XML is missing.' }
+    $start = $xml.SelectSingleNode(
+      '/t:Task/t:Triggers/t:CalendarTrigger/t:StartBoundary', $ns)
+    $days = @($monthly.SelectNodes('t:DaysOfWeek/*', $ns) | ForEach-Object LocalName)
+    $weeks = @($monthly.SelectNodes('t:Weeks/t:Week', $ns) | ForEach-Object InnerText)
+    $months = @($monthly.SelectNodes('t:Months/*', $ns) | ForEach-Object LocalName)
+    $expectedMonths = @(
+      'January','February','March','April','May','June',
+      'July','August','September','October','November','December'
+    )
+    if (([datetime]$start.InnerText).TimeOfDay -ne [timespan]'04:00:00' -or
+        @($days).Count -ne 1 -or $days[0] -cne 'Sunday' -or
+        @($weeks).Count -ne 1 -or $weeks[0] -cne '1' -or
+        @(Compare-Object ($expectedMonths | Sort-Object) ($months | Sort-Object)).Count -ne 0) {
+      throw 'Persisted monthly XML is invalid.'
+    }
+  }
+  return $actual
+}
+
+function Assert-OperationsInstalledState {
+  param(
+    [Parameter(Mandatory)]$ExpectedTasks,
+    [Parameter(Mandatory)]$ExpectedPrincipal,
+    [Parameter(Mandatory)][string]$FirewallName,
+    [Parameter(Mandatory)][string]$EnvFile
+  )
+  $expectedNames = @($ExpectedTasks | ForEach-Object Name | Sort-Object)
+  $actualTasks = @(Get-ScheduledTask | Where-Object {
+    $_.TaskName -like 'PythonSelfAgent-*'
+  })
+  if ($actualTasks.Count -ne 4 -or
+      @(Compare-Object $expectedNames ($actualTasks.TaskName | Sort-Object)).Count -ne 0) {
+    throw 'Persisted operations task set is invalid.'
+  }
+  foreach ($task in $ExpectedTasks) {
+    Assert-OperationsPersistedTask -ExpectedTask $task `
+      -ExpectedPrincipal $ExpectedPrincipal `
+      -RequireMonthlyXml:($task.Name -ceq 'PythonSelfAgent-MonthlyRestoreDrill') |
+      Out-Null
+  }
+  $rules = @(Get-NetFirewallRule -DisplayName $FirewallName -ErrorAction Stop)
+  if ($rules.Count -ne 1) { throw 'Persisted firewall rule count is invalid.' }
+  $port = $rules[0] | Get-NetFirewallPortFilter -ErrorAction Stop
+  $address = $rules[0] | Get-NetFirewallAddressFilter -ErrorAction Stop
+  if ([string]$rules[0].Enabled -ne 'True' -or
+      [string]$rules[0].Direction -ne 'Inbound' -or
+      [string]$rules[0].Action -ne 'Allow' -or
+      [string]$rules[0].Profile -ne 'Private' -or
+      [string]$port.Protocol -ne 'TCP' -or
+      [string]$port.LocalPort -ne '7860' -or
+      [string]$address.RemoteAddress -ne 'LocalSubnet') {
+    throw 'Persisted firewall rule is invalid.'
+  }
+  $acl = Get-Acl -LiteralPath $EnvFile -ErrorAction Stop
+  $expectedSids = @(
+    ([Security.Principal.NTAccount]
+      ([string]$ExpectedPrincipal.UserId)).Translate(
+        [Security.Principal.SecurityIdentifier]).Value,
+    'S-1-5-18', 'S-1-5-32-544'
+  ) | Sort-Object
+  $actualSids = @($acl.Access | ForEach-Object {
+    $_.IdentityReference.Translate(
+      [Security.Principal.SecurityIdentifier]).Value
+  } | Sort-Object)
+  if (-not $acl.AreAccessRulesProtected -or
+      @($acl.Access | Where-Object IsInherited).Count -ne 0 -or
+      $actualSids.Count -ne 3 -or
+      @(Compare-Object $expectedSids $actualSids).Count -ne 0) {
+    throw 'Persisted environment ACL is invalid.'
+  }
+  $currentUserSid = $expectedSids | Where-Object {
+    $_ -notin @('S-1-5-18', 'S-1-5-32-544')
+  }
+  $userRules = @($acl.Access | Where-Object {
+    $_.IdentityReference.Translate(
+      [Security.Principal.SecurityIdentifier]).Value -eq $currentUserSid
+  })
+  $fullRules = @($acl.Access | Where-Object {
+    $_.IdentityReference.Translate(
+      [Security.Principal.SecurityIdentifier]).Value -in @('S-1-5-18','S-1-5-32-544')
+  })
+  if ($userRules.Count -ne 1 -or
+      ($userRules[0].FileSystemRights -band
+        [Security.AccessControl.FileSystemRights]::Modify) -ne
+        [Security.AccessControl.FileSystemRights]::Modify -or
+      $fullRules.Count -ne 2 -or
+      @($fullRules | Where-Object {
+        ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+          [Security.AccessControl.FileSystemRights]::FullControl
+      }).Count -ne 0) {
+    throw 'Persisted environment ACL rights are invalid.'
+  }
+}
+```
+
+The monthly loop call alone sets
+`-UsePrincipalParameterSet`; all four results are captured, immediately
+requeried, and validated. Move the completion output after
+`Assert-OperationsInstalledState`. A partial state is retained but returns
+nonzero; rerunning uses exact-name `-Force` to converge safely without deleting
+the three valid tasks/rule/ACL.
+
+Run the red selector using a fresh pre-created repository-local basetemp:
+
+```powershell
+$redBase = Join-Path (Get-Location) `
+  ('.operations-test-task8-registerbyprincipal-red-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $redBase | Out-Null
+.\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider `
+  --basetemp=$redBase tests/deploy/test_windows_operations.py `
+  -k 'registerbyprincipal or registration_error or persisted_postcondition or partial_state'
+```
+
+Expected: the new tests fail against the current InputObject/Out-Null/no-requery
+implementation, while existing listener and CIM-construction tests remain
+green. Implement only the interfaces above, then run fresh basetemps for the
+same selector, full `test_windows_operations.py`, full `tests/deploy`, and the
+full repository suite. Run the Windows PowerShell 5.1 AST parser,
+`git diff --check`, scoped diff/name review, and an independent review against
+design sections 8.3/8.3.1. Commit only the two files:
+
+```powershell
+git add -- deploy/windows/Install-Operations.ps1 `
+  tests/deploy/test_windows_operations.py
+git diff --cached --check
+git diff --cached --name-only
+git commit -m "fix: verify persisted Windows task registration"
+```
+
+Only after all green gates and independent review PASS, continue with the
+existing visible two-pass installer procedure below. It must recover in place
+from the current three-task partial state, produce exactly four tasks, and pass
+the persisted task/firewall/ACL assertions on both passes. The wrapper marker
+is accepted only after an independent postflight proves the same state; any
+provider error, output mismatch, three-task state, or marker/state disagreement
+stops without cleanup, retry, or false-success.
 
 Immediately before UAC, require Docker Server readiness, healthy `app` and `qdrant`, a passing default smoke test, InterfaceIndex 17 still `Private`, the current active WTS identity, the exact trusted repository/env/state/backup paths, and no existing object whose exact name or `PythonSelfAgent-` prefix collides with the four intended tasks or firewall rule unexpectedly. Never display `deploy/.env` contents.
 
@@ -1605,23 +2123,23 @@ if (($userRule.FileSystemRights -band [Security.AccessControl.FileSystemRights]:
 
 Expected: the block exits 0 with no output. Compare canonical preflight/postflight snapshots for all non-`PythonSelfAgent-*` task definitions, all non-target firewall rules, and parent-directory ACLs; their hashes must be identical.
 
-- [ ] **Step 7: Exercise startup, health, notification, and backup**
+- [ ] **Step 8: Exercise startup, health, notification, and backup**
 
 Manually start login recovery and health tasks and wait for completion. Require `app`/`qdrant` healthy and default smoke passing within 180 seconds. Trigger a test notification. Run the backup task and require one complete set under `D:\python_self_agent_backups\daily`, valid SHA-256, safe metadata, restarted healthy services, and a successful status/report entry.
 
-- [ ] **Step 8: Exercise retention and isolated restore drill**
+- [ ] **Step 9: Exercise retention and isolated restore drill**
 
 Use a dedicated test backup root beneath `D:\python_self_agent_backups\.acceptance` with synthetic complete sets to prove 7/4 retention without touching real backups. Run the restore drill against the real latest backup, confirm its project name and port differ from production, default smoke passes, production data timestamps/hashes are unchanged, temporary env is absent, and the report is successful.
 
-- [ ] **Step 9: Exercise upgrade success and rollback failure branch**
+- [ ] **Step 10: Exercise upgrade success and rollback failure branch**
 
 Run a normal `Update-Deployment.ps1` and require backup, tests, scans, default/deep smoke, and success report. Then invoke its documented test-only failure injection immediately after candidate startup; require old image IDs restored, pre-upgrade data restored, default smoke passing, and rollback artifacts retained.
 
-- [ ] **Step 10: Verify intranet exposure and port isolation**
+- [ ] **Step 11: Verify intranet exposure and port isolation**
 
 Inspect Docker mappings and local listeners. Confirm only TCP 7860 is published, the firewall rule is Private/LocalSubnet only, and 6333/6334/7474/7687 have no host mapping. Obtain the machine's current private IPv4 address and test port 7860 locally; ask the user to confirm access from one other trusted LAN device because the local machine cannot prove an external firewall path by itself.
 
-- [ ] **Step 11: Verify repository hygiene and final state**
+- [ ] **Step 12: Verify repository hygiene and final state**
 
 ```powershell
 git diff --check
@@ -1632,7 +2150,7 @@ docker compose --env-file deploy/.env ps
 
 Confirm `deploy/.env`, `deploy-state`, `deploy-data`, backups, temporary drill data, and unrelated GraphRAG changes are not staged or committed. Confirm all intended commits exist and services remain healthy.
 
-- [ ] **Step 12: Complete the real reboot acceptance**
+- [ ] **Step 13: Complete the real reboot acceptance**
 
 Request a user-controlled Windows restart. After the user logs back in, measure from task history and logs that login recovery completed within 180 seconds; rerun default smoke and inspect task/firewall/backup state. Do not restart Windows automatically.
 
@@ -1658,6 +2176,8 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 | Idempotent install and narrow uninstall | 3, 8 |
 | Docker Desktop wildcard binding with fail-closed loopback forwarders | 8 |
 | Task Scheduler monthly-DOW CIM schema compatibility and pre-mutation task validation | 8 |
+| Isolated RegisterByPrincipal canary, exact cleanup, and XML fallback gate | 8 |
+| Provider-error promotion, persisted four-task postconditions, and truthful wrapper marker | 8 |
 | Preserve single replica and business contracts | Global constraints, 8 |
 | Real reboot and LAN acceptance | 8 |
 
@@ -1670,6 +2190,8 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 - CI uses a full checkout SHA and a digest-pinned Trivy image, avoiding mutable action/scanner tags.
 - System changes occur only after repository tests and explicit network/admin gates.
 - The monthly trigger accepts exactly one documented/local month-mask field, preserves masks `1 / 1 / 4095` and 04:00, and all four task definitions validate in memory before the first system write.
+- The canary derives one exact allowlisted name from 16 cryptographic bytes, never starts its action, and proves provider/XML/schtasks semantics plus exact finally cleanup before any production correction.
+- Production registration is contingent on the canary: every provider write uses explicit `-ErrorAction Stop`, captures one output, re-queries persisted state, and cannot report success with fewer than four exact tasks, one exact firewall rule, or the exact protected env ACL.
 - No task authorizes touching the existing GraphRAG task-packet modifications or committing secrets/runtime data.
 
 **Plan complete and saved to `docs/superpowers/plans/2026-08-09-windows-single-node-operations.md`.**
