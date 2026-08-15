@@ -762,6 +762,7 @@ def test_startup_global_deadline_stops_a_hanging_docker_command(
 
 def test_operations_installer_has_private_intranet_and_exact_task_contracts():
     source = INSTALL.read_text(encoding="utf-8")
+    assert_installer_monthly_static_contracts(source)
 
     for task_name in (
         "PythonSelfAgent-LoginRecovery",
@@ -787,8 +788,6 @@ def test_operations_installer_has_private_intranet_and_exact_task_contracts():
     assert "-AtLogOn" in source
     assert "RepetitionInterval (New-TimeSpan -Minutes 5)" in source
     assert "-Daily -At '03:00'" in source
-    assert "$monthlyTrigger.DaysOfWeek = 1" in source
-    assert "$monthlyTrigger.WeeksOfMonth = 1" in source
     assert "New-ScheduledTaskAction -Execute 'powershell.exe'" in source
     assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in source
     assert "Register-ScheduledTask" in source
@@ -799,7 +798,6 @@ def test_operations_installer_has_private_intranet_and_exact_task_contracts():
     assert "[Diagnostics.Process]::GetCurrentProcess().SessionId" in source
     assert source.count("WTSQuerySessionInformation") >= 2
     assert "WTSFreeMemory" in source
-    assert "$monthlyTrigger.StartBoundary" in source
     assert "-Hour 4 -Minute 0" in source
     assert source.count("Settings = New-OperationsTaskSettings -WakeToRun $true") == 2
     assert "$env:USERDOMAIN" not in source
@@ -810,7 +808,9 @@ def test_operations_installer_has_private_intranet_and_exact_task_contracts():
 def test_operations_installer_preflights_before_system_mutations():
     source = INSTALL.read_text(encoding="utf-8")
 
-    preflight_end = source.index("# All preflight checks above this line")
+    preflight_end = source.index(
+        "# All preflight checks and in-memory task validation are above this line."
+    )
     for preflight in (
         "Get-OperationsConfig",
         "'compose', 'version'",
@@ -1030,6 +1030,271 @@ def installer_prelude() -> str:
     source = INSTALL.read_text(encoding="utf-8")
     helpers = source.split("$modulePath = Join-Path", maxsplit=1)[0]
     return helpers[helpers.index("function Assert-RequiredCommand") :]
+
+
+def assert_installer_monthly_static_contracts(source: str) -> None:
+    for helper_name in (
+        "Resolve-OperationsMonthlyTriggerSchema",
+        "Assert-OperationsMonthlyRestoreDrillTrigger",
+        "New-OperationsMonthlyRestoreDrillTrigger",
+    ):
+        assert helper_name in source
+    for exact_contract in (
+        "Enabled = $true",
+        "DaysOfWeek = [uint16]1",
+        "WeeksOfMonth = [uint16]1",
+        "$properties[$monthPropertyName] = [uint16]4095",
+        "-InputObject $task.Definition",
+    ):
+        assert exact_contract in source
+
+
+def fake_monthly_cim_class(
+    month_members: tuple[str, ...],
+    *,
+    enabled_type: str = "Boolean",
+    days_type: str = "UInt16",
+) -> str:
+    properties = [
+        ("Enabled", enabled_type),
+        ("StartBoundary", "String"),
+        ("DaysOfWeek", days_type),
+        ("WeeksOfMonth", "UInt16"),
+        *((name, "UInt16") for name in month_members),
+    ]
+    property_script = ",".join(
+        f"[PSCustomObject]@{{ Name='{name}'; CimType='{cim_type}' }}"
+        for name, cim_type in properties
+    )
+    return (
+        "[PSCustomObject]@{ "
+        "CimClassName='MSFT_TaskMonthlyDOWTrigger'; "
+        "CimSystemProperties=[PSCustomObject]@{ "
+        "Namespace='Root/Microsoft/Windows/TaskScheduler' }; "
+        f"CimClassProperties=@({property_script}) }}"
+    )
+
+
+@pytest.mark.parametrize("month_name", ["MonthsOfYear", "MonthOfYear"])
+def test_installer_monthly_schema_accepts_documented_or_local_month_member(
+    month_name: str,
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + f"; $class = {fake_monthly_cim_class((month_name,))}; "
+        + "$actual = Resolve-OperationsMonthlyTriggerSchema -CimClass $class; "
+        + f"if ($actual -cne '{month_name}') {{ exit 80 }} }}"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "month_members",
+    [(), ("MonthsOfYear", "MonthOfYear"), ("monthsofyear",)],
+)
+def test_installer_monthly_schema_rejects_neither_or_both_month_members(
+    month_members: tuple[str, ...],
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + f"; $class = {fake_monthly_cim_class(month_members)}; "
+        + "try { Resolve-OperationsMonthlyTriggerSchema -CimClass $class | Out-Null; exit 81 } "
+        + "catch { if ($_.Exception.Message -notlike "
+        + "'*exactly one MonthOfYear/MonthsOfYear*') { exit 82 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("class_script", "expected_message"),
+    [
+        (
+            fake_monthly_cim_class(("MonthOfYear",)).replace(
+                "[PSCustomObject]@{ Name='Enabled'; CimType='Boolean' },", ""
+            ),
+            "*missing required property: Enabled*",
+        ),
+        (
+            fake_monthly_cim_class(("MonthOfYear",), days_type="String"),
+            "*invalid CIM type for DaysOfWeek*",
+        ),
+    ],
+)
+def test_installer_monthly_schema_rejects_missing_or_wrong_typed_required_property(
+    class_script: str, expected_message: str
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + f"; $class = {class_script}; "
+        + "try { Resolve-OperationsMonthlyTriggerSchema -CimClass $class | Out-Null; exit 83 } "
+        + f"catch {{ if ($_.Exception.Message -notlike '{expected_message}') {{ exit 84 }}; exit 0 }} }}"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("omit_enabled", "insert_base_type", "expected_message"),
+    [
+        (True, True, "*missing materialized property: Enabled*"),
+        (False, False, "*missing required MSFT_TaskTrigger type*"),
+    ],
+)
+def test_installer_monthly_trigger_rejects_missing_enabled_or_inherited_type(
+    omit_enabled: bool, insert_base_type: bool, expected_message: str
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $properties = @{ StartBoundary='2026-08-02T04:00:00'; "
+        + "DaysOfWeek=[uint16]1; WeeksOfMonth=[uint16]1; "
+        + "MonthOfYear=[uint16]4095 }; "
+        + ("" if omit_enabled else "$properties.Enabled = $true; ")
+        + "$trigger = New-CimInstance -Namespace "
+        + "'Root/Microsoft/Windows/TaskScheduler' "
+        + "-ClassName MSFT_TaskMonthlyDOWTrigger -ClientOnly -Property $properties; "
+        + (
+            "$trigger.PSTypeNames.Insert(0, "
+            "'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger'); "
+            if insert_base_type
+            else ""
+        )
+        + "try { Assert-OperationsMonthlyRestoreDrillTrigger -Trigger $trigger "
+        + "-MonthPropertyName MonthOfYear "
+        + "-ExpectedStartBoundary '2026-08-02T04:00:00'; exit 87 } "
+        + f"catch {{ if ($_.Exception.Message -notlike '{expected_message}') "
+        + "{ exit 88 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutation", "field_name"),
+    [
+        ("$trigger.Enabled = $false", "Enabled"),
+        ("$trigger.DaysOfWeek = [uint16]2", "DaysOfWeek"),
+        ("$trigger.WeeksOfMonth = [uint16]2", "WeeksOfMonth"),
+        ("$trigger.$monthName = [uint16]2047", "month"),
+        ("$trigger.StartBoundary = '2026-08-02T05:00:00'", "StartBoundary"),
+    ],
+)
+def test_installer_monthly_trigger_rejects_invalid_materialized_contract(
+    mutation: str, field_name: str
+):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $trigger = New-OperationsMonthlyRestoreDrillTrigger "
+        + "-StartBoundary ([datetime]'2026-08-02T04:00:00'); "
+        + "$monthNames = @(@('MonthsOfYear','MonthOfYear') | Where-Object { "
+        + "$null -ne $trigger.PSObject.Properties[$_] }); "
+        + "if ($monthNames.Count -ne 1) { exit 89 }; $monthName = $monthNames[0]; "
+        + mutation
+        + "; $expectedField = if ('"
+        + field_name
+        + "' -eq 'month') { $monthName } else { '"
+        + field_name
+        + "' }; try { Assert-OperationsMonthlyRestoreDrillTrigger "
+        + "-Trigger $trigger -MonthPropertyName $monthName "
+        + "-ExpectedStartBoundary '2026-08-02T04:00:00'; exit 90 } "
+        + "catch { if ($_.Exception.Message -cne "
+        + "\"Invalid monthly trigger value: $expectedField.\") { exit 91 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_monthly_trigger_uses_exact_first_sunday_0400_contract_on_current_host():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $boundary = '2026-08-02T04:00:00'; "
+        + "$trigger = New-OperationsMonthlyRestoreDrillTrigger "
+        + "-StartBoundary ([datetime]$boundary); "
+        + "$monthNames = @(@('MonthsOfYear','MonthOfYear') | Where-Object { "
+        + "$null -ne $trigger.PSObject.Properties[$_] }); "
+        + "if ($trigger.GetType().FullName -cne "
+        + "'Microsoft.Management.Infrastructure.CimInstance' -or "
+        + "$trigger.CimClass.CimClassName -cne 'MSFT_TaskMonthlyDOWTrigger' -or "
+        + "$trigger.PSTypeNames -notcontains "
+        + "'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger' -or "
+        + "$monthNames.Count -ne 1 -or -not $trigger.Enabled -or "
+        + "[int]$trigger.DaysOfWeek -ne 1 -or "
+        + "[int]$trigger.WeeksOfMonth -ne 1 -or "
+        + "[int]$trigger.PSObject.Properties[$monthNames[0]].Value -ne 4095 -or "
+        + "[string]$trigger.StartBoundary -cne $boundary) { exit 92 }; "
+        + "$action = New-ScheduledTaskAction -Execute 'powershell.exe'; "
+        + "New-ScheduledTask -Action $action -Trigger $trigger | Out-Null }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_monthly_trigger_rejects_non_0400_start_boundary():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; try { New-OperationsMonthlyRestoreDrillTrigger "
+        + "-StartBoundary ([datetime]'2026-08-02T05:00:00') | Out-Null; exit 93 } "
+        + "catch { if ($_.Exception.Message -cne "
+        + "'Monthly restore drill StartBoundary must be 04:00:00.') "
+        + "{ exit 94 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_operations_installer_builds_all_task_definitions_before_system_mutations():
+    source = INSTALL.read_text(encoding="utf-8")
+    definition_start = source.index("$taskDefinitions = @(")
+    validation = source.index("New-ScheduledTask -Action $task.Action", definition_start)
+    write_boundary = source.index(
+        "# All preflight checks and in-memory task validation are above this line."
+    )
+    registration = source.index(
+        "Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition"
+    )
+
+    assert definition_start < validation < write_boundary < registration
+    for mutation in (
+        "New-Item -ItemType Directory",
+        "icacls.exe",
+        "Remove-NetFirewallRule",
+        "New-NetFirewallRule",
+        "Register-ScheduledTask",
+    ):
+        assert source.index(mutation) > write_boundary
+    assert "-Action $task.Action -Trigger $task.Trigger" not in source[registration:]
+
+
+def test_installer_port_ownership_rejects_wrong_host_port_after_exact_one_container():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; function Get-NetTCPConnection { "
+        + "@([PSCustomObject]@{ LocalAddress='0.0.0.0'; OwningProcess=101 }) }; "
+        + "function Invoke-External { param($FilePath, $ArgumentList) "
+        + "$signature = $ArgumentList -join '|'; "
+        + "if ($signature -eq "
+        + "'compose|--project-directory|R|--file|C|--env-file|E|ps|-q|app') "
+        + "{ return @('only-app-id') }; "
+        + "if ($signature -eq "
+        + "'inspect|--format|{{json .HostConfig.PortBindings}}|only-app-id') "
+        + "{ return '{\"7860/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"17860\"}]}' }; "
+        + "throw \"unexpected Docker path: $signature\" }; "
+        + "$config = [PSCustomObject]@{ RepositoryRoot='R'; ComposeFile='C'; EnvFile='E' }; "
+        + "try { Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config; exit 85 } "
+        + "catch { if ($_.Exception.Message -notlike "
+        + "'*outside the current Compose app mapping*') { exit 86 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_installer_listener_ownership_rejects_mixed_or_unrecognized_listener():

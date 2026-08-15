@@ -244,6 +244,116 @@ function New-OperationsTaskSettings {
     return $settings
 }
 
+function Resolve-OperationsMonthlyTriggerSchema {
+    param([Parameter(Mandatory)]$CimClass)
+
+    $expectedNamespace = 'Root/Microsoft/Windows/TaskScheduler'
+    $expectedClass = 'MSFT_TaskMonthlyDOWTrigger'
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+            [string]$CimClass.CimSystemProperties.Namespace,
+            $expectedNamespace
+        ) -or [string]$CimClass.CimClassName -cne $expectedClass) {
+        throw 'Monthly trigger CIM class or namespace did not match the exact contract.'
+    }
+
+    $properties = @($CimClass.CimClassProperties)
+    $expectedTypes = [ordered]@{
+        Enabled = 'Boolean'
+        StartBoundary = 'String'
+        DaysOfWeek = 'UInt16'
+        WeeksOfMonth = 'UInt16'
+    }
+    foreach ($entry in $expectedTypes.GetEnumerator()) {
+        $matches = @($properties | Where-Object { [string]$_.Name -ceq $entry.Key })
+        if ($matches.Count -ne 1) {
+            throw "Monthly trigger schema is missing required property: $($entry.Key)."
+        }
+        if ([string]$matches[0].CimType -cne $entry.Value) {
+            throw "Monthly trigger schema has invalid CIM type for $($entry.Key)."
+        }
+    }
+
+    $monthCandidates = @($properties | Where-Object {
+        [string]$_.Name -ieq 'MonthsOfYear' -or [string]$_.Name -ieq 'MonthOfYear'
+    })
+    $monthMatches = @($monthCandidates | Where-Object {
+        [string]$_.Name -ceq 'MonthsOfYear' -or [string]$_.Name -ceq 'MonthOfYear'
+    })
+    if ($monthCandidates.Count -ne 1 -or $monthMatches.Count -ne 1) {
+        throw 'Monthly trigger schema must expose exactly one MonthOfYear/MonthsOfYear property.'
+    }
+    if ([string]$monthMatches[0].CimType -cne 'UInt16') {
+        throw "Monthly trigger schema has invalid CIM type for $($monthMatches[0].Name)."
+    }
+    return [string]$monthMatches[0].Name
+}
+
+function Assert-OperationsMonthlyRestoreDrillTrigger {
+    param(
+        [Parameter(Mandatory)]$Trigger,
+        [Parameter(Mandatory)][ValidateSet('MonthsOfYear', 'MonthOfYear')]
+        [string]$MonthPropertyName,
+        [Parameter(Mandatory)][string]$ExpectedStartBoundary
+    )
+
+    if ($Trigger.GetType().FullName -cne 'Microsoft.Management.Infrastructure.CimInstance' -or
+        [string]$Trigger.CimClass.CimClassName -cne 'MSFT_TaskMonthlyDOWTrigger') {
+        throw 'Monthly trigger did not materialize the exact CIM instance type.'
+    }
+    $requiredTriggerType = 'Microsoft.Management.Infrastructure.CimInstance#MSFT_TaskTrigger'
+    if ($Trigger.PSTypeNames -notcontains $requiredTriggerType) {
+        throw 'Monthly trigger is missing required MSFT_TaskTrigger type.'
+    }
+    foreach ($name in @('Enabled', 'StartBoundary', 'DaysOfWeek', 'WeeksOfMonth', $MonthPropertyName)) {
+        if ($null -eq $Trigger.PSObject.Properties[$name]) {
+            throw "Monthly trigger is missing materialized property: $name."
+        }
+    }
+
+    $expected = [ordered]@{
+        Enabled = $true
+        StartBoundary = $ExpectedStartBoundary
+        DaysOfWeek = [uint16]1
+        WeeksOfMonth = [uint16]1
+    }
+    $expected[$MonthPropertyName] = [uint16]4095
+    foreach ($entry in $expected.GetEnumerator()) {
+        $actual = $Trigger.PSObject.Properties[$entry.Key].Value
+        if ($actual -ne $entry.Value) {
+            throw "Invalid monthly trigger value: $($entry.Key)."
+        }
+    }
+}
+
+function New-OperationsMonthlyRestoreDrillTrigger {
+    param([Parameter(Mandatory)][datetime]$StartBoundary)
+
+    if ($StartBoundary.Hour -ne 4 -or $StartBoundary.Minute -ne 0 -or
+        $StartBoundary.Second -ne 0) {
+        throw 'Monthly restore drill StartBoundary must be 04:00:00.'
+    }
+    $namespace = 'Root/Microsoft/Windows/TaskScheduler'
+    $className = 'MSFT_TaskMonthlyDOWTrigger'
+    $classes = @(Get-CimClass -Namespace $namespace -ClassName $className -ErrorAction Stop)
+    if ($classes.Count -ne 1) {
+        throw 'Monthly trigger CIM class resolution did not return exactly one class.'
+    }
+    $monthPropertyName = Resolve-OperationsMonthlyTriggerSchema -CimClass $classes[0]
+    $boundary = $StartBoundary.ToString('s', [Globalization.CultureInfo]::InvariantCulture)
+    $properties = @{
+        Enabled = $true
+        StartBoundary = $boundary
+        DaysOfWeek = [uint16]1
+        WeeksOfMonth = [uint16]1
+    }
+    $properties[$monthPropertyName] = [uint16]4095
+    $trigger = New-CimInstance -CimClass $classes[0] -ClientOnly `
+        -Property $properties -ErrorAction Stop
+    Assert-OperationsMonthlyRestoreDrillTrigger -Trigger $trigger `
+        -MonthPropertyName $monthPropertyName -ExpectedStartBoundary $boundary
+    return $trigger
+}
+
 $modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'
 Import-Module $modulePath -Force
 
@@ -270,8 +380,6 @@ Invoke-External -FilePath 'tar.exe' -ArgumentList @('--version') | Out-Null
 Assert-PrivateInternetProfiles
 Assert-Tcp7860IsFreeOrOwnedByComposeApp -Config $config
 $currentUser = Get-OperationsInteractiveUserName
-
-# All preflight checks above this line. System changes below are intentional.
 $firewallName = 'Python Self Agent - Private Intranet 7860'
 $principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Highest
 $loginTrigger = New-ScheduledTaskTrigger -AtLogOn
@@ -280,29 +388,8 @@ $healthRepetition = New-ScheduledTaskTrigger -Once -At (Get-Date) `
     -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 1)
 $healthTrigger.Repetition = $healthRepetition.Repetition
 $backupTrigger = New-ScheduledTaskTrigger -Daily -At '03:00'
-$monthlyTrigger = New-CimInstance -Namespace 'Root/Microsoft/Windows/TaskScheduler' -ClassName MSFT_TaskMonthlyDOWTrigger -ClientOnly
-$monthlyTrigger.Enabled = $true
-$monthlyTrigger.StartBoundary = (Get-Date -Hour 4 -Minute 0 -Second 0).ToString('s')
-$monthlyTrigger.DaysOfWeek = 1 # Sunday
-$monthlyTrigger.WeeksOfMonth = 1 # First week only
-$monthlyTrigger.MonthsOfYear = 4095 # Every month
-
-if ($PSCmdlet.ShouldProcess($config.StateRoot, 'Create operations state directory')) {
-    New-Item -ItemType Directory -Force -Path $config.StateRoot | Out-Null
-}
-if ($PSCmdlet.ShouldProcess($config.EnvFile, 'Restrict deployment environment file ACL')) {
-    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/inheritance:r') | Out-Null
-    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant:r', "${currentUser}:(M)") | Out-Null
-    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'SYSTEM:(F)') | Out-Null
-    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'Administrators:(F)') | Out-Null
-}
-if ($PSCmdlet.ShouldProcess($firewallName, 'Replace private intranet firewall rule')) {
-    Get-NetFirewallRule -DisplayName $firewallName -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -eq $firewallName } |
-        Remove-NetFirewallRule -ErrorAction Stop
-    New-NetFirewallRule -DisplayName $firewallName -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort 7860 -Profile Private -RemoteAddress LocalSubnet | Out-Null
-}
+$monthlyTrigger = New-OperationsMonthlyRestoreDrillTrigger `
+    -StartBoundary (Get-Date -Hour 4 -Minute 0 -Second 0)
 
 $taskDefinitions = @(
     [PSCustomObject]@{
@@ -332,9 +419,35 @@ $taskDefinitions = @(
 )
 
 foreach ($task in $taskDefinitions) {
+    $definition = New-ScheduledTask -Action $task.Action -Trigger $task.Trigger `
+        -Settings $task.Settings -Principal $principal -ErrorAction Stop
+    $task | Add-Member -NotePropertyName Definition -NotePropertyValue $definition
+}
+
+# All preflight checks and in-memory task validation are above this line.
+# System changes below are intentional.
+
+if ($PSCmdlet.ShouldProcess($config.StateRoot, 'Create operations state directory')) {
+    New-Item -ItemType Directory -Force -Path $config.StateRoot | Out-Null
+}
+if ($PSCmdlet.ShouldProcess($config.EnvFile, 'Restrict deployment environment file ACL')) {
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/inheritance:r') | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant:r', "${currentUser}:(M)") | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'SYSTEM:(F)') | Out-Null
+    Invoke-External -FilePath 'icacls.exe' -ArgumentList @($config.EnvFile, '/grant', 'Administrators:(F)') | Out-Null
+}
+if ($PSCmdlet.ShouldProcess($firewallName, 'Replace private intranet firewall rule')) {
+    Get-NetFirewallRule -DisplayName $firewallName -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName -eq $firewallName } |
+        Remove-NetFirewallRule -ErrorAction Stop
+    New-NetFirewallRule -DisplayName $firewallName -Direction Inbound -Action Allow `
+        -Protocol TCP -LocalPort 7860 -Profile Private -RemoteAddress LocalSubnet | Out-Null
+}
+
+foreach ($task in $taskDefinitions) {
     if ($PSCmdlet.ShouldProcess($task.Name, 'Register scheduled task')) {
-        Register-ScheduledTask -TaskName $task.Name -Action $task.Action -Trigger $task.Trigger `
-            -Settings $task.Settings -Principal $principal -Force | Out-Null
+        Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition `
+            -Force | Out-Null
     }
 }
 
