@@ -51,6 +51,36 @@
       "exportName": "MobileBottomNav",
       "variants": {},
       "verified": true
+    },
+    {
+      "penpotId": "879161d4-ba5f-800d-8008-852644bff09e",
+      "penpotName": "DocumentRow",
+      "codeFile": "web/src/components/DocumentList/DocumentList.tsx",
+      "exportName": "DocumentRow",
+      "variants": {
+        "state": ["ready", "deleting"]
+      },
+      "verified": true
+    },
+    {
+      "penpotId": "879161d4-ba5f-800d-8008-8526d12f81ea",
+      "penpotName": "ImportTaskRow",
+      "codeFile": "web/src/components/ImportBatchPanel/ImportBatchPanel.tsx",
+      "exportName": "ImportTaskRow",
+      "variants": {
+        "state": ["running", "queued", "failed", "cancelled"]
+      },
+      "verified": true
+    },
+    {
+      "penpotId": "879161d4-ba5f-800d-8008-8526e7a901fd",
+      "penpotName": "FilePicker",
+      "codeFile": "web/src/components/ImportDialog/ImportDialog.tsx",
+      "exportName": "FilePicker",
+      "variants": {
+        "state": ["idle", "drag-active", "invalid"]
+      },
+      "verified": true
     }
   ]
 }

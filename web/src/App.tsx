@@ -4,6 +4,7 @@ import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppShell } from "./layout/AppShell";
 import { navigationItems } from "./layout/navigation";
 import { LoginPage } from "./pages/LoginPage";
+import { DocumentsPage } from "./pages/DocumentsPage";
 import { MigrationPage } from "./pages/MigrationPage";
 import { RegisterPage } from "./pages/RegisterPage";
 
@@ -18,7 +19,13 @@ export function App() {
             <Route
               key={item.path}
               path={item.path}
-              element={<MigrationPage heading={item.heading} />}
+              element={
+                item.path === "/documents" ? (
+                  <DocumentsPage />
+                ) : (
+                  <MigrationPage heading={item.heading} />
+                )
+              }
             />
           ))}
         </Route>
