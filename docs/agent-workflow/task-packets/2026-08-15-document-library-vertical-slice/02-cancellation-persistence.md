@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-02"
 title: "Add durable import cancellation and commit arbitration"
-status: "ready"
+status: "done"
 parallel-safe: true
 depends-on: []
 base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
-owner: "unassigned"
+owner: "task2-implementer"
 ---
 
 # Task Packet: Add durable import cancellation and commit arbitration
@@ -132,4 +132,27 @@ Stop and report `blocked` on any repository reality conflict, migration requirin
 
 ## Implementation handoff
 
-Replace with the template handoff, including migration evidence, race-test results, exact files, scope confirmation, deviations/risks and commit.
+- Status: done
+- Files changed:
+  - `app/database.py`
+  - `app/import_models.py`
+  - `app/import_repository.py`
+  - `tests/test_import_models.py`
+  - `tests/test_import_repository.py`
+- Acceptance criteria:
+  - [x] New databases accept `cancelled` and expose `cancel_requested_at`; model and row-mapping contracts include cancellation fields and decisions.
+  - [x] A literal `f90883e` pre-cancellation table fixture upgrades twice without changing represented task values, losing the three indexes, or breaking its foreign key.
+  - [x] Queued/retry-wait cancellation, running cancellation requests, commit arbitration, terminal idempotence, invalid transitions, retry/claim exclusion, and user/batch/task mismatches are covered.
+  - [x] Two repository instances using real SQLite connections race cancel against begin-commit and produce exactly one legal winner with no half state.
+  - [x] Scope remained limited to the five owned implementation/test files plus this packet; no worker, service, storage, API, frontend, design, or dependency code changed.
+- Verification:
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/test_import_models.py tests/test_import_repository.py -k "cancel or upgrade or commit" --basetemp=.runtime/pytest-cancel-repository-red` — expected RED (`11 failed, 18 deselected`).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/test_import_models.py tests/test_import_repository.py --basetemp=.runtime/pytest-cancel-repository-green` — PASS (`29 passed`).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/ui/test_import_handlers.py -k "task_table" --basetemp=.runtime/pytest-cancel-model-compat-focused` — PASS (`2 passed, 28 deselected`).
+  - `git diff --check` — PASS.
+- Deviations:
+  - `ImportTaskRecord.cancel_requested_at` and `ImportBatchSummary.cancelled` have backward-compatible defaults so existing named test/UI constructors remain valid; their produced repository values are always explicit.
+- Residual risks:
+  - None within this persistence/repository packet. Worker cooperation and file cleanup remain intentionally assigned to Packet 03.
+- Commit:
+  - `dfaa55d`
