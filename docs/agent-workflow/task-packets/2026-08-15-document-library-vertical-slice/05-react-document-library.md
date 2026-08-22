@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-05"
 title: "Build the responsive React document library"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-01", "document-library-vertical-slice-04"]
-base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
-owner: "unassigned"
+base-commit: "1ac419a3be25b167db16cf6d218f26e9f9f5bc4e"
+owner: "completed"
 ---
 
 # Task Packet: Build the responsive React document library
@@ -151,7 +151,71 @@ Stop on any standard reality conflict, incomplete prerequisite, API/Penpot misma
 
 ## Implementation handoff
 
-Replace with template handoff, including route/state/query/accessibility test counts, design mapping evidence, build gates, scope confirmation, deviations/risks and commit.
+- Status: done; ready for independent review.
+- Files changed:
+  - `web/src/features/documents/types.ts`
+  - `web/src/features/documents/api.ts`
+  - `web/src/features/documents/queries.ts`
+  - `web/src/features/documents/queries.test.tsx`
+  - `web/src/components/DocumentToolbar/DocumentToolbar.tsx`
+  - `web/src/components/DocumentList/DocumentList.tsx`
+  - `web/src/components/ImportDialog/ImportDialog.tsx`
+  - `web/src/components/ImportDialog/ImportDialog.test.tsx`
+  - `web/src/components/ImportBatchPanel/ImportBatchPanel.tsx`
+  - `web/src/pages/DocumentsPage.tsx`
+  - `web/src/pages/DocumentsPage.test.tsx`
+  - `web/src/styles/documents.css`
+  - `web/src/App.tsx`
+  - `web/src/main.tsx`
+  - `docs/product-ui/penpot-component-map.json`
+  - this packet
+- Produced behavior:
+  - `/documents` now uses authenticated Packet 04 data for documents and the latest 20 import batches; all other five protected navigation routes retain `MigrationPage`.
+  - Typed feature APIs use `useAuth().request<T>()`, exact encoded mutation routes and browser-owned multipart headers.
+  - Imports poll every 2000 ms only while visible data is queued/running/retry-waiting; focus refetch, active-to-success document invalidation, authoritative server-batch caching and delete success/failure invalidation are implemented without optimistic business state.
+  - Loading, initial error, stale-data error, exact empty, filtered complete, active, partial-failure and collapsed terminal states render exclusively from API data.
+  - Import modal/mobile sheet and delete confirmation provide focus entry/trap/Escape/return, scroll restoration, qualified action names, safe errors, one deduplicated polite live region and 44 px action targets.
+- Focused test coverage (25 tests total; categories overlap):
+  - Route: 1 case proves real `/documents` and every one of the other five protected navigation routes remains migration-only.
+  - State/rendering: 5 cases cover loading versus empty, initial error, stale-data preservation, complete/filter/duplicate/null metadata, and active/partial-failure/terminal imports.
+  - Query/API: 7 cases cover exact keys/routes/FormData, active-only polling, single focus refetch, success invalidation, server-summary authority and delete success/failure refresh.
+  - Accessibility/overlay: 5 focused cases cover import focus trap plus Shift+Tab/Escape/return, overflow restoration, mobile/44 px CSS contracts, recoverable delete error focus/return and deduplicated live status.
+  - Mutation/validation: remaining focused assertions cover retry/retry-all/cancel/delete routes, safe `ApiError` messages, drag/invalid state, stable duplicate-file removal and all three upload limits.
+- Acceptance criteria:
+  - [x] `/documents` is real and all other protected navigation remains migration state.
+  - [x] All document/import operations use AuthProvider and exact Packet 04 public DTOs/routes; backend-internal fields are absent from TypeScript.
+  - [x] Polling, focus refresh, transition invalidation, server-authoritative cache writes, delete refresh and promise handling are unit-tested.
+  - [x] Exact UI states, real-data identity/filter/null behavior and retry/cancel/delete/import flows are unit-tested without production fake data.
+  - [x] Dialog/sheet focus, keyboard, body-scroll restoration, polite announcements, reduced motion and mobile target contracts are implemented and tested.
+  - [x] 342/856/1096 px content widths, 342/360/420 px filter sizing and 342/160/180 px import actions follow the approved mobile/tablet/desktop handoff.
+- Design mapping evidence:
+  - `DocumentRow`: container `879161d4-ba5f-800d-8008-852644bff09e`; ready `f35db4ee-075c-8075-8008-7c1eea45d28f`; deleting `879161d4-ba5f-800d-8008-852644a6ce86`.
+  - `ImportTaskRow`: container `879161d4-ba5f-800d-8008-8526d12f81ea`; running `f35db4ee-075c-8075-8008-7c1eefe300f4`; queued `879161d4-ba5f-800d-8008-85267e7cc503`; failed `879161d4-ba5f-800d-8008-8526c1b6c14b`; cancelled `879161d4-ba5f-800d-8008-8526c2549491`.
+  - `FilePicker`: container `879161d4-ba5f-800d-8008-8526e7a901fd`; idle `f35db4ee-075c-8075-8008-7c1ef1831cf3`; drag-active `879161d4-ba5f-800d-8008-8526e71f0357`; invalid `879161d4-ba5f-800d-8008-8526e797edf6`.
+  - `node --test tests/design/test_penpot_component_map.mjs` validates the map schema, paths, exports, state names and fresh verification: `6/6 passed`.
+- Verification:
+  - Baseline `npm ci` — PASS, 274 packages installed; unchanged lock audit reports one high-severity advisory.
+  - Baseline frontend gates before Task 5 — PASS, `65/65` tests plus typecheck/lint/build; component map `6/6`, authoritative token check and diff check also passed.
+  - Focused RED — expected failure, three suites failed: the page's seven new expectations saw the migration placeholder and the query/dialog modules did not exist.
+  - Focused GREEN — PASS, `3 files / 25 tests`.
+  - Final fresh `npm ci` — PASS, 274 packages installed/audited.
+  - `npm test` — PASS, `9 files / 90 tests`.
+  - `npm run typecheck` — PASS.
+  - `npm run lint` — PASS.
+  - `npm run build` — PASS, Vite transformed 114 modules.
+  - `node --test tests/design/test_penpot_component_map.mjs` — PASS, `6/6`.
+  - `node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css` — PASS.
+  - `git diff --check` — PASS; Git emitted line-ending notices only.
+- Scope confirmation:
+  - Implementation commit `9571ee9` changes only the fifteen frontend/component-map files allowed by the revised Task 5 brief.
+  - Shared component internals, AuthProvider, AppShell/navigation, backend, E2E/snapshots, Penpot source/handoff/PNGs, packages/lock/config, dependencies and generated tokens are unchanged.
+  - `web/dist` and `web/node_modules` remain ignored.
+- Deviations: None.
+- Residual risks:
+  - The locked dependency audit continues to report one pre-existing high-severity advisory; dependency changes are explicitly outside Packet 05.
+  - One unchanged `ProtectedRoute` assertion transiently raced DOM commit while all gates ran concurrently; its isolated `4/4` rerun and the required serial full suite `90/90` both passed. No Auth file was changed.
+  - Independent browser/E2E viewport acceptance remains Packet 06; mandatory independent code review is still pending.
+- Commits: `9571ee9` (`feat: add responsive document library`); handoff metadata in the subsequent documentation commit.
 
 ## Reality-conflict resolution
 
