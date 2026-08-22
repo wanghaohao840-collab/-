@@ -366,6 +366,54 @@ def test_cancel_cleanup_failure_still_persists_cancelled(tmp_path, monkeypatch):
     assert staged.exists()
 
 
+@pytest.mark.parametrize("residue_kind", ["temporary", "formal"])
+def test_restart_reconciles_exact_cancelled_attempt_file_after_unlink_failure(
+    tmp_path, monkeypatch, residue_kind
+):
+    runner, repository, storage, runtimes, clock, user_id, task_id = make_runner(
+        tmp_path
+    )
+    task = claim(repository, clock)
+    staged = storage.user_paths(user_id).root / task.staged_relative_path
+    formal = storage.document_path(user_id, task.document_id, task.file_suffix)
+    temporary = storage.temporary_document_path(
+        user_id, task.document_id, task.file_suffix
+    )
+    target = temporary if residue_kind == "temporary" else formal
+    cleanup_blocked = True
+    real_unlink = Path.unlink
+
+    def cancel_with_both_attempt_paths(stage):
+        if stage == "embedding":
+            temporary.write_bytes(b"temporary residue")
+            repository.request_cancel(user_id, task.batch_id, task.task_id)
+
+    def fail_selected(path, *args, **kwargs):
+        if cleanup_blocked and path == target:
+            raise OSError("attempt cleanup unavailable")
+        return real_unlink(path, *args, **kwargs)
+
+    FakeAssistant.before_progress = cancel_with_both_attempt_paths
+    monkeypatch.setattr(Path, "unlink", fail_selected)
+
+    runner.run(task)
+
+    assert repository.get_task(user_id, task_id).status == "cancelled"
+    assert target.exists()
+    assert not staged.exists()
+
+    cleanup_blocked = False
+    restarted = ImportWorkerPool(
+        repository, runtimes, storage, runner=BlockingRunner(), worker_count=1
+    )
+    restarted.start()
+    restarted.stop(wait=True)
+
+    assert not temporary.exists()
+    assert not formal.exists()
+    assert repository.get_task(user_id, task_id).status == "cancelled"
+
+
 def test_staged_cleanup_failure_preserves_success_and_staged_copy(
     tmp_path, monkeypatch
 ):
@@ -447,6 +495,14 @@ def test_pool_start_reconciles_only_exact_cancelled_staging(tmp_path):
     assert first is not None
     repository.mark_failed(user_id, first.task_id, "document_invalid", "keep")
     failed_staged = storage.user_paths(user_id).root / first.staged_relative_path
+    failed_temporary = storage.temporary_document_path(
+        user_id, first.document_id, first.file_suffix
+    )
+    failed_formal = storage.document_path(
+        user_id, first.document_id, first.file_suffix
+    )
+    failed_temporary.write_bytes(b"failed temporary")
+    failed_formal.write_bytes(b"failed formal")
 
     batch_id = str(uuid.uuid4())
     task_id = str(uuid.uuid4())
@@ -483,6 +539,8 @@ def test_pool_start_reconciles_only_exact_cancelled_staging(tmp_path):
     assert not staged.exists()
     assert unrelated.read_bytes() == b"keep"
     assert failed_staged.read_bytes() == b"content"
+    assert failed_temporary.read_bytes() == b"failed temporary"
+    assert failed_formal.read_bytes() == b"failed formal"
 
 
 def test_failure_removes_formal_file_but_preserves_staged_copy(tmp_path):

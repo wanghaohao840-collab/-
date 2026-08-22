@@ -63,6 +63,14 @@ class ImportCancelled(BaseException):
     """Internal cooperative-cancellation signal that crosses Exception wrappers."""
 
 
+class ImportCommitGateFailure(BaseException):
+    """Carry a gate exception through producer best-effort progress wrappers."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+
 def classify_import_failure(error: BaseException) -> tuple[str, bool, str]:
     error_code = getattr(error, "error_code", None)
     retryable = getattr(error, "retryable", None)
@@ -166,9 +174,7 @@ class ImportTaskRunner:
                 raise ValueError(result)
             current = self.repository.get_task(task.user_id, task.task_id)
             if current is None or current.stage != "committing":
-                if not self.repository.try_begin_committing(
-                    task.user_id, task.task_id, now=self._now_iso()
-                ):
+                if not self._try_begin_committing(task):
                     raise ImportCancelled()
             self.repository.mark_succeeded(
                 task.user_id, task.task_id, now=self._now_iso()
@@ -203,30 +209,12 @@ class ImportTaskRunner:
             self.repository.mark_cancelled(
                 task.user_id, task.task_id, now=self._now_iso()
             )
+        except ImportCommitGateFailure as signal:
+            self._remove_attempt_files(temporary_path, formal_path)
+            self._record_failure(task, signal.error)
         except Exception as error:
             self._remove_attempt_files(temporary_path, formal_path)
-            error_code, retryable, summary = classify_import_failure(error)
-            if retryable and task.auto_retry_count < task.max_auto_retries:
-                delay = _RETRY_DELAYS[
-                    min(task.auto_retry_count, len(_RETRY_DELAYS) - 1)
-                ]
-                next_attempt = self.clock() + timedelta(seconds=delay)
-                self.repository.mark_retry_wait(
-                    task.user_id,
-                    task.task_id,
-                    next_attempt_at=_as_utc_iso(next_attempt),
-                    error_code=error_code,
-                    error_summary=summary,
-                    now=self._now_iso(),
-                )
-            else:
-                self.repository.mark_failed(
-                    task.user_id,
-                    task.task_id,
-                    error_code,
-                    summary,
-                    now=self._now_iso(),
-                )
+            self._record_failure(task, error)
         finally:
             if assistant is not None:
                 try:
@@ -272,9 +260,7 @@ class ImportTaskRunner:
             if commit_started:
                 return
             if stage == "committing":
-                if not self.repository.try_begin_committing(
-                    task.user_id, task.task_id, now=self._now_iso()
-                ):
+                if not self._try_begin_committing(task):
                     raise ImportCancelled()
                 commit_started = True
                 last_progress = max(last_progress, 99)
@@ -300,6 +286,38 @@ class ImportTaskRunner:
             last_state = state
 
         return update
+
+    def _try_begin_committing(self, task: ImportTaskRecord) -> bool:
+        try:
+            return self.repository.try_begin_committing(
+                task.user_id, task.task_id, now=self._now_iso()
+            )
+        except Exception as error:
+            raise ImportCommitGateFailure(error) from error
+
+    def _record_failure(self, task: ImportTaskRecord, error: Exception) -> None:
+        error_code, retryable, summary = classify_import_failure(error)
+        if retryable and task.auto_retry_count < task.max_auto_retries:
+            delay = _RETRY_DELAYS[
+                min(task.auto_retry_count, len(_RETRY_DELAYS) - 1)
+            ]
+            next_attempt = self.clock() + timedelta(seconds=delay)
+            self.repository.mark_retry_wait(
+                task.user_id,
+                task.task_id,
+                next_attempt_at=_as_utc_iso(next_attempt),
+                error_code=error_code,
+                error_summary=summary,
+                now=self._now_iso(),
+            )
+        else:
+            self.repository.mark_failed(
+                task.user_id,
+                task.task_id,
+                error_code,
+                summary,
+                now=self._now_iso(),
+            )
 
     def _raise_if_cancel_requested(self, task: ImportTaskRecord) -> None:
         if self.repository.is_cancel_requested(task.user_id, task.task_id):
@@ -382,14 +400,32 @@ class ImportWorkerPool:
         try:
             rows = conn.execute(
                 """
-                select id, batch_id, user_id, file_suffix, staged_relative_path
+                select id, batch_id, user_id, document_id, file_suffix,
+                       staged_relative_path
                 from import_tasks where status = 'cancelled'
                 """
             ).fetchall()
+            self._reconcile_rollback_journals(conn)
         finally:
             conn.close()
 
         for row in rows:
+            try:
+                temporary, formal = self.storage.resolve_import_attempt_paths(
+                    row["user_id"], row["document_id"], row["file_suffix"]
+                )
+            except ValueError:
+                logger.warning(
+                    "could not validate cancelled import attempt path"
+                )
+            else:
+                for attempt_path in (temporary, formal):
+                    try:
+                        self._unlink_reconciled_path(attempt_path)
+                    except OSError:
+                        logger.warning(
+                            "could not reconcile cancelled import attempt file"
+                        )
             try:
                 self.storage.remove_staged_import_file(
                     row["user_id"],
@@ -402,6 +438,65 @@ class ImportWorkerPool:
                 logger.warning(
                     "could not reconcile cancelled import staging file"
                 )
+
+    def _reconcile_rollback_journals(self, conn: Any) -> None:
+        try:
+            journals = list(self.storage.iter_import_rollback_journals())
+        except OSError:
+            logger.warning("could not enumerate import rollback markers")
+            return
+        for user_id, batch_id, marker in journals:
+            batch_exists = conn.execute(
+                "select 1 from import_batches where id = ? and user_id = ?",
+                (batch_id, user_id),
+            ).fetchone()
+            if batch_exists is not None:
+                try:
+                    marker.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("could not remove stale import rollback marker")
+                continue
+            try:
+                files = self.storage.read_import_rollback_journal(
+                    user_id, batch_id, marker
+                )
+            except (OSError, ValueError):
+                logger.warning("could not validate import rollback marker")
+                continue
+
+            complete = True
+            for task_id, suffix in files:
+                try:
+                    partial, staged = self.storage.resolve_rollback_staging_paths(
+                        user_id, batch_id, task_id, suffix
+                    )
+                except ValueError:
+                    complete = False
+                    logger.warning("could not validate import rollback file")
+                    continue
+                for rollback_path in (partial, staged):
+                    try:
+                        self._unlink_reconciled_path(rollback_path)
+                    except OSError:
+                        complete = False
+                        logger.warning("could not reconcile import rollback file")
+            if not complete:
+                continue
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove import rollback marker")
+                continue
+            try:
+                marker.parent.rmdir()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _unlink_reconciled_path(path: Path) -> None:
+        path.unlink(missing_ok=True)
+        if path.exists():
+            raise OSError("exact import cleanup did not remove its target")
 
     def stop(self, wait: bool = True) -> None:
         with self._condition:

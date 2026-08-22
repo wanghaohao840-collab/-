@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import threading
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,11 +12,15 @@ import pytest
 
 from app.auth import AuthService
 from app.database import initialize_database
+from app.history import HistoryRepository
 from app.import_repository import ImportTaskRepository, InvalidImportTransition
 import app.import_service as import_service
 from app.import_models import ImportLimits
 from app.import_service import ImportTaskService
+from app.import_worker import ImportTaskRunner, ImportWorkerPool
+from app.runtime import UserRuntime
 from app.storage import UserStorage
+from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
 class FakeSessionRegistry:
@@ -315,10 +321,15 @@ def test_staging_flushes_fsyncs_and_replaces_partial_file(tmp_path, monkeypatch)
     )
 
     staged = storage.user_paths(user_id).root / result.tasks[0].staged_relative_path
-    assert fsynced
-    assert replacements == [(staged.with_name(f"{staged.name}.partial"), staged)]
+    assert len(fsynced) >= 2
+    assert replacements[0][0].name.endswith(".tmp")
+    assert replacements[0][1].name == ".rollback.json"
+    assert replacements[-1] == (
+        staged.with_name(f"{staged.name}.partial"),
+        staged,
+    )
     assert staged.read_bytes() == b"body"
-    assert not replacements[0][0].exists()
+    assert not replacements[-1][0].exists()
 
 
 def test_database_failure_removes_exact_staged_files_and_leaves_no_batch(
@@ -342,6 +353,171 @@ def test_database_failure_removes_exact_staged_files_and_leaves_no_batch(
     imports = storage.user_paths(user_id).imports
     assert not imports.exists() or list(imports.rglob("*")) == []
     assert workers.notify_count == 0
+
+
+def test_rollback_marker_is_durable_before_first_upload_byte(tmp_path, monkeypatch):
+    service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
+    stream = TrackingStream(b"body")
+
+    def fail_marker(*_args, **_kwargs):
+        raise OSError(r"D:\private\marker token=secret")
+
+    monkeypatch.setattr(
+        storage, "write_import_rollback_journal", fail_marker, raising=False
+    )
+
+    with pytest.raises(ValueError, match="could not stage") as captured:
+        service.submit_uploads(
+            "valid-token", [import_service.ImportUpload("notes.md", stream)]
+        )
+
+    assert "private" not in str(captured.value)
+    assert "secret" not in str(captured.value)
+    assert stream.tell() == 0
+    assert repo.list_batches(user_id) == []
+    imports = storage.user_paths(user_id).imports
+    assert not imports.exists() or list(imports.rglob("*")) == []
+    assert workers.notify_count == 0
+
+
+def test_transient_rollback_unlink_failure_is_retried_without_residue(
+    tmp_path, monkeypatch
+):
+    service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
+    real_unlink = Path.unlink
+    failed_once = False
+
+    def fail_once(path, *args, **kwargs):
+        nonlocal failed_once
+        if path.name.endswith(".partial") and not failed_once:
+            failed_once = True
+            raise OSError("transient staging cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_once)
+
+    with pytest.raises(ValueError, match="could not stage"):
+        service.submit_uploads(
+            "valid-token",
+            [import_service.ImportUpload("notes.md", FailingStream(b"ignored"))],
+        )
+
+    assert failed_once
+    assert repo.list_batches(user_id) == []
+    imports = storage.user_paths(user_id).imports
+    assert not imports.exists() or list(imports.rglob("*")) == []
+    assert workers.notify_count == 0
+
+
+def test_persistent_rollback_cleanup_failure_is_safe_and_restart_recovers_exactly(
+    tmp_path, monkeypatch
+):
+    service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
+    real_unlink = Path.unlink
+    cleanup_blocked = True
+
+    def fail_partial(path, *args, **kwargs):
+        if cleanup_blocked and path.name.endswith(".partial"):
+            raise OSError(r"D:\private\staging token=secret")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_partial)
+
+    with pytest.raises(import_service.ImportStagingCleanupError) as captured:
+        service.submit_uploads(
+            "valid-token",
+            [import_service.ImportUpload("notes.md", FailingStream(b"ignored"))],
+        )
+
+    assert str(captured.value) == "could not clean up staged import files"
+    assert repo.list_batches(user_id) == []
+    imports = storage.user_paths(user_id).imports
+    markers = list(imports.rglob(".rollback.json"))
+    partials = list(imports.rglob("*.partial"))
+    assert len(markers) == len(partials) == 1
+    unrelated = partials[0].parent / "unrelated.keep"
+    unrelated.write_bytes(b"keep")
+
+    cleanup_blocked = False
+    restarted = ImportWorkerPool(
+        repo,
+        None,
+        storage,
+        runner=SimpleNamespace(run=lambda _task: None),
+        worker_count=1,
+    )
+    restarted.start()
+    restarted.stop(wait=True)
+
+    assert not markers[0].exists()
+    assert not partials[0].exists()
+    assert unrelated.read_bytes() == b"keep"
+    assert workers.notify_count == 0
+
+
+def test_reconciliation_removes_stale_marker_but_keeps_real_queued_batch(tmp_path):
+    service, repo, storage, _, user_id, _ = make_import_service(tmp_path)
+    batch = service.submit_uploads(
+        "valid-token",
+        [import_service.ImportUpload("notes.md", io.BytesIO(b"body"))],
+    )
+    task = batch.tasks[0]
+    marker = storage.write_import_rollback_journal(
+        user_id, batch.batch_id, [(task.task_id, task.file_suffix)]
+    )
+    staged = storage.user_paths(user_id).root / task.staged_relative_path
+
+    pool = ImportWorkerPool(
+        repo,
+        None,
+        storage,
+        runner=SimpleNamespace(run=lambda _task: None),
+        worker_count=1,
+    )
+    pool._reconcile_terminal_staging()
+
+    assert not marker.exists()
+    assert staged.read_bytes() == b"body"
+    assert repo.get_task(user_id, task.task_id).status == "queued"
+
+
+def test_reconciliation_preserves_malicious_marker_and_unrelated_file(tmp_path):
+    _, repo, storage, _, user_id, _ = make_import_service(tmp_path)
+    batch_id = str(uuid.uuid4())
+    batch_dir = storage.import_batch_dir(user_id, batch_id)
+    marker = batch_dir / ".rollback.json"
+    outside = tmp_path / "outside.keep"
+    outside.write_bytes(b"outside")
+    unrelated = batch_dir / "unrelated.keep"
+    unrelated.write_bytes(b"inside")
+    marker.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "files": [
+                    {
+                        "task_id": str(uuid.uuid4()),
+                        "suffix": ".md",
+                        "path": str(outside.resolve()),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pool = ImportWorkerPool(
+        repo,
+        None,
+        storage,
+        runner=SimpleNamespace(run=lambda _task: None),
+        worker_count=1,
+    )
+    pool._reconcile_terminal_staging()
+
+    assert marker.exists()
+    assert unrelated.read_bytes() == b"inside"
+    assert outside.read_bytes() == b"outside"
 
 
 def test_submit_batch_closes_only_service_owned_path_stream(tmp_path, monkeypatch):
@@ -446,6 +622,122 @@ def test_cancel_running_requests_cancellation_and_notifies_pool(tmp_path):
     assert summary.tasks[0].cancel_requested_at is not None
     assert staged.exists()
     assert workers.notify_count == 2
+
+
+def test_running_cancel_persists_while_shared_runtime_embedding_lock_is_held(
+    tmp_path,
+):
+    service, repo, storage, _, user_id, _ = make_import_service(tmp_path)
+    paths = storage.ensure_user_dirs(user_id)
+    embedding_locked = threading.Event()
+    release_embedding = threading.Event()
+    cancel_finished = threading.Event()
+    errors = []
+
+    class BarrierRAGTool:
+        def __init__(self):
+            self.mutated = False
+
+        def _get_pipeline(self):
+            return SimpleNamespace(list_document_ids=lambda: [])
+
+        def execute_result(self, _action, **kwargs):
+            callback = kwargs["progress_callback"]
+            embedding_locked.set()
+            assert release_embedding.wait(timeout=3)
+            callback("embedding", 1, 1, "embedded")
+            callback("committing", 0, 1, "committing")
+            self.mutated = True
+            return SimpleNamespace(
+                success=True,
+                message="loaded",
+                data={"document_id": kwargs["document_id"]},
+                error="",
+                error_code="",
+                retryable=False,
+            )
+
+        def execute(self, *_args, **_kwargs):
+            self.mutated = False
+            return "ok"
+
+    class TrackingMemoryTool:
+        def __init__(self):
+            self.calls = []
+
+        def ensure_import_event(self, **kwargs):
+            self.calls.append(kwargs)
+            return "memory-event"
+
+    rag_tool = BarrierRAGTool()
+    memory_tool = TrackingMemoryTool()
+    history = HistoryRepository(paths.history)
+    runtime = UserRuntime(
+        user_id=user_id,
+        paths=paths,
+        lock=threading.RLock(),
+        coordinator=None,
+        rag_tool=rag_tool,
+        memory_tool=memory_tool,
+        history=history,
+        reports=SimpleNamespace(),
+        recovery=SimpleNamespace(),
+    )
+    assistant = PDFLearningAssistant(
+        user_id=user_id, runtime_dir=paths.root, runtime=runtime
+    )
+    service.session_registry.sessions["valid-token"] = SimpleNamespace(
+        user_id=user_id, runtime=runtime, assistant=assistant
+    )
+    batch = service.submit_batch(
+        "valid-token", [uploaded_file(tmp_path, "running.md", b"body")]
+    )
+    task = repo.claim_next(set())
+
+    class SharedRuntimeRegistry:
+        def acquire_background(self, selected_user_id):
+            assert selected_user_id == user_id
+            return runtime
+
+        def release_background(self, selected_user_id):
+            assert selected_user_id == user_id
+
+    runner = ImportTaskRunner(
+        repo,
+        SharedRuntimeRegistry(),
+        storage,
+        assistant_factory=lambda **kwargs: assistant,
+    )
+    runner_thread = threading.Thread(target=runner.run, args=(task,))
+    runner_thread.start()
+    assert embedding_locked.wait(timeout=3)
+
+    cancel_thread = threading.Thread(
+        target=lambda: _capture_and_signal(
+            errors,
+            cancel_finished,
+            service.cancel_task,
+            "valid-token",
+            batch.batch_id,
+            task.task_id,
+        )
+    )
+    cancel_thread.start()
+    persisted_before_release = cancel_finished.wait(timeout=0.3)
+    persisted_task = repo.get_task(user_id, task.task_id)
+    release_embedding.set()
+    cancel_thread.join(timeout=3)
+    runner_thread.join(timeout=3)
+
+    assert persisted_before_release
+    assert persisted_task.cancel_requested_at is not None
+    assert errors == []
+    assert not cancel_thread.is_alive()
+    assert not runner_thread.is_alive()
+    assert repo.get_task(user_id, task.task_id).status == "cancelled"
+    assert rag_tool.mutated is False
+    assert history.load()["documents"] == []
+    assert memory_tool.calls == []
 
 
 def test_cancel_committing_is_safe_error_and_terminal_is_unchanged(tmp_path):
@@ -663,6 +955,15 @@ def _capture_error(errors, call, *args):
         call(*args)
     except Exception as error:  # pragma: no cover - surfaced by assertion
         errors.append(error)
+
+
+def _capture_and_signal(errors, finished, call, *args):
+    try:
+        call(*args)
+    except Exception as error:  # pragma: no cover - surfaced by assertion
+        errors.append(error)
+    finally:
+        finished.set()
 
 
 def _enter_lock(runtime, entered):

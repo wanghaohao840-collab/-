@@ -32,6 +32,16 @@ class ImportTaskNotCancellableError(RuntimeError):
     """Raised when durable commit arbitration has already completed."""
 
 
+class ImportStagingCleanupError(RuntimeError):
+    """Raised when exact pre-batch staging rollback remains incomplete."""
+
+    code = "import_staging_cleanup_failed"
+    status_code = 500
+
+    def __init__(self) -> None:
+        super().__init__("could not clean up staged import files")
+
+
 @dataclass(frozen=True)
 class ImportUpload:
     original_name: str
@@ -126,6 +136,14 @@ class ImportTaskService:
 
         with self._runtime_lock(session):
             try:
+                rollback_marker = self.storage.write_import_rollback_journal(
+                    user_id,
+                    batch_id,
+                    [(item.task_id, item.suffix) for item in pending],
+                )
+            except Exception:
+                raise ValueError("could not stage uploaded files") from None
+            try:
                 for index, item in enumerate(pending, start=1):
                     target = self.storage.staged_import_path(
                         user_id, batch_id, item.task_id, item.suffix
@@ -160,17 +178,18 @@ class ImportTaskService:
                             desc=f"Staging document {index} of {len(pending)}",
                         )
             except ImportLimitError:
-                self._cleanup_owned_staging(owned_paths)
+                self._rollback_staging_or_raise(owned_paths, rollback_marker)
                 raise
             except Exception:
-                self._cleanup_owned_staging(owned_paths)
+                self._rollback_staging_or_raise(owned_paths, rollback_marker)
                 raise ValueError("could not stage uploaded files") from None
 
             try:
                 summary = self.repository.create_batch(user_id, creates)
             except Exception:
-                self._cleanup_owned_staging(owned_paths)
+                self._rollback_staging_or_raise(owned_paths, rollback_marker)
                 raise
+            self._remove_committed_rollback_marker(rollback_marker)
 
         self.worker_pool.notify()
         return summary
@@ -230,13 +249,12 @@ class ImportTaskService:
     ) -> ImportBatchSummary:
         session = self._session(session_token)
         user_id = str(session.user_id)
-        with self._runtime_lock(session):
-            decision = self.repository.request_cancel(user_id, batch_id, task_id)
-            if decision.outcome == "not_cancellable":
-                raise ImportTaskNotCancellableError("import task is committing")
-            if decision.outcome == "cancelled":
-                self._cleanup_cancelled_staging(decision.task)
-            summary = self.repository.get_batch(user_id, batch_id)
+        decision = self.repository.request_cancel(user_id, batch_id, task_id)
+        if decision.outcome == "not_cancellable":
+            raise ImportTaskNotCancellableError("import task is committing")
+        if decision.outcome == "cancelled":
+            self._cleanup_cancelled_staging(decision.task)
+        summary = self.repository.get_batch(user_id, batch_id)
         if summary is None:  # pragma: no cover - guarded by request_cancel
             raise KeyError("import batch was not found")
         self.worker_pool.notify()
@@ -328,19 +346,64 @@ class ImportTaskService:
         return file_bytes, batch_bytes
 
     @staticmethod
-    def _cleanup_owned_staging(paths: Iterable[Path]) -> None:
+    def _cleanup_owned_staging(paths: Iterable[Path]) -> bool:
         parents: set[Path] = set()
+        complete = True
         for path in reversed(list(paths)):
             parents.add(path.parent)
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning("could not remove import staging file")
+            removed = False
+            for _attempt in range(2):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
+                removed = True
+                break
+            if not removed:
+                try:
+                    absent = not path.exists()
+                except OSError:
+                    absent = False
+                if not absent:
+                    complete = False
+                    logger.warning("could not remove import staging file")
         for parent in parents:
             try:
                 parent.rmdir()
             except OSError:
                 pass
+        return complete
+
+    def _rollback_staging_or_raise(
+        self, paths: Iterable[Path], marker: Path
+    ) -> None:
+        complete = self._cleanup_owned_staging(paths)
+        if complete:
+            complete = self._unlink_with_retry(marker)
+        if complete:
+            try:
+                marker.parent.rmdir()
+            except OSError:
+                pass
+            return
+        raise ImportStagingCleanupError() from None
+
+    @staticmethod
+    def _unlink_with_retry(path: Path) -> bool:
+        for _attempt in range(2):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            return True
+        try:
+            return not path.exists()
+        except OSError:
+            return False
+
+    def _remove_committed_rollback_marker(self, marker: Path) -> None:
+        if not self._unlink_with_retry(marker):
+            logger.warning("could not remove committed import rollback marker")
 
     def _cleanup_cancelled_staging(self, task: Any) -> None:
         try:
