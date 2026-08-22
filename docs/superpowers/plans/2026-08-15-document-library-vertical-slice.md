@@ -681,6 +681,7 @@ git commit -m "feat: add responsive document library"
 - Create: `web/e2e/documents.spec.ts`
 - Modify: `web/e2e/accessibility.spec.ts`
 - Modify: `web/e2e/visual.spec.ts`
+- Modify: `web/e2e/auth-shell.spec.ts`
 - Create: `web/e2e/visual.spec.ts-snapshots/documents-empty-desktop.png`
 - Create: `web/e2e/visual.spec.ts-snapshots/documents-empty-tablet.png`
 - Create: `web/e2e/visual.spec.ts-snapshots/documents-empty-mobile.png`

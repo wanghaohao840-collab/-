@@ -57,6 +57,7 @@ All product behavior exists after Packet 05. Current Playwright fixture launches
 - Create: `web/e2e/documents.spec.ts`
 - Modify: `web/e2e/accessibility.spec.ts`
 - Modify: `web/e2e/visual.spec.ts`
+- Modify: `web/e2e/auth-shell.spec.ts`
 - Create: six `documents-empty|complete-{desktop|tablet|mobile}.png` files under `web/e2e/visual.spec.ts-snapshots/`
 - Modify: `tests/deploy/test_document_library_contract.py`
 - Modify: this packet for handoff.
@@ -139,3 +140,9 @@ Stop on any standard reality conflict, incomplete Packet 05, need for production
 ## Implementation handoff
 
 Replace with template handoff, including exact totals per command/project, six snapshot names/dimensions, human comparison notes, process/runtime cleanup evidence, scope confirmation, deviations/risks and commit.
+
+## Reality-conflict resolution
+
+- Baseline conflict: `web/e2e/auth-shell.spec.ts` still asserted that `/documents` exposes the migration CTA, but Packet 05 intentionally replaced that route with the real document library.
+- Decision: Task 6 owns the acceptance-only update that moves the migration CTA assertion to `/qa`, which remains a `MigrationPage`. This preserves both the legacy redirect/CTA contract and the new `/documents` behavior.
+- Scope impact: `web/e2e/auth-shell.spec.ts` is added to the allowed files; production, fixtures, configuration and acceptance criteria are unchanged.
