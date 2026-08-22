@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-03"
 title: "Stream uploads and cancel worker attempts safely"
-status: "ready-for-re-review"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-02"]
 base-commit: "1b878b237d73b735eb3b5beee45a1910b21a2409"
-owner: "task3-implementer"
+owner: "completed"
 ---
 
 # Task Packet: Stream uploads and cancel worker attempts safely
