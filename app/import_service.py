@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import shutil
+import logging
+import os
 import uuid
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, BinaryIO, Callable, Iterable
 
 from app.import_models import (
     ImportBatchSummary,
     ImportLimits,
     ImportTaskCreate,
-    validate_batch_sizes,
 )
 from app.import_repository import ImportTaskRepository
 from app.storage import UserStorage
@@ -21,14 +21,40 @@ class ImportTasksActiveError(RuntimeError):
     """Raised when a destructive operation conflicts with active imports."""
 
 
+class ImportLimitError(ValueError):
+    def __init__(self, code: str, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+
+
+class ImportTaskNotCancellableError(RuntimeError):
+    """Raised when durable commit arbitration has already completed."""
+
+
 @dataclass(frozen=True)
-class _PendingImport:
+class ImportUpload:
+    original_name: str
+    stream: BinaryIO
+
+
+@dataclass(frozen=True)
+class _PathImport:
     source: Path
     original_name: str
+
+
+@dataclass(frozen=True)
+class _PendingImport:
+    upload: ImportUpload
+    original_name: str
     suffix: str
-    size_bytes: int
     task_id: str
     document_id: str
+
+
+logger = logging.getLogger(__name__)
+_STAGING_CHUNK_BYTES = 1024 * 1024
 
 
 class ImportTaskService:
@@ -55,24 +81,65 @@ class ImportTaskService:
         progress: Callable[..., Any] | None = None,
     ) -> ImportBatchSummary:
         session = self._session(session_token)
-        user_id = str(session.user_id)
-        pending = [self._inspect_file(item) for item in (files or [])]
-        validate_batch_sizes([item.size_bytes for item in pending], self.limits)
+        paths = [self._inspect_path(item) for item in (files or [])]
+        self._validate_file_count(len(paths))
+        with ExitStack() as stack:
+            try:
+                uploads = [
+                    ImportUpload(
+                        item.original_name,
+                        stack.enter_context(item.source.open("rb")),
+                    )
+                    for item in paths
+                ]
+            except OSError:
+                raise ValueError("could not stage uploaded files") from None
+            return self._submit_uploads(session, uploads, progress=progress)
 
+    def submit_uploads(
+        self,
+        session_token: str,
+        uploads: Iterable[ImportUpload],
+        progress: Callable[..., Any] | None = None,
+    ) -> ImportBatchSummary:
+        return self._submit_uploads(
+            self._session(session_token),
+            list(uploads or []),
+            progress=progress,
+        )
+
+    def _submit_uploads(
+        self,
+        session: Any,
+        uploads: Iterable[ImportUpload],
+        *,
+        progress: Callable[..., Any] | None,
+    ) -> ImportBatchSummary:
+        user_id = str(session.user_id)
+        upload_list = list(uploads)
+        self._validate_file_count(len(upload_list))
+        pending = [self._inspect_upload(upload) for upload in upload_list]
         batch_id = str(uuid.uuid4())
-        batch_dir: Path | None = None
+        owned_paths: list[Path] = []
         creates: list[ImportTaskCreate] = []
+        batch_bytes = 0
+
         with self._runtime_lock(session):
             try:
                 for index, item in enumerate(pending, start=1):
                     target = self.storage.staged_import_path(
-                        user_id,
-                        batch_id,
-                        item.task_id,
-                        item.suffix,
+                        user_id, batch_id, item.task_id, item.suffix
                     )
-                    batch_dir = target.parent
-                    shutil.copyfile(item.source, target)
+                    partial = self.storage.partial_staged_import_path(
+                        user_id, batch_id, item.task_id, item.suffix
+                    )
+                    owned_paths.extend((partial, target))
+                    file_bytes, batch_bytes = self._stage_stream(
+                        item.upload.stream,
+                        partial,
+                        target,
+                        batch_bytes,
+                    )
                     creates.append(
                         ImportTaskCreate(
                             task_id=item.task_id,
@@ -81,7 +148,7 @@ class ImportTaskService:
                             document_id=item.document_id,
                             original_name=item.original_name,
                             file_suffix=item.suffix,
-                            size_bytes=item.size_bytes,
+                            size_bytes=file_bytes,
                             staged_relative_path=str(
                                 target.relative_to(self.storage.user_paths(user_id).root)
                             ),
@@ -92,16 +159,17 @@ class ImportTaskService:
                             (index, len(pending)),
                             desc=f"Staging document {index} of {len(pending)}",
                         )
+            except ImportLimitError:
+                self._cleanup_owned_staging(owned_paths)
+                raise
             except Exception:
-                if batch_dir is not None:
-                    shutil.rmtree(batch_dir, ignore_errors=True)
+                self._cleanup_owned_staging(owned_paths)
                 raise ValueError("could not stage uploaded files") from None
 
             try:
                 summary = self.repository.create_batch(user_id, creates)
             except Exception:
-                if batch_dir is not None:
-                    shutil.rmtree(batch_dir, ignore_errors=True)
+                self._cleanup_owned_staging(owned_paths)
                 raise
 
         self.worker_pool.notify()
@@ -154,30 +222,137 @@ class ImportTaskService:
             self.worker_pool.notify()
         return summary
 
+    def cancel_task(
+        self,
+        session_token: str,
+        batch_id: str,
+        task_id: str,
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            decision = self.repository.request_cancel(user_id, batch_id, task_id)
+            if decision.outcome == "not_cancellable":
+                raise ImportTaskNotCancellableError("import task is committing")
+            if decision.outcome == "cancelled":
+                self._cleanup_cancelled_staging(decision.task)
+            summary = self.repository.get_batch(user_id, batch_id)
+        if summary is None:  # pragma: no cover - guarded by request_cancel
+            raise KeyError("import batch was not found")
+        self.worker_pool.notify()
+        return summary
+
     def has_active_tasks(self, user_id: str) -> bool:
         return self.repository.has_active_tasks(user_id)
 
     def has_active_task_for_document(self, user_id: str, document_id: str) -> bool:
         return self.repository.has_active_task_for_document(user_id, document_id)
 
-    def _inspect_file(self, value: Any) -> _PendingImport:
+    def _inspect_path(self, value: Any) -> _PathImport:
         raw_path = getattr(value, "name", value)
         source = Path(str(raw_path))
         if not source.is_file():
             raise ValueError("Uploaded document is not available")
-        suffix = self.storage.validate_suffix(source.suffix)
-        try:
-            size_bytes = source.stat().st_size
-        except OSError as exc:
-            raise ValueError("Uploaded document is not available") from exc
+        self.storage.validate_suffix(source.suffix)
+        return _PathImport(source=source, original_name=source.name)
+
+    def _inspect_upload(self, upload: ImportUpload) -> _PendingImport:
+        if not isinstance(upload, ImportUpload):
+            raise ValueError("Uploaded document is invalid")
+        raw_name = str(upload.original_name or "").replace("\\", "/")
+        original_name = Path(raw_name).name
+        if (
+            not original_name
+            or original_name in {".", ".."}
+            or "\x00" in original_name
+            or not hasattr(upload.stream, "read")
+        ):
+            raise ValueError("Uploaded document name is invalid")
+        suffix = self.storage.validate_suffix(Path(original_name).suffix)
         return _PendingImport(
-            source=source,
-            original_name=source.name,
+            upload=upload,
+            original_name=original_name,
             suffix=suffix,
-            size_bytes=size_bytes,
             task_id=str(uuid.uuid4()),
             document_id=str(uuid.uuid4()),
         )
+
+    def _validate_file_count(self, count: int) -> None:
+        if count == 0:
+            raise ImportLimitError(
+                "import_no_files",
+                "at least one file is required",
+                status_code=400,
+            )
+        if count > self.limits.max_files:
+            raise ImportLimitError(
+                "import_too_many_files",
+                f"batch cannot contain more than {self.limits.max_files} files",
+                status_code=413,
+            )
+
+    def _stage_stream(
+        self,
+        stream: BinaryIO,
+        partial: Path,
+        target: Path,
+        batch_bytes: int,
+    ) -> tuple[int, int]:
+        file_bytes = 0
+        with partial.open("xb") as staged:
+            while True:
+                chunk = stream.read(_STAGING_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, (bytes, bytearray, memoryview)):
+                    raise ValueError("Uploaded document stream must be binary")
+                chunk_size = len(chunk)
+                file_bytes += chunk_size
+                batch_bytes += chunk_size
+                if file_bytes > self.limits.max_file_bytes:
+                    raise ImportLimitError(
+                        "import_file_too_large",
+                        f"each file must be at most {self.limits.max_file_bytes} bytes",
+                        status_code=413,
+                    )
+                if batch_bytes > self.limits.max_batch_bytes:
+                    raise ImportLimitError(
+                        "import_batch_too_large",
+                        f"batch must be at most {self.limits.max_batch_bytes} bytes",
+                        status_code=413,
+                    )
+                staged.write(chunk)
+            staged.flush()
+            os.fsync(staged.fileno())
+        os.replace(partial, target)
+        return file_bytes, batch_bytes
+
+    @staticmethod
+    def _cleanup_owned_staging(paths: Iterable[Path]) -> None:
+        parents: set[Path] = set()
+        for path in reversed(list(paths)):
+            parents.add(path.parent)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove import staging file")
+        for parent in parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                pass
+
+    def _cleanup_cancelled_staging(self, task: Any) -> None:
+        try:
+            self.storage.remove_staged_import_file(
+                task.user_id,
+                task.batch_id,
+                task.task_id,
+                task.file_suffix,
+                task.staged_relative_path,
+            )
+        except (OSError, ValueError):
+            logger.warning("could not remove cancelled import staging file")
 
     def _user_id(self, session_token: str) -> str:
         return str(self._session(session_token).user_id)

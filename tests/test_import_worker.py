@@ -14,6 +14,7 @@ from app.auth import AuthService
 from app.database import initialize_database
 from app.import_models import ImportTaskCreate
 from app.import_repository import ImportTaskRepository
+import app.import_worker as import_worker
 from app.import_worker import (
     ImportTaskRunner,
     ImportWorkerPool,
@@ -69,6 +70,9 @@ class FakeAssistant:
     result = "ok"
     calls = []
     close_count = 0
+    before_progress = None
+    after_progress = None
+    commit_count = 0
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -78,8 +82,17 @@ class FakeAssistant:
         if self.failures:
             raise self.failures.pop(0)
         callback = kwargs["progress_callback"]
-        callback("parsing", 1, 1, "parsed")
-        callback("embedding", 1, 2, "embedded")
+        for update in (
+            ("parsing", 1, 1, "parsed"),
+            ("embedding", 1, 2, "embedded"),
+            ("committing", 0, 1, "committing"),
+        ):
+            if type(self).before_progress is not None:
+                type(self).before_progress(update[0])
+            callback(*update)
+            if type(self).after_progress is not None:
+                type(self).after_progress(update[0])
+        type(self).commit_count += 1
         return type(self).result
 
     def close(self):
@@ -92,6 +105,9 @@ def reset_fake_assistant():
     FakeAssistant.result = "ok"
     FakeAssistant.calls = []
     FakeAssistant.close_count = 0
+    FakeAssistant.before_progress = None
+    FakeAssistant.after_progress = None
+    FakeAssistant.commit_count = 0
 
 
 def make_runner(tmp_path, *, failures=()):
@@ -214,6 +230,142 @@ def test_staged_progress_is_first_and_percentages_are_monotonic(tmp_path):
     assert repository.get_task(user_id, task_id).progress == 100
 
 
+def test_import_cancelled_is_direct_baseexception_control_signal():
+    assert issubclass(import_worker.ImportCancelled, BaseException)
+    assert not issubclass(import_worker.ImportCancelled, Exception)
+
+
+@pytest.mark.parametrize(
+    "stage", ["staged", "parsing", "chunking", "embedding", "persisting"]
+)
+def test_progress_callback_observes_cancel_at_every_non_committing_stage(
+    tmp_path, stage
+):
+    runner, repository, _, _, clock, user_id, _ = make_runner(tmp_path)
+    task = claim(repository, clock)
+    repository.request_cancel(user_id, task.batch_id, task.task_id)
+
+    with pytest.raises(import_worker.ImportCancelled):
+        runner._progress_callback(task)(stage, 1, 1, stage)
+
+    current = repository.get_task(user_id, task.task_id)
+    assert current.status == "running"
+    assert current.cancel_requested_at is not None
+
+
+def test_cancel_before_staging_removes_staged_file_and_never_retries(tmp_path):
+    runner, repository, storage, _, clock, user_id, task_id = make_runner(tmp_path)
+    task = claim(repository, clock)
+    staged = storage.user_paths(user_id).root / task.staged_relative_path
+    repository.request_cancel(user_id, task.batch_id, task.task_id)
+
+    runner.run(task)
+
+    cancelled = repository.get_task(user_id, task_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.stage == "cancelled"
+    assert cancelled.auto_retry_count == 0
+    assert cancelled.next_attempt_at is None
+    assert not staged.exists()
+    assert FakeAssistant.calls == []
+
+
+def test_running_cancel_during_embedding_removes_attempt_files_and_never_commits(
+    tmp_path
+):
+    runner, repository, storage, _, clock, user_id, task_id = make_runner(tmp_path)
+    task = claim(repository, clock)
+    staged = storage.user_paths(user_id).root / task.staged_relative_path
+    formal = storage.document_path(user_id, task.document_id, task.file_suffix)
+    temporary = storage.temporary_document_path(
+        user_id, task.document_id, task.file_suffix
+    )
+
+    def cancel_at_embedding(stage):
+        if stage == "embedding":
+            repository.request_cancel(user_id, task.batch_id, task.task_id)
+
+    FakeAssistant.before_progress = cancel_at_embedding
+
+    runner.run(task)
+
+    cancelled = repository.get_task(user_id, task_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.auto_retry_count == 0
+    assert cancelled.next_attempt_at is None
+    assert FakeAssistant.commit_count == 0
+    assert not staged.exists()
+    assert not formal.exists()
+    assert not temporary.exists()
+
+
+def test_cancel_wins_commit_boundary_and_prevents_assistant_commit(tmp_path):
+    runner, repository, storage, _, clock, user_id, task_id = make_runner(tmp_path)
+    task = claim(repository, clock)
+    staged = storage.user_paths(user_id).root / task.staged_relative_path
+
+    def cancel_at_gate(stage):
+        if stage == "committing":
+            decision = repository.request_cancel(
+                user_id, task.batch_id, task.task_id
+            )
+            assert decision.outcome == "cancel_requested"
+
+    FakeAssistant.before_progress = cancel_at_gate
+
+    runner.run(task)
+
+    cancelled = repository.get_task(user_id, task_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.auto_retry_count == 0
+    assert FakeAssistant.commit_count == 0
+    assert not staged.exists()
+
+
+def test_commit_gate_wins_and_later_cancel_is_rejected(tmp_path):
+    runner, repository, _, _, clock, user_id, task_id = make_runner(tmp_path)
+    task = claim(repository, clock)
+    decisions = []
+
+    def cancel_after_gate(stage):
+        if stage == "committing":
+            decisions.append(
+                repository.request_cancel(user_id, task.batch_id, task.task_id)
+            )
+
+    FakeAssistant.after_progress = cancel_after_gate
+
+    runner.run(task)
+
+    succeeded = repository.get_task(user_id, task_id)
+    assert decisions[0].outcome == "not_cancellable"
+    assert succeeded.status == "succeeded"
+    assert succeeded.cancel_requested_at is None
+    assert FakeAssistant.commit_count == 1
+
+
+def test_cancel_cleanup_failure_still_persists_cancelled(tmp_path, monkeypatch):
+    runner, repository, storage, _, clock, user_id, task_id = make_runner(tmp_path)
+    task = claim(repository, clock)
+    staged = storage.user_paths(user_id).root / task.staged_relative_path
+    repository.request_cancel(user_id, task.batch_id, task.task_id)
+    monkeypatch.setattr(
+        runner,
+        "_cleanup_staged_file",
+        lambda _path: (_ for _ in ()).throw(
+            OSError(r"D:\private\staging api_key=secret")
+        ),
+    )
+
+    runner.run(task)
+
+    cancelled = repository.get_task(user_id, task_id)
+    assert cancelled.status == "cancelled"
+    assert cancelled.error_code is None
+    assert cancelled.error_summary is None
+    assert staged.exists()
+
+
 def test_staged_cleanup_failure_preserves_success_and_staged_copy(
     tmp_path, monkeypatch
 ):
@@ -287,6 +439,50 @@ def test_pool_start_reconciles_only_valid_succeeded_staging(tmp_path, monkeypatc
 
     assert not succeeded_staged.exists()
     assert failed_staged.read_bytes() == b"retry me"
+
+
+def test_pool_start_reconciles_only_exact_cancelled_staging(tmp_path):
+    _, repository, storage, runtimes, _, user_id, _ = make_runner(tmp_path)
+    first = repository.claim_next(set())
+    assert first is not None
+    repository.mark_failed(user_id, first.task_id, "document_invalid", "keep")
+    failed_staged = storage.user_paths(user_id).root / first.staged_relative_path
+
+    batch_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    staged = storage.staged_import_path(user_id, batch_id, task_id, ".md")
+    staged.write_bytes(b"cancelled residue")
+    unrelated = staged.parent / "unrelated.keep"
+    unrelated.write_bytes(b"keep")
+    repository.create_batch(
+        user_id,
+        [
+            ImportTaskCreate(
+                task_id=task_id,
+                batch_id=batch_id,
+                user_id=user_id,
+                document_id=str(uuid.uuid4()),
+                original_name="cancelled.md",
+                file_suffix=".md",
+                size_bytes=17,
+                staged_relative_path=str(
+                    staged.relative_to(storage.user_paths(user_id).root)
+                ),
+            )
+        ],
+    )
+    decision = repository.request_cancel(user_id, batch_id, task_id)
+    assert decision.outcome == "cancelled"
+
+    restarted = ImportWorkerPool(
+        repository, runtimes, storage, runner=BlockingRunner(), worker_count=1
+    )
+    restarted.start()
+    restarted.stop(wait=True)
+
+    assert not staged.exists()
+    assert unrelated.read_bytes() == b"keep"
+    assert failed_staged.read_bytes() == b"content"
 
 
 def test_failure_removes_formal_file_but_preserves_staged_copy(tmp_path):
@@ -591,16 +787,17 @@ def test_two_session_delete_during_import_commit_is_refused(tmp_path, monkeypatc
     )
     committing = threading.Event()
     allow_success = threading.Event()
-    original_update_progress = repository.update_progress
+    original_try_begin_committing = repository.try_begin_committing
 
-    def pause_before_success(*args, **kwargs):
-        result = original_update_progress(*args, **kwargs)
-        if args[2] == "committing":
-            committing.set()
-            assert allow_success.wait(timeout=3)
+    def pause_after_commit_gate(*args, **kwargs):
+        result = original_try_begin_committing(*args, **kwargs)
+        committing.set()
+        assert allow_success.wait(timeout=3)
         return result
 
-    monkeypatch.setattr(repository, "update_progress", pause_before_success)
+    monkeypatch.setattr(
+        repository, "try_begin_committing", pause_after_commit_gate
+    )
     formal = storage.document_path(
         user_id, claimed.document_id, claimed.file_suffix
     )

@@ -108,13 +108,27 @@ def test_json_replace_document_reports_vector_and_cache_persistence(tmp_path):
         ("embedding", 1, 3, "embedding"),
         ("embedding", 2, 3, "embedding"),
         ("embedding", 3, 3, "embedding"),
+        ("committing", 0, 1, "committing"),
         ("persisting", 1, 2, "persisting"),
         ("persisting", 2, 2, "persisting"),
     ]
 
 
-def test_json_pipeline_ignores_callback_failures_at_every_stage(tmp_path):
-    pipeline = SimpleRAGPipeline(cache_path=str(tmp_path / "rag.json"))
+@pytest.mark.parametrize(
+    "pipeline_factory",
+    [
+        lambda tmp_path: SimpleRAGPipeline(cache_path=str(tmp_path / "rag.json")),
+        lambda tmp_path: RAGPipeline(
+            collection_name="callback_failure",
+            rag_namespace="user-a",
+            vector_store=InMemoryVectorStore(),
+        ),
+    ],
+)
+def test_pipeline_ignores_callback_failures_at_every_stage(
+    tmp_path, pipeline_factory
+):
+    pipeline = pipeline_factory(tmp_path)
     pipeline._split_text = lambda text: [text]
     pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
 
@@ -128,7 +142,9 @@ def test_json_pipeline_ignores_callback_failures_at_every_stage(tmp_path):
     )
 
     assert result["success"] is True
-    assert pipeline.cache_path.exists()
+    cache_path = getattr(pipeline, "cache_path", None)
+    if cache_path is not None:
+        assert cache_path.exists()
 
 
 def test_qdrant_pipeline_forwards_progress_through_preparation_and_upsert():
@@ -153,6 +169,7 @@ def test_qdrant_pipeline_forwards_progress_through_preparation_and_upsert():
         ("chunking", 1, 1, "chunking"),
         ("embedding", 1, 2, "embedding"),
         ("embedding", 2, 2, "embedding"),
+        ("committing", 0, 1, "committing"),
         ("persisting", 1, 1, "persisting"),
     ]
 
@@ -204,7 +221,8 @@ def test_replace_forwards_embedding_progress_while_preparation_is_running(
         "embedding",
         "embedding",
     ]
-    assert all(update[0] == "persisting" for update in updates[4:])
+    assert updates[4] == ("committing", 0, 1, "committing")
+    assert all(update[0] == "persisting" for update in updates[5:])
 
 
 def test_structured_authentication_error_is_not_retryable(monkeypatch):
@@ -382,6 +400,7 @@ def test_operation_error_metadata_remains_optional():
             [
                 ("chunking", 0, 1, "chunking"),
                 ("chunking", 1, 1, "chunking"),
+                ("committing", 0, 1, "committing"),
                 ("persisting", 1, 1, "persisting"),
             ],
         ),
@@ -394,6 +413,7 @@ def test_operation_error_metadata_remains_optional():
             [
                 ("chunking", 0, 1, "chunking"),
                 ("chunking", 1, 1, "chunking"),
+                ("committing", 0, 1, "committing"),
             ],
         ),
     ],
@@ -413,6 +433,88 @@ def test_empty_replace_completes_chunking_without_embedding(
 
     assert result["success"] is True
     assert updates == expected_updates
+
+
+class AbortCommit(BaseException):
+    pass
+
+
+@pytest.mark.parametrize(
+    "pipeline_factory",
+    [
+        lambda tmp_path: SimpleRAGPipeline(
+            cache_path=str(tmp_path / "abort-json.json")
+        ),
+        lambda tmp_path: RAGPipeline(
+            collection_name="abort_qdrant",
+            rag_namespace="user-a",
+            vector_store=InMemoryVectorStore(),
+        ),
+    ],
+)
+def test_replace_emits_one_pre_mutation_commit_and_abort_preserves_document(
+    tmp_path, pipeline_factory
+):
+    pipeline = pipeline_factory(tmp_path)
+    pipeline._split_text = lambda text: text.split()
+    pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
+    original = pipeline.replace_document(
+        "doc-1", [DocumentSegment("old content", {"page_number": 1})]
+    )
+    assert original["success"] is True
+    before_chunks = pipeline.get_document_chunks("doc-1")
+    cache_path = getattr(pipeline, "cache_path", None)
+    before_cache = cache_path.read_bytes() if cache_path is not None else None
+    updates = []
+
+    def abort(stage, done, total, message):
+        updates.append((stage, done, total, message))
+        if stage == "committing":
+            raise AbortCommit("cancel before mutation")
+
+    with pytest.raises(AbortCommit):
+        pipeline.replace_document(
+            "doc-1",
+            [DocumentSegment("new replacement", {"page_number": 2})],
+            progress_callback=abort,
+        )
+
+    assert [update[0] for update in updates].count("committing") == 1
+    commit_index = next(
+        index for index, update in enumerate(updates) if update[0] == "committing"
+    )
+    assert all(update[0] in {"chunking", "embedding"} for update in updates[:commit_index])
+    assert all(update[0] != "persisting" for update in updates)
+    assert pipeline.get_document_chunks("doc-1") == before_chunks
+    if cache_path is not None:
+        assert cache_path.read_bytes() == before_cache
+
+
+@pytest.mark.parametrize(
+    "pipeline_factory",
+    [
+        lambda tmp_path: SimpleRAGPipeline(
+            cache_path=str(tmp_path / "invalid-empty.json")
+        ),
+        lambda tmp_path: RAGPipeline(
+            collection_name="invalid_empty",
+            rag_namespace="user-a",
+            vector_store=InMemoryVectorStore(),
+        ),
+    ],
+)
+def test_invalid_empty_replace_never_emits_committing(tmp_path, pipeline_factory):
+    pipeline = pipeline_factory(tmp_path)
+    updates = []
+
+    result = pipeline.replace_document(
+        "doc-empty",
+        [DocumentSegment(" ", {})],
+        progress_callback=lambda *update: updates.append(update),
+    )
+
+    assert result["success"] is False
+    assert all(update[0] != "committing" for update in updates)
 
 
 class _RecordingPipeline:

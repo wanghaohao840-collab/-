@@ -93,6 +93,13 @@ class UserStorage:
         )
         return self.assert_within_user(normalized_user_id, target)
 
+    def partial_staged_import_path(
+        self, user_id: str, batch_id: str, task_id: str, suffix: str
+    ) -> Path:
+        staged = self.staged_import_path(user_id, batch_id, task_id, suffix)
+        partial = staged.with_name(f"{staged.name}.partial")
+        return self.assert_within_user(user_id, partial)
+
     def resolve_staged_import_path(
         self,
         user_id: str,
@@ -139,6 +146,31 @@ class UserStorage:
         if not inside_imports or not inside_batch:
             raise UnsafePathError("Staged import path escapes its batch directory")
         return resolved
+
+    def remove_staged_import_file(
+        self,
+        user_id: str,
+        batch_id: str,
+        task_id: str,
+        suffix: str,
+        recorded_relative_path: str,
+    ) -> bool:
+        """Remove one exact persisted staging path after validating its identity."""
+
+        staged = self.resolve_staged_import_path(
+            user_id,
+            batch_id,
+            task_id,
+            suffix,
+            recorded_relative_path,
+        )
+        existed = staged.is_file()
+        staged.unlink(missing_ok=True)
+        try:
+            staged.parent.rmdir()
+        except OSError:
+            pass
+        return existed
 
     @staticmethod
     def _reject_staged_reparse_point(path: Path) -> None:

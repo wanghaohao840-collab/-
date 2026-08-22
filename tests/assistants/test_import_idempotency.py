@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+import app.import_worker as import_worker
 from app.history import HistoryRepository
 from assistants.pdf_learning_assistant import (
     ImportMemoryEventError,
@@ -14,6 +15,7 @@ from hello_agents.memory.base import MemoryConfig
 from hello_agents.memory.manager import MemoryManager
 from hello_agents.memory.rag.prepare import PROJECT_POINT_NAMESPACE_UUID
 from hello_agents.tools.builtin.memory_tool import MemoryTool
+from hello_agents.tools.builtin.rag_tool import RAGTool
 
 
 class TrackingLock:
@@ -306,6 +308,46 @@ def test_import_forwards_progress_callback_to_rag(tmp_path):
 
     _, kwargs = assistant.rag_tool.calls[0]
     assert kwargs["progress_callback"] is callback
+
+
+def test_runner_cancellation_signal_crosses_real_assistant_rag_forwarding(tmp_path):
+    assistant, source = make_assistant(tmp_path)
+    assistant.rag_tool = RAGTool(
+        cache_path=str(tmp_path / "rag.json"),
+        rag_namespace="user-a",
+        enable_graph=False,
+    )
+    pipeline = assistant.rag_tool._get_pipeline()
+    pipeline._split_text = lambda text: [text]
+    pipeline._to_vector = lambda text: [1.0] * pipeline.dimension
+    updates = []
+
+    def cancel_at_commit(stage, done, total, message):
+        updates.append((stage, done, total, message))
+        if stage == "committing":
+            raise import_worker.ImportCancelled()
+
+    try:
+        with pytest.raises(import_worker.ImportCancelled):
+            assistant.load_document(
+                str(source),
+                document_id="doc-cancel",
+                import_task_id="task-cancel",
+                progress_callback=cancel_at_commit,
+            )
+    finally:
+        assistant.rag_tool.close()
+
+    assert [update[0] for update in updates] == [
+        "parsing",
+        "chunking",
+        "chunking",
+        "embedding",
+        "committing",
+    ]
+    assert pipeline.get_document_chunks("doc-cancel") == []
+    assert assistant.history_repository.load()["documents"] == []
+    assert assistant.memory_tool.calls == []
 
 
 def test_memory_failure_is_structured_and_leaves_durable_import_for_retry(tmp_path):

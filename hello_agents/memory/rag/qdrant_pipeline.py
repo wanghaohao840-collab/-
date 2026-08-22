@@ -189,6 +189,9 @@ class RAGPipeline:
                 updated_at=updated_at,
                 document_version=version,
             )
+        report_progress(
+            progress_callback, "committing", 0, 1, "committing"
+        )
         self._upsert_chunks(prepared, progress_callback=progress_callback)
         self._delete_orphan_chunks(document_id, len(prepared))
         return {
