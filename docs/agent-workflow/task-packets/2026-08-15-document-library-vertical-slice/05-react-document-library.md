@@ -151,7 +151,7 @@ Stop on any standard reality conflict, incomplete prerequisite, API/Penpot misma
 
 ## Implementation handoff
 
-- Status: done; ready for independent review.
+- Status: done; independent-review findings corrected and ready for independent re-review.
 - Files changed:
   - `web/src/features/documents/types.ts`
   - `web/src/features/documents/api.ts`
@@ -175,16 +175,18 @@ Stop on any standard reality conflict, incomplete prerequisite, API/Penpot misma
   - Imports poll every 2000 ms only while visible data is queued/running/retry-waiting; focus refetch, active-to-success document invalidation, authoritative server-batch caching and delete success/failure invalidation are implemented without optimistic business state.
   - Loading, initial error, stale-data error, exact empty, filtered complete, active, partial-failure and collapsed terminal states render exclusively from API data.
   - Import modal/mobile sheet and delete confirmation provide focus entry/trap/Escape/return, scroll restoration, qualified action names, safe errors, one deduplicated polite live region and 44 px action targets.
-- Focused test coverage (25 tests total; categories overlap):
+- Focused test coverage (34 tests total across four Task 5 test files; categories overlap):
   - Route: 1 case proves real `/documents` and every one of the other five protected navigation routes remains migration-only.
   - State/rendering: 5 cases cover loading versus empty, initial error, stale-data preservation, complete/filter/duplicate/null metadata, and active/partial-failure/terminal imports.
-  - Query/API: 7 cases cover exact keys/routes/FormData, active-only polling, single focus refetch, success invalidation, server-summary authority and delete success/failure refresh.
+  - Query/API: 8 cases cover exact keys/routes/FormData, active-only polling, single focus refetch, success invalidation, server-summary authority, delete success/failure refresh and removal of user-scoped document/import caches before a new user mounts.
+  - Import-batch fidelity: 8 cases cover five server stages, active-plus-failed mixed batches, pending cancellation and the non-interactive terminal result block.
   - Accessibility/overlay: 5 focused cases cover import focus trap plus Shift+Tab/Escape/return, overflow restoration, mobile/44 px CSS contracts, recoverable delete error focus/return and deduplicated live status.
   - Mutation/validation: remaining focused assertions cover retry/retry-all/cancel/delete routes, safe `ApiError` messages, drag/invalid state, stable duplicate-file removal and all three upload limits.
 - Acceptance criteria:
   - [x] `/documents` is real and all other protected navigation remains migration state.
   - [x] All document/import operations use AuthProvider and exact Packet 04 public DTOs/routes; backend-internal fields are absent from TypeScript.
   - [x] Polling, focus refresh, transition invalidation, server-authoritative cache writes, delete refresh and promise handling are unit-tested.
+  - [x] Fixed query keys cannot retain one authenticated user's document/import data after the page unmounts; both queries use zero garbage-collection time and the A-to-B regression proves removal before remount.
   - [x] Exact UI states, real-data identity/filter/null behavior and retry/cancel/delete/import flows are unit-tested without production fake data.
   - [x] Dialog/sheet focus, keyboard, body-scroll restoration, polite announcements, reduced motion and mobile target contracts are implemented and tested.
   - [x] 342/856/1096 px content widths, 342/360/420 px filter sizing and 342/160/180 px import actions follow the approved mobile/tablet/desktop handoff.
@@ -208,14 +210,22 @@ Stop on any standard reality conflict, incomplete prerequisite, API/Penpot misma
   - `git diff --check` — PASS; Git emitted line-ending notices only.
 - Scope confirmation:
   - Implementation commit `9571ee9` changes only the fifteen frontend/component-map files allowed by the revised Task 5 brief.
+  - Independent-review correction commit `2a6ea75` changes only seven Task 5-owned query, batch, page, style and focused-test files.
   - Shared component internals, AuthProvider, AppShell/navigation, backend, E2E/snapshots, Penpot source/handoff/PNGs, packages/lock/config, dependencies and generated tokens are unchanged.
   - `web/dist` and `web/node_modules` remain ignored.
+- Independent-review corrections:
+  - Both fixed-key authenticated queries now use `gcTime: 0`; the regression loads user A, unmounts, proves both cache entries are absent, then mounts user B without ever rendering A data.
+  - The manual `window.focus` listener was removed. TanStack's visibility mechanism is the sole focus-refetch owner; a hidden-to-visible refetch followed by a later focus event performs only one GET.
+  - Import task rows map parsing/chunking/embedding/persisting/committing, distinguish retry-wait, show pending cancellation and suppress duplicate cancel; active state wins the mixed-batch title.
+  - Live announcements include filename, stage and throttled 10% progress milestones; identical summaries do not mutate the single polite live region.
+  - Terminal import summaries are non-interactive 44 px-minimum status blocks instead of empty `details` elements.
+  - Corrective RED: the first focused run failed 10/28 assertions; a refined focus-only RED separately proved the duplicate third GET (`expected 2, received 3`). Corrective GREEN: Task 5 focused `4 files / 34 tests`; full frontend `10 files / 99 tests`.
 - Deviations: None.
 - Residual risks:
   - The locked dependency audit continues to report one pre-existing high-severity advisory; dependency changes are explicitly outside Packet 05.
   - One unchanged `ProtectedRoute` assertion transiently raced DOM commit while all gates ran concurrently; its isolated `4/4` rerun and the required serial full suite `90/90` both passed. No Auth file was changed.
   - Independent browser/E2E viewport acceptance remains Packet 06; mandatory independent code review is still pending.
-- Commits: `9571ee9` (`feat: add responsive document library`); handoff metadata in the subsequent documentation commit.
+- Commits: `9571ee9` (`feat: add responsive document library`), `3ad5252` (`docs: record document library handoff`), `2a6ea75` (`fix: address document UI review findings`); corrected handoff metadata in the subsequent documentation commit.
 
 ## Reality-conflict resolution
 

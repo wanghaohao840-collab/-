@@ -2,17 +2,19 @@
 
 ## Status
 
-Done and ready for independent review from implementation base `1ac419a`. Implementation commit: `9571ee9` (`feat: add responsive document library`).
+Done and ready for independent re-review from implementation base `1ac419a`. Initial implementation commit: `9571ee9`; independent-review correction commit: `2a6ea75`.
 
 ## Delivered
 
 - Real authenticated `/documents` route; the other five protected navigation routes still render the migration page.
 - Packet 04 public DTOs and exact document/import list, upload, retry, retry-all, cancel and delete routes through `useAuth().request<T>()`.
 - TanStack Query keys, active-only 2 s polling, focus refresh, active-to-success document invalidation, server-authoritative mutation cache writes and document/import refresh after delete success or failure.
+- Zero-lifetime inactive document/import caches prevent fixed query keys from retaining one authenticated user's data for the next user; TanStack visibility is the sole focus-refetch owner.
 - Loading, reloadable error, stale-data preservation, exact empty, complete/filter, active, partial-failure and terminal states with no production fake data.
 - Responsive 342/856/1096 px content, approved filter/action widths, desktop/tablet modal, 390 x 594 mobile bottom sheet and token-only styling.
 - Import validation for 20 files, 100 MiB each and 500 MiB per batch; real repeated-file `FormData` without a manual multipart content type.
 - Focus trapping, Shift+Tab, Escape, trigger return, original overflow restoration, qualified action names, delete error focus, native lists, one deduplicated polite live region, 44 px targets and reduced motion.
+- Server-stage task copy, pending-cancel suppression, active-first mixed-batch titles, non-interactive terminal summaries and filename-qualified 10% live progress milestones.
 - Verified Penpot component-map entries for `DocumentRow`, `ImportTaskRow` and `FilePicker` using the exact approved container/state identities recorded in Packet 05.
 
 ## RED to GREEN evidence
@@ -22,10 +24,17 @@ Done and ready for independent review from implementation base `1ac419a`. Implem
 - Expanded GREEN: three focused files, 25 tests passed after adding delete failure, real FormData, stale-data preservation, exact task actions, terminal state and file-limit coverage.
 - Final regression: nine files, 90 tests passed.
 
+### Independent-review correction round
+
+- Corrective RED command across query, batch and page tests: 10 failed / 18 passed. It reproduced retained user-A cache data, five missing stage mappings, incorrect mixed/cancel/terminal presentation and missing live stage/milestone content.
+- Refined focus-only RED: expected two requests but received three when a completed hidden-to-visible refetch was followed by the browser focus event.
+- Corrective GREEN: query, batch and page tests passed 28/28; all four Task 5 focused files passed 34/34.
+- Full corrected regression: ten files, 99 tests passed.
+
 ## Verification
 
 - `npm ci` — PASS; 274 locked packages installed/audited.
-- `npm test` — PASS; 9 files, 90 tests.
+- `npm test` — PASS; 10 files, 99 tests.
 - `npm run typecheck` — PASS.
 - `npm run lint` — PASS.
 - `npm run build` — PASS; 114 modules transformed.
@@ -40,14 +49,16 @@ Done and ready for independent review from implementation base `1ac419a`. Implem
 - Confirmed no changes to backend, shared component internals, AuthProvider, AppShell/navigation, E2E, Penpot sources/exports, dependencies/config/lockfiles or generated tokens.
 - Confirmed TypeScript contains only Packet 04 public fields and production UI renders API data only.
 - Confirmed the three component-map entries point to real exported components and exact verified Penpot identities.
+- Compared the corrective diff with `3ad5252`; it contains only seven Task 5-owned query, batch, page, style and focused-test paths.
+- Confirmed user-A document/import caches are removed before user-B mount, focus has one refetch owner, and repeated identical live summaries do not mutate the DOM.
 
 ## Deviations and concerns
 
 - No implementation deviations.
 - The lock audit still reports one pre-existing high-severity advisory; dependency work is outside this packet.
 - During concurrent gate execution, one unchanged `ProtectedRoute` test transiently asserted before its login DOM committed. It passed 4/4 alone and the required serial full suite passed 90/90; no Auth changes were made.
-- Packet 06 owns browser/E2E viewport acceptance. Independent review remains required before integration acceptance.
+- Packet 06 owns browser/E2E viewport acceptance. Independent re-review remains required before integration acceptance.
 
 ## Handoff
 
-See `docs/agent-workflow/task-packets/2026-08-15-document-library-vertical-slice/05-react-document-library.md`. Progress is `ready for independent review`.
+See `docs/agent-workflow/task-packets/2026-08-15-document-library-vertical-slice/05-react-document-library.md`. Progress is `ready for independent re-review`.
