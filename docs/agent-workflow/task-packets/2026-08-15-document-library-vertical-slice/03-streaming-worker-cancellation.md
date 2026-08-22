@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-03"
 title: "Stream uploads and cancel worker attempts safely"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-02"]
-base-commit: "7d810ec41c7bc468116553a2c6c551c2ceb6830b"
-owner: "unassigned"
+base-commit: "1b878b237d73b735eb3b5beee45a1910b21a2409"
+owner: "task3-implementer"
 ---
 
 # Task Packet: Stream uploads and cancel worker attempts safely
@@ -122,13 +122,13 @@ Follow the revised Task 3 in the plan. Use `.partial`, flush/fsync and `os.repla
 
 ## Acceptance criteria
 
-- [ ] Path and stream inputs produce identical durable tasks and limits.
-- [ ] Actual byte overages, read errors and DB failures leave no partial batch.
-- [ ] queued/retry_wait/running cancellation follows the exact state/file rules.
-- [ ] All non-committing stages, race boundary, cleanup failure and startup cleanup are tested.
-- [ ] JSON and Qdrant emit one pre-mutation committing signal; aborting it leaves prior document contents/cache unchanged, while ordinary `Exception` callbacks remain best-effort.
-- [ ] A real Assistant/RAG forwarding test proves the runner control signal is not converted into a sanitized RAG failure.
-- [ ] Existing retries, Gradio handlers, user serialization and sanitization remain passing.
+- [x] Path and stream inputs produce identical durable tasks and limits.
+- [x] Actual byte overages, read errors and DB failures leave no partial batch.
+- [x] queued/retry_wait/running cancellation follows the exact state/file rules.
+- [x] All non-committing stages, race boundary, cleanup failure and startup cleanup are tested.
+- [x] JSON and Qdrant emit one pre-mutation committing signal; aborting it leaves prior document contents/cache unchanged, while ordinary `Exception` callbacks remain best-effort.
+- [x] A real Assistant/RAG forwarding test proves the runner control signal is not converted into a sanitized RAG failure.
+- [x] Existing retries, Gradio handlers, user serialization and sanitization remain passing.
 
 ## Test and verification commands
 
@@ -146,7 +146,39 @@ Stop on any standard reality conflict, incomplete Packet 02, inability to emit t
 
 ## Implementation handoff
 
-Replace with the template handoff, including exact stream-limit/cancel/cleanup test counts, Gradio regression, changed interfaces, scope confirmation, deviations/risks and commit.
+- Status: done
+- Files changed:
+  - `app/storage.py`
+  - `app/import_service.py`
+  - `app/import_worker.py`
+  - `hello_agents/memory/rag/pipeline.py`
+  - `hello_agents/memory/rag/qdrant_pipeline.py`
+  - `tests/test_import_service.py`
+  - `tests/test_import_worker.py`
+  - `tests/test_import_error_sanitization.py`
+  - `tests/memory/rag/test_import_progress.py`
+  - `tests/assistants/test_import_idempotency.py`
+- Changed interfaces:
+  - Added `ImportUpload`, `ImportLimitError`, `ImportTaskNotCancellableError`, `submit_uploads()` and `cancel_task()` in `app/import_service.py`.
+  - Added runner-internal direct-`BaseException` `ImportCancelled` and exact terminal staging reconciliation in `app/import_worker.py`.
+  - Added exact partial/staged path helpers in `app/storage.py`.
+  - JSON and Qdrant `replace_document()` now emit one pre-mutation `committing` lifecycle callback.
+- Acceptance criteria:
+  - [x] One staging core serves path and caller-owned stream inputs; paths ignore lying `stat().st_size`, all limits use actual chunk bytes, and only path-adapter streams close.
+  - [x] `.partial`, flush, `fsync`, `os.replace`, safe basename/suffix handling, no-batch-on-failure, and exact rollback are covered by 21 selected streaming/staging service cases.
+  - [x] queued/retry_wait/running/committing/terminal cancellation, all non-committing stages, commit arbitration, never-retry behavior, cleanup failure, exact startup reconciliation and non-persistence of the internal signal are covered by 21 selected cancel/commit/cleanup cases.
+  - [x] JSON/Qdrant stage order, ordinary callback failures and byte/content-preserving abort before first mutation pass; real Assistant/RAG forwarding propagates `ImportCancelled` without reclassification.
+  - [x] Gradio path upload/handler compatibility (30 cases), credential/path sanitization (3 cases), authenticated scope and per-user worker serialization pass in the combined run.
+- Verification:
+  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py -k "stream or cancel or partial or actual" --basetemp=.runtime/pytest-import-stream-red` — RED as expected: `24 failed, 1 passed, 45 deselected`.
+  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py --basetemp=.runtime/pytest-import-commit-red` — RED as expected: `9 failed, 40 passed`.
+  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py tests/ui/test_import_handlers.py tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py --basetemp=.runtime/pytest-import-stream-cancel-final` — PASS: `152 passed in 210.70s`; no unhandled worker thread/error output.
+  - `git diff --check` — PASS.
+- Scope confirmation:
+  - Implementation commit changes only the ten production/test files authorized by the adjudicated Packet 03 boundary. Task 2 files, Assistant/RAGTool/prepare, API/frontend/design/configuration/dependencies, Memory, graph and reports are unchanged.
+- Deviations: None.
+- Residual risks: None known; independent review and final cross-packet integration review remain required.
+- Commit: `e977a11` (`feat: stream and cancel document imports`).
 
 ## Reality-conflict report
 
