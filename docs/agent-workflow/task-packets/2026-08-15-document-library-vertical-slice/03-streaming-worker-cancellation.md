@@ -1,7 +1,7 @@
 ---
 id: "document-library-vertical-slice-03"
 title: "Stream uploads and cancel worker attempts safely"
-status: "done"
+status: "ready-for-re-review"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-02"]
 base-commit: "1b878b237d73b735eb3b5beee45a1910b21a2409"
@@ -92,14 +92,16 @@ Allow path-backed Gradio uploads and FastAPI file streams to share one actual-by
 - `ImportUpload(original_name: str, stream: BinaryIO)`.
 - `ImportLimitError(code, message, status_code)` with safe stable code.
 - `ImportTaskNotCancellableError`.
+- `ImportStagingCleanupError` with stable safe cleanup text when exact pre-batch rollback remains incomplete.
 - `ImportTaskService.submit_uploads(session_token, uploads, progress=None) -> ImportBatchSummary`.
 - `ImportTaskService.cancel_task(session_token, batch_id, task_id) -> ImportBatchSummary`.
 - `ImportCancelled` internal runner exception; it never escapes as raw API text.
+- `ImportCommitGateFailure` distinct internal runner signal preserving an original commit-gate exception across producer best-effort wrappers.
 - JSON and Qdrant `replace_document(..., progress_callback=...)` emit `("committing", 0, 1, "committing")` exactly once after all parsing/chunk preparation/embedding and before their first delete, upsert, orphan cleanup or cache write.
 
 ### Invariants
 
-- Database batch is created only after every file is durably staged; failure leaves no batch/partial file.
+- Database batch is created only after every file is durably staged. A fixed atomic rollback marker is durable before the first partial write; incomplete cleanup leaves no batch and keeps only exact recoverable marker-owned staging.
 - Gradio path input delegates to the same core and still works.
 - Cancellation before commit leaves no temporary/formal/staged file and is never retried.
 - A rejected commit gate causes zero RAG/history/Memory mutation; once the gate wins, later cancellation is rejected and the existing commit/compensation behavior completes normally.
@@ -109,12 +111,14 @@ Allow path-backed Gradio uploads and FastAPI file streams to share one actual-by
 
 - Count actual stream bytes in fixed chunks; enforce 20/100MiB/500MiB even when metadata lies.
 - Generate all path components server-side; basename only supplies safe display name/suffix.
-- queued/retry_wait cancel cleans staging after durable transition; running cancel wakes pool and worker checks at every stage/progress plus commit boundary.
+- queued/retry_wait cancel cleans staging after durable transition; running cancel calls Task 02 arbitration without waiting for the shared Runtime lock, wakes the pool, and worker checks at every stage/progress plus commit boundary.
 - Keep ordinary progress best-effort. Define the runner-internal `ImportCancelled` as a direct `BaseException` subclass so it crosses current `report_progress()` and RAGTool `except Exception` sanitizers; catch it explicitly before the runner's generic `Exception` failure/retry path.
 - At non-committing progress, check `is_cancel_requested()` before recording progress and raise `ImportCancelled` when requested.
 - At the producer's `committing` signal, call `try_begin_committing()` instead of `update_progress()`. False raises `ImportCancelled` before the active backend's first mutation; true makes later cancellation non-cancellable.
 - JSON and Qdrant document replacement must emit the committing signal after successful preparation and empty-document validation, but immediately before the first mutation. Do not emit it for validation/preparation failures that make no write.
 - Redact path/credential/error details in persisted and returned summaries.
+- Convert `try_begin_committing()` exceptions to the distinct direct-`BaseException` gate signal, catch it in the runner before generic failure handling, and classify/retry/fail using the preserved original exception.
+- Reconcile cancelled staged, `.uploading` and formal paths only from persisted canonical UUID/suffix identities. Reconcile pre-batch rollback only from fixed markers below canonical user/batch UUID directories; marker content is untrusted and may contain only canonical task UUID/suffix entries.
 
 ## Implementation guidance
 
@@ -129,6 +133,10 @@ Follow the revised Task 3 in the plan. Use `.partial`, flush/fsync and `os.repla
 - [x] JSON and Qdrant emit one pre-mutation committing signal; aborting it leaves prior document contents/cache unchanged, while ordinary `Exception` callbacks remain best-effort.
 - [x] A real Assistant/RAG forwarding test proves the runner control signal is not converted into a sanitized RAG failure.
 - [x] Existing retries, Gradio handlers, user serialization and sanitization remain passing.
+- [x] Commit-gate database failure crosses both backend progress wrappers, causes zero RAG/History/Memory mutation, and follows safe `database_busy` retry/fail handling.
+- [x] Running cancellation persists while a real shared Runtime/Assistant embedding lock is held and ends cancelled after release.
+- [x] Startup retries exact cancelled staged/temporary/formal cleanup and preserves failed/unrelated files.
+- [x] Atomic rollback marker covers transient/persistent unlink failure, restart recovery, real-DB stale markers and malicious content.
 
 ## Test and verification commands
 
@@ -146,7 +154,7 @@ Stop on any standard reality conflict, incomplete Packet 02, inability to emit t
 
 ## Implementation handoff
 
-- Status: done
+- Status: ready for independent re-review after correcting all four Important findings
 - Files changed:
   - `app/storage.py`
   - `app/import_service.py`
@@ -162,6 +170,9 @@ Stop on any standard reality conflict, incomplete Packet 02, inability to emit t
   - Added `ImportUpload`, `ImportLimitError`, `ImportTaskNotCancellableError`, `submit_uploads()` and `cancel_task()` in `app/import_service.py`.
   - Added runner-internal direct-`BaseException` `ImportCancelled` and exact terminal staging reconciliation in `app/import_worker.py`.
   - Added exact partial/staged path helpers in `app/storage.py`.
+  - Added fixed atomic rollback-marker validation/reconciliation and exact persisted document-attempt path derivation in `app/storage.py`.
+  - `cancel_task()` now invokes Task 02 durable arbitration before any cleanup and without waiting for the shared Runtime lock.
+  - Added distinct `ImportCommitGateFailure`; the runner classifies its preserved original exception while producer mutation remains fail-closed.
   - JSON and Qdrant `replace_document()` now emit one pre-mutation `committing` lifecycle callback.
 - Acceptance criteria:
   - [x] One staging core serves path and caller-owned stream inputs; paths ignore lying `stat().st_size`, all limits use actual chunk bytes, and only path-adapter streams close.
@@ -174,11 +185,14 @@ Stop on any standard reality conflict, incomplete Packet 02, inability to emit t
   - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py --basetemp=.runtime/pytest-import-commit-red` — RED as expected: `9 failed, 40 passed`.
   - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py tests/ui/test_import_handlers.py tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py --basetemp=.runtime/pytest-import-stream-cancel-final` — PASS: `152 passed in 210.70s`; no unhandled worker thread/error output.
   - `git diff --check` — PASS.
+  - Corrective RED command from the report — `8 failed, 1 passed, 82 deselected in 10.96s` as expected.
+  - Corrective focused GREEN — `9 passed, 82 deselected in 5.77s`.
+  - Corrected full required regression — `161 passed in 199.93s`; no warnings or unhandled thread/error output.
 - Scope confirmation:
   - Implementation commit changes only the ten production/test files authorized by the adjudicated Packet 03 boundary. Task 2 files, Assistant/RAGTool/prepare, API/frontend/design/configuration/dependencies, Memory, graph and reports are unchanged.
 - Deviations: None.
-- Residual risks: None known; independent review and final cross-packet integration review remain required.
-- Commit: `e977a11` (`feat: stream and cancel document imports`).
+- Residual risks: None known; independent re-review and final cross-packet integration review remain required.
+- Commits: `e977a11` (`feat: stream and cancel document imports`), `41c4178` (`fix: close import cancellation review gaps`).
 
 ## Reality-conflict report
 
