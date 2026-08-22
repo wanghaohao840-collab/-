@@ -661,7 +661,7 @@ npm run lint
 npm run build
 Set-Location ..
 node --test tests/design/test_penpot_component_map.mjs
-node scripts/design_tokens.mjs --check
+node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
 ```
 
 Expected: unit tests, typecheck, lint, build, mapping, and 32-token freshness all PASS; `web/dist` remains ignored.
@@ -747,7 +747,7 @@ npm run build
 npx playwright test --workers=1
 Set-Location ..
 node --test tests/design/test_penpot_component_map.mjs
-node scripts/design_tokens.mjs --check
+node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
 git diff --check
 ```
 

@@ -29,7 +29,7 @@
   - `requirements.txt:11` already includes `python-multipart>=0.0.20,<1`; no Python dependency change is needed for `UploadFile`.
   - `web/package.json` already contains TanStack Query 5, Vitest, Playwright and axe; no frontend dependency or lockfile edit is needed.
   - `web/playwright.config.ts` fixes one Chromium worker and the approved 1440×1024, 1024×768 and 390×844 viewports.
-  - The repository uses `scripts/design_tokens.mjs --check` and `node --test tests/design/test_penpot_component_map.mjs`; the plan uses these verified commands.
+  - The repository uses `node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css` and `node --test tests/design/test_penpot_component_map.mjs`; the plan uses these verified commands.
 - Existing worktree changes to preserve:
   - `docs/superpowers/plans/2026-08-15-document-library-vertical-slice.md` is the only pre-packet uncommitted file. Workers must not overwrite or stage unrelated planning artifacts.
 
@@ -86,7 +86,13 @@ No packet may have `status: ready` while any readiness column is `no`.
 - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_models.py tests/test_import_repository.py tests/test_import_service.py tests/test_import_worker.py tests/test_document_library_service.py tests/api tests/deploy/test_document_library_contract.py --basetemp=.runtime/pytest-document-library-final`
 - `cd web; npm test; npm run typecheck; npm run lint; npm run build; npx playwright test --workers=1`
 - `node --test tests/design/test_penpot_component_map.mjs`
-- `node scripts/design_tokens.mjs --check`
+- `node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css`
+
+### Packet 05 verification-command reality resolution (2026-08-22)
+
+- Worker baseline confirmed the abbreviated token command exits 1 with the script's required `input output` usage error.
+- `README.md` and `docs/product-ui/README.md` both identify the complete authoritative check command above.
+- Packet 05, the source plan, and its implementation brief are corrected together. Scope, dependencies, code ownership and acceptance criteria are unchanged; no token or dependency file is modified by this adjudication.
 - `git diff --check`
 
 ## Final integration review requirement

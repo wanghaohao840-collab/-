@@ -139,7 +139,7 @@ npm run lint
 npm run build
 Set-Location ..
 node --test tests/design/test_penpot_component_map.mjs
-node scripts/design_tokens.mjs --check
+node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css
 git diff --check
 ```
 
@@ -152,3 +152,10 @@ Stop on any standard reality conflict, incomplete prerequisite, API/Penpot misma
 ## Implementation handoff
 
 Replace with template handoff, including route/state/query/accessibility test counts, design mapping evidence, build gates, scope confirmation, deviations/risks and commit.
+
+## Reality-conflict resolution
+
+- Baseline conflict: the abbreviated `node scripts/design_tokens.mjs --check` command exits 1 because the script requires explicit input and output paths.
+- Authoritative command: `node scripts/design_tokens.mjs --check design/tokens/zhiyan.tokens.json web/src/styles/tokens.css`, as documented in the repository and product UI README files.
+- Decision: verification command corrected; no acceptance, design, ownership or implementation scope change.
+- Status: remains `ready`; worker may resume from the clean baseline.
