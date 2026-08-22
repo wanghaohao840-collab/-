@@ -41,7 +41,8 @@
 
 ### Required revisions
 
-- None. During inline plan self-review, nonexistent token/mapping script names and an MSW-style example were corrected to current repository commands and test-local fetch stubs before acceptance.
+- During inline plan self-review, nonexistent token/mapping script names and an MSW-style example were corrected to current repository commands and test-local fetch stubs before acceptance.
+- Resolved 2026-08-22: Packet 03 originally assumed `app/import_worker.py` could establish the commit gate before Assistant persistence. Repository evidence showed `PDFLearningAssistant.load_document()` performs RAG/history/memory writes before returning, while the JSON and Qdrant pipelines expose no pre-write `committing` boundary. Packet 03 is revised to own a lifecycle-only `committing` signal in both active RAG backends immediately before their first document mutation. `ImportCancelled` is an internal `BaseException` control signal so it crosses the existing best-effort progress wrappers and broad `Exception` sanitizers, and the runner catches it explicitly. This preserves cancellation through parsing/chunking/embedding without changing RAG data, Memory, graph, or report semantics.
 
 ### Non-blocking notes
 
@@ -52,7 +53,7 @@
 
 - Goal: deliver a real `/documents` vertical slice for authenticated listing, durable batch upload, progress, retry, safe cancellation and coordinated deletion.
 - In scope: Penpot source boards, cancelled persistence and arbitration, streaming staging, worker cooperation, document/import APIs, React three-viewport UI, accessibility and real-server acceptance.
-- Out of scope: preview, rename, tags, folders, pagination, batch delete, QA/search/notes/insights pages, external queues, multi-worker deployment, object storage, and changes to RAG/Memory/report semantics.
+- Out of scope: preview, rename, tags, folders, pagination, batch delete, QA/search/notes/insights pages, external queues, multi-worker deployment, object storage, and changes to RAG/Memory/report data semantics. Packet 03 may add only the reviewed pre-mutation lifecycle signal to the existing JSON and Qdrant RAG pipelines.
 - Compatibility requirements: existing Gradio path upload and `/legacy/` remain operational; old import databases migrate without task loss; existing statuses and retries keep their meaning; nullable old metadata stays nullable.
 - Architecture/data-isolation constraints: session-derived user identity, CSRF on mutations, UUID server paths, per-user Runtime lock, exact `document_id` scope, single ApplicationServices lifecycle, no secret/path fields in API or browser storage.
 
@@ -62,7 +63,7 @@
 |---|---|---:|---|---|
 | `01-penpot-design-source.md` | none | yes | Penpot file; handoff; seven reference PNGs; design contract test | verified design authority |
 | `02-cancellation-persistence.md` | none | yes | database, import models/repository and their tests | durable cancellation and commit arbitration |
-| `03-streaming-worker-cancellation.md` | 02 | no | storage, import service/worker and their tests | actual-byte staging and cooperative cancellation |
+| `03-streaming-worker-cancellation.md` | 02 | no | storage, import service/worker, JSON/Qdrant pre-mutation progress seam and focused tests | actual-byte staging and cooperative cancellation before irreversible document writes |
 | `04-document-library-api.md` | 03 | no | document service, Assistant/session/bootstrap/API and API tests | authenticated JSON contracts |
 | `05-react-document-library.md` | 01, 04 | no | React feature/components/styles/App mapping and unit tests | responsive product route |
 | `06-e2e-acceptance.md` | 05 | no | document E2E, document snapshots, accessibility/visual additions, contract extension | real-server acceptance evidence |
@@ -105,3 +106,11 @@ No packet may have `status: ready` while any readiness column is `no`.
 ## Open decisions
 
 - None.
+
+## Reality-conflict resolution: Packet 03 pre-commit boundary
+
+- Evidence validated at commit `7d810ec`: `app/import_worker.py` invokes `assistant.load_document()` before its existing terminal `committing` update; `PDFLearningAssistant.load_document()` performs RAG, history and import-memory writes before returning; both active RAG backends report parsing/chunking/embedding/persisting but no pre-write boundary.
+- Resolution: merge the missing producer seam into Packet 03 rather than narrow the cancellation guarantee or create a competing pipeline. Both JSON and Qdrant document replacement paths must emit `committing` exactly once after preparation and before their first delete/upsert/cache mutation. No history, memory, graph, storage format, backend-selection, or public Assistant contract may change.
+- Control flow: ordinary UI progress exceptions remain best-effort and ignored. The Task 03 runner's internal `ImportCancelled` must inherit directly from `BaseException`, be raised only by its cancellation/commit-gate callback, cross existing `except Exception` wrappers, and be caught explicitly before the runner's generic failure handling.
+- Verification: focused RAG progress tests must prove stage order, zero mutation when the committing callback aborts, both active backends, and preservation of ordinary callback-failure behavior. Worker tests must prove cancellation reaches the runner as `cancelled`, never retry/failed, and prevents Assistant persistence.
+- Packet graph/readiness: dependency remains Packet 02; no later packet boundary changes. Packet 03 returns to `ready` with an expanded, exhaustive allowed-file list and executable combined verification.

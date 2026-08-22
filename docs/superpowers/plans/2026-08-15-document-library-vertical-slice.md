@@ -43,7 +43,9 @@
 - Modify `app/storage.py`: guarded `.partial` staging and exact terminal cleanup helpers.
 - Modify `app/import_service.py`: path/stream normalization, actual-byte enforcement, cancel API, and safe cleanup.
 - Modify `app/import_worker.py`: cooperative cancellation checks and atomic begin-commit gate.
+- Modify `hello_agents/memory/rag/pipeline.py` and `hello_agents/memory/rag/qdrant_pipeline.py`: emit one lifecycle-only `committing` signal after preparation and before the first document mutation.
 - Modify `tests/test_import_service.py`, `tests/test_import_worker.py`, and `tests/test_import_error_sanitization.py`: stream, cancellation, cleanup, and sanitization coverage.
+- Modify `tests/memory/rag/test_import_progress.py` and `tests/assistants/test_import_idempotency.py`: JSON/Qdrant pre-mutation boundary and Assistant forwarding coverage.
 
 ### Document/API boundary
 
@@ -308,13 +310,17 @@ git commit -m "feat: add durable import cancellation state"
 - Modify: `app/storage.py`
 - Modify: `app/import_service.py`
 - Modify: `app/import_worker.py`
+- Modify: `hello_agents/memory/rag/pipeline.py`
+- Modify: `hello_agents/memory/rag/qdrant_pipeline.py`
 - Modify: `tests/test_import_service.py`
 - Modify: `tests/test_import_worker.py`
 - Modify: `tests/test_import_error_sanitization.py`
+- Modify: `tests/memory/rag/test_import_progress.py`
+- Modify: `tests/assistants/test_import_idempotency.py`
 
 **Interfaces:**
 - Consumes: Task 2 cancellation repository API and current Gradio `ImportTaskService.submit_batch(session_token, files, progress=None)`.
-- Produces: `ImportUpload`, `submit_uploads()`, `cancel_task()`, guarded stream staging, `ImportCancelled`, and worker cleanup/reconciliation.
+- Produces: `ImportUpload`, `submit_uploads()`, `cancel_task()`, guarded stream staging, runner-internal `ImportCancelled`, JSON/Qdrant pre-mutation `committing`, and worker cleanup/reconciliation.
 
 - [ ] **Step 1: Write streaming and cancellation RED tests**
 
@@ -336,6 +342,8 @@ def test_running_cancel_marks_cancelled_and_removes_attempt_files(runner_fixture
     assert not runner_fixture.staged_path.exists()
     assert not runner_fixture.formal_path.exists()
 ```
+
+Also add JSON and Qdrant tests that collect `chunking`/`embedding`, then abort on `committing` and assert the previous document/cache is byte-for-byte unchanged. Prove ordinary `Exception` progress failures remain best-effort, while the runner-owned direct `BaseException` cancellation signal reaches the runner through the real Assistant/RAG forwarding path.
 
 - [ ] **Step 2: Run RED**
 
@@ -395,12 +403,14 @@ Cleanup failure leaves the task cancelled and emits only a sanitized server diag
 
 - [ ] **Step 6: Implement worker cooperation and the commit gate**
 
-Add `ImportCancelled`. Before every non-committing progress write, query `is_cancel_requested()` and raise. When the callback receives `committing`, call `try_begin_committing()` instead of ordinary `update_progress()`; false means raise before the Assistant commits. Catch `ImportCancelled` separately, remove exact temporary/formal/staged files, mark cancelled, and never schedule retry.
+Add runner-internal `ImportCancelled` as a direct `BaseException` subclass. This is a control signal, not a user-facing or persisted error: it must cross the existing best-effort `report_progress()` and broad RAGTool `except Exception` sanitizers, then be caught explicitly before the runner's generic `Exception` path. Before every non-committing progress write, query `is_cancel_requested()` and raise it when requested. When the callback receives `committing`, call `try_begin_committing()` instead of ordinary `update_progress()`; false raises before the active backend's first mutation.
+
+In both active `replace_document()` implementations, emit `("committing", 0, 1, "committing")` exactly once after parsing/chunk preparation/embedding and empty-document validation, immediately before the first delete/upsert/cache mutation. In the JSON backend move the existing removal behind that signal; in Qdrant signal before `_upsert_chunks`. Do not change RAG data shapes, storage formats, backend selection, graph/history/Memory/report semantics, or ordinary progress exception handling. After cancellation, remove exact temporary/formal/staged files, mark cancelled, and never schedule retry.
 
 - [ ] **Step 7: Run GREEN and existing import regression**
 
 ```powershell
-& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py tests/ui/test_import_handlers.py --basetemp=.runtime/pytest-import-stream-green
+& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py tests/ui/test_import_handlers.py tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py --basetemp=.runtime/pytest-import-stream-green
 ```
 
 Expected: all selected tests PASS; existing Gradio path uploads and retry behavior remain passing.
@@ -408,7 +418,7 @@ Expected: all selected tests PASS; existing Gradio path uploads and retry behavi
 - [ ] **Step 8: Commit**
 
 ```powershell
-git add app/storage.py app/import_service.py app/import_worker.py tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py
+git add app/storage.py app/import_service.py app/import_worker.py hello_agents/memory/rag/pipeline.py hello_agents/memory/rag/qdrant_pipeline.py tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py
 git commit -m "feat: stream and cancel document imports"
 ```
 
