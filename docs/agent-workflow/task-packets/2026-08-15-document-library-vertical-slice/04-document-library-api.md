@@ -143,7 +143,7 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
 
 ## Implementation handoff
 
-- Status: done; ready for independent review
+- Status: done; ready for independent re-review after correcting two Important findings and one Minor finding
 - Files changed:
   - `app/document_library.py`
   - `assistants/pdf_learning_assistant.py`
@@ -179,8 +179,8 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
   | `POST /api/v1/imports/{batch_id}/tasks/{task_id}/cancel` | 200 | Cookie + CSRF | task/membership not found 404; not cancellable 409 |
 - Acceptance criteria:
   - [x] Session-derived user scope, shared Runtime lock and fresh persisted history are asserted.
-  - [x] Latest duplicate wins; nullable metadata, descending/null ordering and malformed/escaping/Windows-junction records are covered.
-  - [x] Exact coordinated RAG/history/question/formal-file deletion, exact active-import conflict, safe failure and same-user multi-session invalidation are covered.
+  - [x] Latest duplicate wins; nullable metadata, UTC-aware ISO-8601 ordering and malformed/escaping/Windows-junction records are covered.
+  - [x] Exact coordinated RAG/history/question/formal-file deletion, all matching duplicate-source preflight, structured-result postconditions, exact active-import conflict, safe failure and same-user multi-session invalidation are covered.
   - [x] Service identity is stable and worker start/stop counts remain one each.
   - [x] Every endpoint has success/authentication coverage; every mutation has missing/forged CSRF coverage; UUID, query and multipart validation are covered.
   - [x] Actual repeated `files` multipart returns 202; real streamed byte limits return stable 413 errors.
@@ -196,6 +196,11 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
   - Final required regression `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_document_library_service.py tests/test_app_bootstrap.py tests/api --basetemp=.runtime/pytest-document-api-final` — PASS, `114 passed in 43.33s`.
   - Existing Assistant/worker delete compatibility — `8 passed, 54 deselected in 8.36s`.
   - Existing real multi-user delete/clear integration — `2 passed, 10 deselected in 15.93s`.
+  - Independent-review focused RED — `6 failed, 57 deselected in 4.09s`; failures proved incomplete duplicate preflight/result validation, swallowed `InvalidSessionError` and string-based timestamp ordering.
+  - Independent-review focused GREEN — `6 passed, 57 deselected in 2.03s`.
+  - Corrected final required regression — `120 passed in 35.39s`.
+  - Corrected delete compatibility — `8 passed, 54 deselected in 9.52s`.
+  - Corrected real multi-user delete/clear integration — `2 passed, 10 deselected in 15.51s`.
   - `git diff --check` — PASS; line-ending notices only.
 - Response-field scan:
   - Documents contain only `document_id`, `name`, `file_suffix`, `size_bytes`, `loaded_at`, `status`.
@@ -203,5 +208,10 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
 - Scope confirmation:
   - Implementation commit changes only the fourteen production/test files allowed by Packet 04. Packet 03/import internals, dependencies, frontend/design/E2E, RAG/Memory internals, deployment, `/legacy`, assets and SPA fallback are unchanged.
 - Deviations: None.
-- Residual risks: None known within Packet 04; independent review and mandatory final cross-packet integration review remain pending.
-- Commit: `dcd64cd` (`feat: add document library APIs`).
+- Independent-review corrections:
+  - Every fresh-history record matching the requested document ID now receives the same documents-root containment/reparse preflight before Assistant mutation.
+  - The structured Assistant result must report the exact requested ID, at least one removed document and zero skipped source files before session selection invalidation.
+  - Upload-session expiry is re-raised to the existing `invalid_session` 401 handler instead of entering staging-error mapping.
+  - Zoned ISO-8601 `loaded_at` values sort as UTC-aware datetimes; malformed values are diagnosed statically, projected as `null` and sorted in the deterministic null tail.
+- Residual risks: None known within Packet 04; independent re-review and mandatory final cross-packet integration review remain pending.
+- Commits: `dcd64cd` (`feat: add document library APIs`), `0d06346` (`fix: close document API review gaps`).
