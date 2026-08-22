@@ -2,7 +2,7 @@
 
 Validated on 2026-08-11 against Penpot 2.17.1 at file revision `89`. Penpot is the sole design source for this product UI; the former design file is an archive only.
 
-The document-library vertical slice was fresh-read and directly exported on 2026-08-22 against Penpot 2.17.2 at final file revision `115`.
+The document-library vertical slice was fresh-read on 2026-08-22 against Penpot 2.17.2 at final saved source revision `119`. Direct semantic export calls returned the seven boards during the revision-`118` autosave window; a stable revision-`119` fresh read verified identical board/component identities, states, hierarchy and geometry, so there is no semantic delta between the exported source and final saved source. These revisions add native state variants for the three document-library component families without changing any pre-existing shared master.
 
 ## Source file
 
@@ -99,13 +99,21 @@ The following top-level boards are the implementation authority for the document
 
 ### Document-library components
 
-These local library components live on `01 Components` (`9b1e7a6b-703c-8060-8008-7071c343b8c2`) under the `DocumentLibrary` path. The component ID is used to create linked instances; the main shape ID is the editable source.
+These local library components live on `01 Components` (`9b1e7a6b-703c-8060-8008-7071c343b8c2`) under the `DocumentLibrary` path. Each family is a native Penpot Variant container with one `state` axis. The component ID creates the linked state instance; the main shape ID identifies its editable source.
 
-| Component | Component ID | Main shape ID | Source size | Bound tokens |
-|---|---|---|---:|---|
-| `DocumentRow` | `f35db4ee-075c-8075-8008-7c1eea45d28f` | `f35db4ee-075c-8075-8008-7c1ee50626f5` | 1080 × 84 | `color.border`, `color.brand.100`, `color.brand.700`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill` |
-| `ImportTaskRow` | `f35db4ee-075c-8075-8008-7c1eefe300f4` | `f35db4ee-075c-8075-8008-7c1eea61d96f` | 1080 × 96 | `color.border`, `color.brand.100`, `color.brand.600`, `color.brand.700`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill`, `space.2` |
-| `FilePicker` | `f35db4ee-075c-8075-8008-7c1ef1831cf3` | `f35db4ee-075c-8075-8008-7c1eeffad986` | 560 × 180 | `color.border`, `color.brand.600`, `color.surface`, `color.text.primary`, `radius.md`, `space.2` |
+| Family / `state` | Variant container ID | Component ID | Main shape ID | Source size | Bound tokens |
+|---|---|---|---|---:|---|
+| `DocumentRow / ready` | `879161d4-ba5f-800d-8008-852644bff09e` | `f35db4ee-075c-8075-8008-7c1eea45d28f` | `f35db4ee-075c-8075-8008-7c1ee50626f5` | 1080 × 84 | `color.border`, `color.brand.100`, `color.brand.700`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill` |
+| `DocumentRow / deleting` | `879161d4-ba5f-800d-8008-852644bff09e` | `879161d4-ba5f-800d-8008-852644a6ce86` | `879161d4-ba5f-800d-8008-852643ecd3a3` | 1080 × 84 | ready tokens plus `color.warning` |
+| `ImportTaskRow / running` | `879161d4-ba5f-800d-8008-8526d12f81ea` | `f35db4ee-075c-8075-8008-7c1eefe300f4` | `f35db4ee-075c-8075-8008-7c1eea61d96f` | 1080 × 96 | `color.border`, `color.brand.100`, `color.brand.600`, `color.brand.700`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill`, `space.2` |
+| `ImportTaskRow / queued` | `879161d4-ba5f-800d-8008-8526d12f81ea` | `879161d4-ba5f-800d-8008-85267e7cc503` | `879161d4-ba5f-800d-8008-85267cc1920e` | 1080 × 96 | running tokens plus `color.warning` |
+| `ImportTaskRow / failed` | `879161d4-ba5f-800d-8008-8526d12f81ea` | `879161d4-ba5f-800d-8008-8526c1b6c14b` | `879161d4-ba5f-800d-8008-85267e911867` | 1080 × 96 | running tokens plus `color.danger` |
+| `ImportTaskRow / cancelled` | `879161d4-ba5f-800d-8008-8526d12f81ea` | `879161d4-ba5f-800d-8008-8526c2549491` | `879161d4-ba5f-800d-8008-8526c1c9ac4c` | 1080 × 96 | `color.border`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill`, `space.2` |
+| `FilePicker / idle` | `879161d4-ba5f-800d-8008-8526e7a901fd` | `f35db4ee-075c-8075-8008-7c1ef1831cf3` | `f35db4ee-075c-8075-8008-7c1eeffad986` | 560 × 180 | `color.border`, `color.brand.600`, `color.surface`, `color.text.primary`, `radius.md`, `space.2` |
+| `FilePicker / drag-active` | `879161d4-ba5f-800d-8008-8526e7a901fd` | `879161d4-ba5f-800d-8008-8526e71f0357` | `879161d4-ba5f-800d-8008-8526e6bd9d4b` | 560 × 180 | idle tokens; `color.brand.600` binds the active border |
+| `FilePicker / invalid` | `879161d4-ba5f-800d-8008-8526e7a901fd` | `879161d4-ba5f-800d-8008-8526e797edf6` | `879161d4-ba5f-800d-8008-8526e731ace8` | 560 × 180 | idle tokens plus `color.danger` for error border/text |
+
+Runtime state maps to Penpot state properties as follows: a usable document uses `DocumentRow state=ready`, while an in-flight delete uses `state=deleting`; import tasks map `queued` and `retry_wait` to `ImportTaskRow state=queued`, `running` to `running`, `failed` to `failed`, and `cancelled` to `cancelled`. A succeeded task leaves the task list and renders as `DocumentRow state=ready`. File selection maps its default/resting state to `FilePicker state=idle`, a valid drag-over to `drag-active`, and rejected type/size/count validation to `invalid`. The Partial failure board's two failed task rows are linked instances of the explicit `failed` variant.
 
 `DocumentRow` is ordered file icon → filename/metadata → textual status badge → 44 × 44 delete action. `ImportTaskRow` is ordered file icon → filename/stage → textual status badge → 44 px-high action. `FilePicker` is ordered title → supported-format/limit copy → 44 px-high browse action. Instances may resize horizontally for their viewport, but this reading order and the linked component identity must remain intact.
 
@@ -128,7 +136,7 @@ All filenames, dates, sizes, progress values and task outcomes shown on these bo
 - File selection supports keyboard activation as well as drag/drop. Announce queued/running/progress/completed/failed/cancelled changes through a polite live region without moving focus. Busy state, failure and success remain understandable without color.
 - Every named interactive target on both mobile boards is at least 44 × 44. The bottom navigation targets are 78 × 64; visible focus treatment follows the existing 2 px ring contract.
 
-At revision `115`, fresh readback found 6/6/6 linked component roots on the desktop/tablet/mobile complete boards, 4 on empty, 7 on importing, 5 on partial failure and 5 on the mobile import sheet, with zero broken component-root links. Visible text-bounds overflow and actual-bounds overflow are zero on all seven boards and the three new component masters. The mobile complete and import-sheet audits found 13 and 10 named interactive targets respectively, with zero below 44 × 44. All seven PNGs were exported directly at original board size and visually checked for clipping, alignment, missing glyphs and state clarity. Browser output should match these boards except for the documented font-rendering differences below; no additional document-library deviation is approved.
+At final saved source revision `119`, fresh readback found 6/6/6 linked component roots on the desktop/tablet/mobile complete boards, 4 on empty, 7 on importing, 5 on partial failure and 5 on the mobile import sheet, with zero broken component-root links. Visible text-bounds overflow and actual-bounds overflow are zero on all seven boards and every state main in the three new Variant containers. The mobile complete and import-sheet audits found 13 and 10 named interactive targets respectively, with zero below 44 × 44. Component-state readback found ready `DocumentRow` instances on all complete boards, running `ImportTaskRow` and idle `FilePicker` instances on Importing, failed `ImportTaskRow` instances on Partial failure, and an idle `FilePicker` on the mobile sheet. All seven direct semantic PNG exports fully verify and decode at their original board dimensions and passed visual inspection for clipping, alignment, missing glyphs and state clarity. Browser output should match these boards except for the documented font-rendering differences below; no additional document-library deviation is approved.
 
 ## Responsive and navigation rules
 

@@ -1,5 +1,7 @@
-import struct
 from pathlib import Path
+
+import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).parents[2]
@@ -28,10 +30,14 @@ EXPECTED_BOARDS = (
 
 
 def _png_dimensions(path: Path) -> tuple[int, int]:
-    data = path.read_bytes()
-    assert data.startswith(b"\x89PNG\r\n\x1a\n")
-    assert data[12:16] == b"IHDR"
-    return struct.unpack(">II", data[16:24])
+    with Image.open(path) as image:
+        assert image.format == "PNG"
+        image.verify()
+
+    with Image.open(path) as image:
+        assert image.format == "PNG"
+        image.load()
+        return image.size
 
 
 def test_document_library_handoff_names_all_boards_and_reference_exports():
@@ -58,3 +64,19 @@ def test_document_library_reference_exports_are_real_original_size_pngs():
         path = REFERENCE_DIR / filename
         assert path.stat().st_size > 1000
         assert _png_dimensions(path) == dimensions
+
+
+def test_document_library_png_decoder_rejects_truncated_or_corrupt_data(tmp_path):
+    source = REFERENCE_DIR / "desktop-documents.png"
+    source_bytes = source.read_bytes()
+    truncated = tmp_path / source.name
+    truncated.write_bytes(source_bytes[:24])
+
+    corrupt = tmp_path / f"corrupt-{source.name}"
+    corrupt_bytes = bytearray(source_bytes)
+    corrupt_bytes[len(corrupt_bytes) // 2] ^= 0xFF
+    corrupt.write_bytes(corrupt_bytes)
+
+    for invalid_png in (truncated, corrupt):
+        with pytest.raises((OSError, SyntaxError)):
+            _png_dimensions(invalid_png)

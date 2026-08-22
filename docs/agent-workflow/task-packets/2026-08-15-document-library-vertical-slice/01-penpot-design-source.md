@@ -177,3 +177,17 @@ Stop and report `blocked` if any standard reality-conflict condition in `docs/ag
   - Task 1 is ready for independent review but is not review-clean until the mandatory reviewer gate accepts the commit.
 - Commit:
   - This Task 1 delivery commit; exact hash is recorded in `.superpowers/sdd/task-1-report.md` and the final handoff response after commit creation.
+
+### Review-fix addendum (2026-08-22)
+
+- Fresh-read result: the original `DocumentRow`, `ImportTaskRow` and `FilePicker` sources were flat library components. The in-scope correction added native Penpot Variant containers with a single `state` property, without editing any pre-existing shared master.
+- Variant interfaces:
+  - `DocumentRow` container `879161d4-ba5f-800d-8008-852644bff09e`: `ready` component/main `f35db4ee-075c-8075-8008-7c1eea45d28f` / `f35db4ee-075c-8075-8008-7c1ee50626f5`; `deleting` `879161d4-ba5f-800d-8008-852644a6ce86` / `879161d4-ba5f-800d-8008-852643ecd3a3`.
+  - `ImportTaskRow` container `879161d4-ba5f-800d-8008-8526d12f81ea`: `running` `f35db4ee-075c-8075-8008-7c1eefe300f4` / `f35db4ee-075c-8075-8008-7c1eea61d96f`; `queued` `879161d4-ba5f-800d-8008-85267e7cc503` / `879161d4-ba5f-800d-8008-85267cc1920e`; `failed` `879161d4-ba5f-800d-8008-8526c1b6c14b` / `879161d4-ba5f-800d-8008-85267e911867`; `cancelled` `879161d4-ba5f-800d-8008-8526c2549491` / `879161d4-ba5f-800d-8008-8526c1c9ac4c`.
+  - `FilePicker` container `879161d4-ba5f-800d-8008-8526e7a901fd`: `idle` `f35db4ee-075c-8075-8008-7c1ef1831cf3` / `f35db4ee-075c-8075-8008-7c1eeffad986`; `drag-active` `879161d4-ba5f-800d-8008-8526e71f0357` / `879161d4-ba5f-800d-8008-8526e6bd9d4b`; `invalid` `879161d4-ba5f-800d-8008-8526e797edf6` / `879161d4-ba5f-800d-8008-8526e731ace8`.
+- State mapping: `queued|retry_wait → queued`, `running → running`, `failed → failed`, `cancelled → cancelled`, and `succeeded → DocumentRow ready`; delete lifecycle is `ready → deleting`; picker lifecycle is `idle → drag-active` or `invalid`.
+- Token binding: every state retains the base border/surface/text/radius/spacing bindings. Brand states use `color.brand.100/600/700`; queued/deleting add `color.warning`; failed/invalid add `color.danger`. Exact per-state bindings are recorded in `docs/product-ui/penpot-handoff.md`.
+- Board binding: the Partial failure board's two failed rows now use `ImportTaskRow state=failed`; all other board instances fresh-read in their expected explicit states.
+- Final semantic audit: Penpot 2.17.2 stable revision `119`; seven unique boards at exact dimensions, linked-root counts 6/6/6/4/7/5/5, zero broken roots, zero visible-text/actual overflow, and 13/10 mobile named targets with zero below 44 × 44.
+- Repository decoder: Pillow now verifies and fully loads every expected PNG, and the contract proves both truncated and checksum-corrupt files are rejected.
+- Export completion: all seven boards were exported directly with `board.export({type: "png", scale: 1})` during the revision-`118` autosave window, transferred in bounded chunks to their exact repository paths, fully decoded at original size and visually inspected. A stable revision-`119` fresh read found the same board/component identities, states, hierarchy and geometry, with no semantic delta from the exported source.
