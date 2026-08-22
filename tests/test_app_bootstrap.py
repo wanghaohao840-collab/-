@@ -31,6 +31,9 @@ def test_create_uses_explicit_absolute_data_root_before_environment(tmp_path, mo
     assert services.storage.data_root == explicit_root.resolve()
     assert services.session_registry.storage is services.storage
     assert services.import_worker_pool.repository is services.import_repository
+    assert services.document_library.session_registry is services.session_registry
+    assert services.document_library.storage is services.storage
+    assert services.document_library.import_service is services.import_service
 
 
 def test_create_uses_environment_data_root_when_not_explicit(tmp_path, monkeypatch):
@@ -61,6 +64,20 @@ def test_start_and_stop_are_idempotent(tmp_path):
     services.start()
     services.start()
     services.stop()
+    services.stop()
+
+    start.assert_called_once_with()
+    stop.assert_called_once_with()
+
+
+def test_document_library_is_one_stable_service_without_extra_lifecycle(tmp_path):
+    services = ApplicationServices.create(tmp_path / "data")
+    start = services.import_worker_pool.start = Mock()
+    stop = services.import_worker_pool.stop = Mock()
+
+    first = services.document_library
+    services.start()
+    assert services.document_library is first
     services.stop()
 
     start.assert_called_once_with()

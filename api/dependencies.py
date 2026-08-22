@@ -5,11 +5,21 @@ from typing import Annotated
 from fastapi import Depends, Header, Request
 
 from api.config import ApiConfig
+from app.document_library import DocumentLibraryService
+from app.import_service import ImportTaskService
 from app.session import SessionRegistry, UserSession
 
 
 def get_session_registry(request: Request) -> SessionRegistry:
     return request.app.state.services.session_registry
+
+
+def get_document_library_service(request: Request) -> DocumentLibraryService:
+    return request.app.state.services.document_library
+
+
+def get_import_service(request: Request) -> ImportTaskService:
+    return request.app.state.services.import_service
 
 
 def get_session_token(request: Request) -> str | None:

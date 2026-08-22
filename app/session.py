@@ -85,6 +85,21 @@ class SessionRegistry:
             raise InvalidCsrfTokenError("Invalid CSRF token")
         return session
 
+    def clear_document_selection(self, user_id: str, document_id: str) -> int:
+        """Clear one deleted document from this user's active sessions."""
+
+        cleared = 0
+        with self._lock:
+            for session in self._sessions.values():
+                if (
+                    session.user_id == user_id
+                    and session.assistant.current_document_id == document_id
+                ):
+                    session.assistant.current_document_id = None
+                    session.assistant.current_document = None
+                    cleared += 1
+        return cleared
+
     def _create_session(self, user_id: str, username: str) -> str:
         with self._lock:
             self._cleanup_expired_locked()

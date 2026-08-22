@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -45,6 +46,15 @@ class ImportMemoryEventError(RuntimeError):
 
     def __init__(self):
         super().__init__("Failed to record the import memory event")
+
+
+@dataclass(frozen=True)
+class DocumentDeleteResult:
+    document_id: str
+    rag_message: str
+    documents_removed: int
+    questions_removed: int
+    skipped_source_files: int = 0
 
 
 class PDFLearningAssistant:
@@ -875,10 +885,24 @@ class PDFLearningAssistant:
                     "Cannot delete this document while its import is active; "
                     "wait for it to finish."
                 )
-            result = self._delete_document_coordinated(document_id)
+            result = self.delete_document(document_id)
             self.current_document_id = None
             self.current_document = None
-            return result
+            if isinstance(result, str):
+                return result
+            message = (
+                f"{result.rag_message}\n\nHistory synchronized\n"
+                f"- documents removed: {result.documents_removed}\n"
+                f"- questions removed: {result.questions_removed}"
+            )
+            if result.skipped_source_files:
+                message += "\n- ⚠️ source files outside user root were not deleted"
+            return message
+
+    def delete_document(self, document_id: str) -> DocumentDeleteResult:
+        """Delete one exact document and return a non-display result."""
+
+        return self._delete_document_coordinated(document_id)
 
     def clear_all_documents(self) -> str:
         """清空全部 PDF：清空 RAG 知识库 + 清理学习历史中的文档和问答记录 + 重置当前 PDF"""
@@ -893,7 +917,9 @@ class PDFLearningAssistant:
                 return "Cannot clear documents while imports are active; wait for them to finish."
             return self._clear_documents_coordinated()
 
-    def _delete_document_coordinated(self, document_id: str) -> str:
+    def _delete_document_coordinated(
+        self, document_id: str
+    ) -> DocumentDeleteResult:
         with self._write_lock:
             latest = self._load_history()
             source_paths = [
@@ -901,7 +927,19 @@ class PDFLearningAssistant:
                 for item in latest["documents"]
                 if item.get("document_id") == document_id
             ]
-            rag_result = self.rag_tool.execute("delete_document", document_id=document_id)
+            if hasattr(self.rag_tool, "execute_result"):
+                action_result = self.rag_tool.execute_result(
+                    "delete_document", document_id=document_id
+                )
+                if not action_result.success:
+                    raise RuntimeError("RAG document deletion failed")
+                rag_result = action_result.message
+            else:
+                rag_result = self.rag_tool.execute(
+                    "delete_document", document_id=document_id
+                )
+                if isinstance(rag_result, str) and rag_result.startswith("❌"):
+                    raise RuntimeError("RAG document deletion failed")
             if self.coordinator is not None:
                 removed_docs, removed_questions = self.coordinator.delete_document(document_id)
                 self.history = self.coordinator.load_history()
@@ -924,17 +962,13 @@ class PDFLearningAssistant:
                 else:
                     path.unlink()
 
-        result = (
-            f"{rag_result}\n\nHistory synchronized\n"
-            f"- documents removed: {removed_docs}\n"
-            f"- questions removed: {removed_questions}"
+        return DocumentDeleteResult(
+            document_id=document_id,
+            rag_message=str(rag_result),
+            documents_removed=removed_docs,
+            questions_removed=removed_questions,
+            skipped_source_files=len(skipped_paths),
         )
-        if skipped_paths:
-            result += (
-                "\n- ⚠️ source files outside user root were not deleted: "
-                + ", ".join(str(p) for p in skipped_paths)
-            )
-        return result
 
     def _clear_documents_coordinated(self) -> str:
         with self._write_lock:

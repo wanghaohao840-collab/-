@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import RLock
 
 from app.database import initialize_database
+from app.document_library import DocumentLibraryService
 from app.import_repository import ImportTaskRepository
 from app.import_service import ImportTaskService
 from app.import_worker import ImportWorkerPool
@@ -31,6 +32,7 @@ class ApplicationServices:
     import_repository: ImportTaskRepository
     import_worker_pool: ImportWorkerPool
     import_service: ImportTaskService
+    document_library: DocumentLibraryService
     _started: bool = field(default=False, init=False, repr=False)
     _lifecycle_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
@@ -60,6 +62,11 @@ class ApplicationServices:
             import_worker_pool,
         )
         session_registry.runtime_registry.set_import_task_service(import_service)
+        document_library = DocumentLibraryService(
+            session_registry,
+            storage,
+            import_service,
+        )
         return cls(
             data_root=resolved_data_root,
             db_path=db_path,
@@ -69,6 +76,7 @@ class ApplicationServices:
             import_repository=import_repository,
             import_worker_pool=import_worker_pool,
             import_service=import_service,
+            document_library=document_library,
         )
 
     def start(self) -> None:
