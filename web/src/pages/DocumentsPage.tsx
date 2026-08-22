@@ -240,6 +240,7 @@ export function DocumentsPage() {
         filter={filter}
         onFilterChange={setFilter}
         onOpenImport={openImport}
+        showFilter={documents.length > 0}
       />
       <div
         className="document-live-region"
@@ -282,15 +283,18 @@ export function DocumentsPage() {
             />
           ) : null}
           {!documents.length ? (
-            <section className="documents-empty" aria-labelledby="documents-empty-title">
-              <span className="documents-empty__icon" aria-hidden="true">文</span>
-              <h2 id="documents-empty-title">还没有文档</h2>
-              <p>导入 PDF、TXT、Markdown 或 DOCX，开始构建你的知识库。</p>
-              <Button hierarchy="secondary" onClick={(event) => openImport(event.currentTarget)}>
-                导入文档
-              </Button>
-              <small>每批最多 20 个文件 · 单文件 100 MiB · 每批 500 MiB</small>
-            </section>
+            <div className="documents-empty-state">
+              <section className="documents-empty" aria-labelledby="documents-empty-title">
+                <h2 id="documents-empty-title">还没有文档</h2>
+                <p>导入 PDF、TXT、Markdown 或 DOCX，开始构建你的知识库。</p>
+                <Button hierarchy="secondary" onClick={(event) => openImport(event.currentTarget)}>
+                  导入文档
+                </Button>
+              </section>
+              <small className="documents-empty-state__limits">
+                每批最多 20 个文件 · 单文件 100 MiB · 每批 500 MiB
+              </small>
+            </div>
           ) : (
             <DocumentList
               documents={filteredDocuments}

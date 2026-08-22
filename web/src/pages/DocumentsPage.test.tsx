@@ -167,13 +167,27 @@ describe("DocumentsPage", () => {
     expect(screen.queryByText("还没有文档")).not.toBeInTheDocument();
 
     resolveDocuments(jsonResponse({ items: [] }));
-    expect(await screen.findByRole("heading", { level: 2, name: "还没有文档" })).toBeVisible();
+    const emptyHeading = await screen.findByRole("heading", {
+      level: 2,
+      name: "还没有文档",
+    });
+    expect(emptyHeading).toBeVisible();
+    expect.soft(screen.queryByText("管理已导入文档与批量任务")).toBeVisible();
+    expect.soft(screen.queryByLabelText("按名称筛选")).not.toBeInTheDocument();
     expect(
       screen.getByText("导入 PDF、TXT、Markdown 或 DOCX，开始构建你的知识库。"),
     ).toBeVisible();
-    expect(
-      screen.getByText("每批最多 20 个文件 · 单文件 100 MiB · 每批 500 MiB"),
-    ).toBeVisible();
+    const limits = screen.getByText(
+      "每批最多 20 个文件 · 单文件 100 MiB · 每批 500 MiB",
+    );
+    expect(limits).toBeVisible();
+    const emptyCard = emptyHeading.closest(".documents-empty");
+    expect(emptyCard).not.toBeNull();
+    expect.soft(emptyCard).not.toContainElement(limits);
+    expect.soft(emptyCard?.querySelector(".documents-empty__icon")).toBeNull();
+    expect
+      .soft(within(emptyCard as HTMLElement).queryByText("文"))
+      .not.toBeInTheDocument();
   });
 
   it("shows a reloadable query error without misrepresenting it as empty", async () => {
@@ -228,7 +242,9 @@ describe("DocumentsPage", () => {
       "未知",
     );
 
-    await user.type(screen.getByLabelText("按名称筛选"), "RESEARCH");
+    const filter = screen.getByLabelText("按名称筛选");
+    expect(filter).toBeVisible();
+    await user.type(filter, "RESEARCH");
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
   });
 
