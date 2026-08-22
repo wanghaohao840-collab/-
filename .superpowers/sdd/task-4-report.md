@@ -6,6 +6,7 @@
 - Implementation base: `6d9ed6f19e1f97082a9e85d5b5da448cfa7f6f29`
 - Implementation commit: `dcd64cd` (`feat: add document library APIs`)
 - Independent-review correction: `0d06346` (`fix: close document API review gaps`)
+- Producer timestamp correction: `a5355c8` (`fix: persist zoned document load times`)
 - Packet: `document-library-vertical-slice-04`
 - Network/external services: not used
 
@@ -13,7 +14,7 @@
 
 - `DocumentLibraryService` derives identity only from `SessionRegistry`, takes the shared user Runtime lock, reloads persisted History and returns immutable safe document views. Latest duplicate IDs win; invalid, escaping and reparse/junction records are skipped with static diagnostics. Zoned ISO-8601 timestamps sort as UTC-aware datetimes, while malformed/missing metadata stays nullable in a deterministic null tail.
 - Deletion fresh-reads and preflights every source record matching the exact document ID, rejects an active exact-document import, invokes the Assistant's public structured delete, validates exact ID/non-zero removal/zero skipped-file postconditions, and only then clears exact selections across that user's active sessions. Missing and cross-user IDs are indistinguishable; failures become safe typed errors.
-- `PDFLearningAssistant.delete_document(document_id)` returns immutable structured counts while reusing the existing RAG/history/question/source-file coordination. `delete_current_document()` remains the active-import-aware Gradio formatting wrapper.
+- `PDFLearningAssistant.delete_document(document_id)` returns immutable structured counts while reusing the existing RAG/history/question/source-file coordination. `delete_current_document()` remains the active-import-aware Gradio formatting wrapper. New history records from `load_document()` persist an explicitly UTC-aware ISO-8601 `loaded_at`, while legacy naive timestamps remain invalid nullable metadata.
 - `ApplicationServices` constructs one document library from the existing registry/storage/import service. Request dependencies return that object and the existing import service from app state; no service or worker lifecycle was added.
 - Document and import routers use Cookie-derived session identity, the existing CSRF dependency on every mutation, UUID/query/multipart parsing, accepted DTO projections and the common JSON error envelope.
 
@@ -48,6 +49,12 @@ Other-user document, batch and task IDs use the same 404 codes as missing IDs. N
 
    Expected result: `6 failed, 57 deselected in 4.09s`. The failures directly proved string-based timestamp misordering, missing older-duplicate path preflight, ignored partial/mismatched/zero-removal structured results and `InvalidSessionError` misclassification as a staging 500.
 
+4. Producer timestamp re-review RED:
+
+   `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_document_library_service.py -k "real_load_document_writes_zoned_time" --basetemp=.runtime/pytest-task4-producer-red`
+
+   Expected result: `1 failed, 17 deselected in 3.95s`. The real `PDFLearningAssistant.load_document()` persisted a naive timestamp, which the strict service projection correctly rejected.
+
 ## GREEN evidence
 
 1. Final required regression:
@@ -71,6 +78,13 @@ Other-user document, batch and task IDs use the same 404 codes as missing IDs. N
    - Corrected Assistant/worker delete compatibility — `8 passed, 54 deselected in 9.52s`.
    - Corrected real multi-user delete/clear integration — `2 passed, 10 deselected in 15.51s`.
 
+5. Producer timestamp correction GREEN:
+
+   - Focused real producer/service linkage — `1 passed, 17 deselected in 2.00s`.
+   - Corrected required regression — `121 passed in 45.69s`.
+   - Import compatibility — `14 passed in 7.75s`.
+   - Assistant/worker delete compatibility — `8 passed, 54 deselected in 9.35s`.
+
 ## Scope and security review
 
 - Production and tests changed only in Packet 04's exact allowlist. Packet 03 import internals and all forbidden frontend/design/E2E/dependency/RAG/Memory/deployment/mount files are untouched.
@@ -80,6 +94,7 @@ Other-user document, batch and task IDs use the same 404 codes as missing IDs. N
 - A session that expires between CSRF validation and upload staging reuses the existing 401 `invalid_session` envelope; the broad staging `ValueError` mapping no longer consumes it.
 - Document DTOs expose six accepted business fields. Import DTOs explicitly project only accepted batch/count/task fields; persisted user and staging fields never enter schema construction.
 - Static error messages and diagnostics do not echo paths, credentials, raw exceptions, Cookie/CSRF values or file contents.
+- The real document-load producer now emits zoned UTC metadata consumed without reinterpretation by the service; old naive/malformed metadata still projects as `null` and remains in the deterministic null tail.
 - Existing application lifespan, worker identity/count, auth, `/legacy`, assets, SPA Accept handling and reserved `/api/*` JSON 404 behavior all remain passing.
 
 ## Deviations and residual risks

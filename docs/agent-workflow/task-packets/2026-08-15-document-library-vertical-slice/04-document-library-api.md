@@ -143,7 +143,7 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
 
 ## Implementation handoff
 
-- Status: done; ready for independent re-review after correcting two Important findings and one Minor finding
+- Status: done; ready for independent re-review after correcting the producer timestamp finding in addition to the prior two Important and one Minor findings
 - Files changed:
   - `app/document_library.py`
   - `assistants/pdf_learning_assistant.py`
@@ -201,6 +201,11 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
   - Corrected final required regression — `120 passed in 35.39s`.
   - Corrected delete compatibility — `8 passed, 54 deselected in 9.52s`.
   - Corrected real multi-user delete/clear integration — `2 passed, 10 deselected in 15.51s`.
+  - Producer timestamp re-review RED — `1 failed, 17 deselected in 3.95s`; real `load_document()` wrote a naive timestamp rejected by the service.
+  - Producer/service focused GREEN — `1 passed, 17 deselected in 2.00s`.
+  - Producer-corrected final required regression — `121 passed in 45.69s`.
+  - Producer-corrected import compatibility — `14 passed in 7.75s`.
+  - Producer-corrected delete compatibility — `8 passed, 54 deselected in 9.35s`.
   - `git diff --check` — PASS; line-ending notices only.
 - Response-field scan:
   - Documents contain only `document_id`, `name`, `file_suffix`, `size_bytes`, `loaded_at`, `status`.
@@ -213,5 +218,6 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
   - The structured Assistant result must report the exact requested ID, at least one removed document and zero skipped source files before session selection invalidation.
   - Upload-session expiry is re-raised to the existing `invalid_session` 401 handler instead of entering staging-error mapping.
   - Zoned ISO-8601 `loaded_at` values sort as UTC-aware datetimes; malformed values are diagnosed statically, projected as `null` and sorted in the deterministic null tail.
+  - Real `PDFLearningAssistant.load_document()` now persists timezone-aware UTC `loaded_at`; legacy naive history is deliberately not reinterpreted.
 - Residual risks: None known within Packet 04; independent re-review and mandatory final cross-packet integration review remain pending.
-- Commits: `dcd64cd` (`feat: add document library APIs`), `0d06346` (`fix: close document API review gaps`).
+- Commits: `dcd64cd` (`feat: add document library APIs`), `0d06346` (`fix: close document API review gaps`), `a5355c8` (`fix: persist zoned document load times`).
