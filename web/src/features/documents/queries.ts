@@ -69,6 +69,7 @@ export function useDocumentsQuery() {
   return useQuery({
     queryKey: DOCUMENTS_QUERY_KEY,
     queryFn: ({ signal }) => listDocuments(auth.request, signal),
+    gcTime: 0,
     retry: false,
     refetchOnWindowFocus: true,
   });
@@ -83,6 +84,7 @@ export function useImportsQuery() {
   const query = useQuery({
     queryKey: IMPORTS_QUERY_KEY,
     queryFn: ({ signal }) => listImports(auth.request, signal),
+    gcTime: 0,
     retry: false,
     refetchOnWindowFocus: true,
     refetchInterval: (currentQuery) =>
@@ -109,14 +111,6 @@ export function useImportsQuery() {
         .catch(() => undefined);
     }
   }, [query.data, queryClient]);
-
-  useEffect(() => {
-    const refetchOnFocus = () => {
-      void query.refetch().catch(() => undefined);
-    };
-    window.addEventListener("focus", refetchOnFocus);
-    return () => window.removeEventListener("focus", refetchOnFocus);
-  }, [query.refetch]);
 
   return query;
 }

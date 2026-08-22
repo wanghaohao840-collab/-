@@ -1,4 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  focusManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +22,7 @@ import {
   hasActiveImports,
   IMPORTS_QUERY_KEY,
   useDocumentMutations,
+  useDocumentsQuery,
   useImportsQuery,
 } from "./queries";
 import type { ImportBatch, ImportStatus } from "./types";
@@ -84,6 +89,21 @@ function ImportsHarness() {
   return <output>{query.data?.[0]?.tasks[0]?.status ?? "loading"}</output>;
 }
 
+function UserDataHarness() {
+  const documents = useDocumentsQuery();
+  const imports = useImportsQuery();
+  return (
+    <>
+      <output aria-label="文档所有者">
+        {documents.data?.items[0]?.name ?? "loading"}
+      </output>
+      <output aria-label="导入所有者">
+        {imports.data?.[0]?.tasks[0]?.original_name ?? "loading"}
+      </output>
+    </>
+  );
+}
+
 function MutationHarness() {
   const mutations = useDocumentMutations();
   return (
@@ -107,6 +127,8 @@ function MutationHarness() {
 describe("document query contracts", () => {
   afterEach(() => {
     vi.useRealTimers();
+    focusManager.setFocused(undefined);
+    vi.restoreAllMocks();
     requestMock.mockReset();
   });
 
@@ -176,10 +198,10 @@ describe("document query contracts", () => {
     expect(requestMock).toHaveBeenCalledTimes(2);
   });
 
-  it("refetches on focus and invalidates documents after active-to-succeeded", async () => {
+  it("refetches once for a visibility/focus return sequence and invalidates completed documents", async () => {
     requestMock
       .mockResolvedValueOnce([batch("running", 20)])
-      .mockResolvedValueOnce([batch("succeeded", 100)]);
+      .mockResolvedValue([batch("succeeded", 100)]);
     const client = createClient();
     const invalidate = vi.spyOn(client, "invalidateQueries");
 
@@ -187,13 +209,68 @@ describe("document query contracts", () => {
       wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
     });
     expect(await screen.findByText("running")).toBeVisible();
-    act(() => window.dispatchEvent(new Event("focus")));
+    let visibility: DocumentVisibilityState = "hidden";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(
+      () => visibility,
+    );
+    act(() => window.dispatchEvent(new Event("visibilitychange")));
+    visibility = "visible";
+    act(() => window.dispatchEvent(new Event("visibilitychange")));
     expect(await screen.findByText("succeeded")).toBeVisible();
+    await waitFor(() => expect(requestMock).toHaveBeenCalledTimes(2));
+
+    act(() => window.dispatchEvent(new Event("focus")));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(requestMock).toHaveBeenCalledTimes(2);
 
     await waitFor(() => {
       expect(invalidate).toHaveBeenCalledWith({ queryKey: DOCUMENTS_QUERY_KEY });
     });
+  });
+
+  it("removes user-scoped document and import data before a new user mounts", async () => {
+    let user: "a" | "b" = "a";
+    requestMock.mockImplementation((url: string) => {
+      if (url === "/api/v1/documents") {
+        return Promise.resolve({
+          items: [
+            {
+              document_id: `document-${user}`,
+              name: `user-${user}.md`,
+              file_suffix: ".md",
+              size_bytes: 12,
+              loaded_at: null,
+              status: "ready",
+            },
+          ],
+        });
+      }
+      const currentBatch = batch("failed");
+      currentBatch.batch_id = `batch-${user}`;
+      currentBatch.tasks[0]!.original_name = `user-${user}-import.md`;
+      return Promise.resolve([currentBatch]);
+    });
+    const client = createClient();
+    const first = render(<UserDataHarness />, {
+      wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
+    });
+    expect(await screen.findByText("user-a.md")).toBeVisible();
+    expect(await screen.findByText("user-a-import.md")).toBeVisible();
+
+    first.unmount();
+    await waitFor(() => {
+      expect(client.getQueryData(DOCUMENTS_QUERY_KEY)).toBeUndefined();
+      expect(client.getQueryData(IMPORTS_QUERY_KEY)).toBeUndefined();
+    });
+
+    user = "b";
+    render(<UserDataHarness />, {
+      wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
+    });
+    expect(screen.queryByText("user-a.md")).not.toBeInTheDocument();
+    expect(screen.queryByText("user-a-import.md")).not.toBeInTheDocument();
+    expect(await screen.findByText("user-b.md")).toBeVisible();
+    expect(await screen.findByText("user-b-import.md")).toBeVisible();
   });
 
   it("writes a mutation's server batch into cache before invalidating imports", async () => {

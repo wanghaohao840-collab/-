@@ -1,5 +1,6 @@
 import type {
   ImportBatch,
+  ImportStage,
   ImportTask,
 } from "../../features/documents/types";
 import { Button } from "../Button/Button";
@@ -20,12 +21,39 @@ function taskState(task: ImportTask): "running" | "queued" | "failed" | "cancell
   return "queued";
 }
 
-function taskStatusText(task: ImportTask): string {
-  if (task.status === "running") return `正在处理 · ${task.progress}%`;
-  if (task.status === "retry_wait") return `等待重试 · ${task.progress}%`;
-  if (task.status === "queued") return "排队中";
-  if (task.status === "failed") return task.error_summary ?? "导入失败，请重试";
+export function importStageText(stage: ImportStage): string {
+  if (stage === "queued") return "排队中";
+  if (stage === "staged") return "文件已准备";
+  if (stage === "parsing") return "正在解析文档";
+  if (stage === "chunking") return "正在切分内容";
+  if (stage === "embedding") return "正在生成索引";
+  if (stage === "persisting") return "正在保存索引";
+  if (stage === "committing") return "正在提交文档";
+  if (stage === "succeeded") return "已完成";
+  if (stage === "failed") return "导入失败";
   return "已取消";
+}
+
+function taskStatusText(task: ImportTask): string {
+  if (task.cancel_requested_at) return "正在取消";
+  if (task.status === "running") {
+    return `${importStageText(task.stage)} · ${task.progress}%`;
+  }
+  if (task.status === "retry_wait") return `等待重试 · ${task.progress}%`;
+  if (task.status === "queued") return importStageText(task.stage);
+  if (task.status === "failed") return task.error_summary ?? "导入失败，请重试";
+  if (task.status === "cancelled") return "已取消";
+  return "已完成";
+}
+
+function taskBadgeText(task: ImportTask): string {
+  if (task.cancel_requested_at) return "正在取消";
+  if (task.status === "running") return "导入中";
+  if (task.status === "retry_wait") return "等待重试";
+  if (task.status === "queued") return "排队中";
+  if (task.status === "failed") return "失败";
+  if (task.status === "cancelled") return "已取消";
+  return "已完成";
 }
 
 function isCancellable(task: ImportTask): boolean {
@@ -33,7 +61,8 @@ function isCancellable(task: ImportTask): boolean {
     (task.status === "queued" ||
       task.status === "running" ||
       task.status === "retry_wait") &&
-    task.stage !== "committing"
+    task.stage !== "committing" &&
+    task.cancel_requested_at === null
   );
 }
 
@@ -60,15 +89,7 @@ export function ImportTaskRow({
           />
         ) : null}
       </span>
-      <span className="import-task-row__badge">
-        {state === "running"
-          ? "导入中"
-          : state === "queued"
-            ? "排队中"
-            : state === "failed"
-              ? "失败"
-              : "已取消"}
-      </span>
+      <span className="import-task-row__badge">{taskBadgeText(task)}</span>
       {task.status === "failed" ? (
         <Button
           className="document-action-target"
@@ -125,22 +146,32 @@ export function ImportBatchPanel({
         const failed = batch.counts.failed > 0;
         if (!active && !failed) {
           return (
-            <details className="import-batch import-batch--terminal" key={batch.batch_id}>
-              <summary>
+            <section
+              className="import-batch import-batch--terminal"
+              key={batch.batch_id}
+              aria-label="最近导入结果"
+            >
+              <p>
                 最近导入结果 · 完成 {batch.counts.succeeded} · 取消 {batch.counts.cancelled}
-              </summary>
-            </details>
+              </p>
+            </section>
           );
         }
         return (
           <section
             className={`import-batch${failed ? " import-batch--failed" : ""}`}
             key={batch.batch_id}
-            aria-label={failed ? "部分导入失败" : "导入任务"}
+            aria-label={active ? "导入任务" : "部分导入失败"}
           >
             <header className="import-batch__header">
               <div>
-                <h2>{failed ? `导入完成，${batch.counts.failed} 个文件失败` : "正在导入"}</h2>
+                <h2>
+                  {active
+                    ? failed
+                      ? `正在导入，${batch.counts.failed} 个文件失败`
+                      : "正在导入"
+                    : `导入完成，${batch.counts.failed} 个文件失败`}
+                </h2>
                 <p>
                   完成 {batch.counts.succeeded}/{batch.counts.total}
                   {active ? " · 任务会自动刷新" : ""}

@@ -242,7 +242,7 @@ describe("DocumentsPage", () => {
     });
     renderApp();
 
-    expect(await screen.findByText("正在处理 · 68%")).toBeVisible();
+    expect(await screen.findByText("正在生成索引 · 68%")).toBeVisible();
     expect(screen.getByRole("button", { name: "取消 task-notes.md" })).toBeVisible();
     expect(screen.getByText("索引失败，请稍后重试")).toBeVisible();
     expect(screen.getByRole("button", { name: "重试 task-notes.md" })).toBeVisible();
@@ -337,7 +337,10 @@ describe("DocumentsPage", () => {
   });
 
   it("uses one deduplicated polite live region and consumes event promises", async () => {
-    installFetchStub({ imports: [importBatch("running")] });
+    const initial = importBatch("running");
+    initial.tasks[0]!.stage = "embedding";
+    initial.tasks[0]!.progress = 41;
+    installFetchStub({ imports: [initial] });
     const unhandled: unknown[] = [];
     const record = (event: PromiseRejectionEvent) => {
       event.preventDefault();
@@ -345,12 +348,48 @@ describe("DocumentsPage", () => {
     };
     window.addEventListener("unhandledrejection", record);
     try {
-      renderApp();
+      const { client } = renderApp();
       const live = await screen.findByRole("status", { name: "导入状态" });
       expect(live).toHaveAttribute("aria-live", "polite");
       expect(document.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
-      await waitFor(() => expect(live).toHaveTextContent("处理中 1"));
+      await waitFor(() => {
+        expect(live).toHaveTextContent("task-notes.md：正在生成索引 · 40%");
+      });
+
+      const mutations: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => mutations.push(...records));
+      observer.observe(live, { childList: true, characterData: true, subtree: true });
+
+      const progressMilestone = {
+        ...initial,
+        tasks: [{ ...initial.tasks[0]!, progress: 52 }],
+      };
+      client.setQueryData(["imports", { limit: 20 }], [progressMilestone]);
+      await waitFor(() => {
+        expect(live).toHaveTextContent("task-notes.md：正在生成索引 · 50%");
+      });
+      mutations.length = 0;
+
+      client.setQueryData(
+        ["imports", { limit: 20 }],
+        [{ ...progressMilestone, tasks: [{ ...progressMilestone.tasks[0]! }] }],
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(mutations).toHaveLength(0);
+
+      client.setQueryData(
+        ["imports", { limit: 20 }],
+        [
+          {
+            ...progressMilestone,
+            tasks: [{ ...progressMilestone.tasks[0]!, stage: "persisting" }],
+          },
+        ],
+      );
+      await waitFor(() => {
+        expect(live).toHaveTextContent("task-notes.md：正在保存索引 · 50%");
+      });
+      observer.disconnect();
       expect(unhandled).toEqual([]);
     } finally {
       window.removeEventListener("unhandledrejection", record);

@@ -4,7 +4,10 @@ import { ApiError } from "../api/client";
 import { Button } from "../components/Button/Button";
 import { DocumentList } from "../components/DocumentList/DocumentList";
 import { DocumentToolbar } from "../components/DocumentToolbar/DocumentToolbar";
-import { ImportBatchPanel } from "../components/ImportBatchPanel/ImportBatchPanel";
+import {
+  ImportBatchPanel,
+  importStageText,
+} from "../components/ImportBatchPanel/ImportBatchPanel";
 import { ImportDialog } from "../components/ImportDialog/ImportDialog";
 import {
   useDocumentMutations,
@@ -22,7 +25,8 @@ function safeMessage(reason: unknown, fallback: string): string {
 
 function importAnnouncement(batches: ImportBatch[]): string {
   if (!batches.length) return "";
-  const counts = batches.flatMap((batch) => batch.tasks).reduce(
+  const tasks = batches.flatMap((batch) => batch.tasks);
+  const counts = tasks.reduce(
     (current, task) => ({ ...current, [task.status]: current[task.status] + 1 }),
     {
       queued: 0,
@@ -33,7 +37,28 @@ function importAnnouncement(batches: ImportBatch[]): string {
       cancelled: 0,
     },
   );
-  return `导入任务：排队 ${counts.queued}，处理中 ${counts.running}，等待重试 ${counts.retry_wait}，完成 ${counts.succeeded}，失败 ${counts.failed}，取消 ${counts.cancelled}`;
+  const activeDetails = tasks
+    .filter(
+      (task) =>
+        task.status === "queued" ||
+        task.status === "running" ||
+        task.status === "retry_wait",
+    )
+    .map((task) => {
+      if (task.cancel_requested_at) {
+        return `${task.original_name}：正在取消`;
+      }
+      if (task.status === "running") {
+        const progress = Math.floor(Math.max(0, Math.min(task.progress, 100)) / 10) * 10;
+        return `${task.original_name}：${importStageText(task.stage)} · ${progress}%`;
+      }
+      if (task.status === "retry_wait") {
+        return `${task.original_name}：等待重试`;
+      }
+      return `${task.original_name}：${importStageText(task.stage)}`;
+    });
+  const summary = `导入任务：排队 ${counts.queued}，处理中 ${counts.running}，等待重试 ${counts.retry_wait}，完成 ${counts.succeeded}，失败 ${counts.failed}，取消 ${counts.cancelled}`;
+  return activeDetails.length ? `${summary}。${activeDetails.join("；")}` : summary;
 }
 
 type DeleteDialogProps = {

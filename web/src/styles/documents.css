@@ -318,12 +318,10 @@
 }
 
 .import-batch--terminal {
+  display: flex;
   min-height: var(--document-control-target);
   padding: var(--space-3) var(--space-4);
-}
-
-.import-batch--terminal summary {
-  cursor: pointer;
+  align-items: center;
 }
 
 .document-dialog-layer {
