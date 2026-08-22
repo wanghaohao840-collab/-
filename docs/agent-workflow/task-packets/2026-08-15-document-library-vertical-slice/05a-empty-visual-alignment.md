@@ -54,7 +54,7 @@ Record RED/GREEN evidence, exact geometry/comparison notes, changed paths, gates
 
 ## Implementation handoff
 
-- Status: done; ready for independent visual re-review.
+- Status: done; independent visual re-review approved with no Critical, Important or Minor findings.
 - Files changed:
   - `web/src/components/DocumentToolbar/DocumentToolbar.tsx`
   - `web/src/pages/DocumentsPage.tsx`
@@ -69,3 +69,4 @@ Record RED/GREEN evidence, exact geometry/comparison notes, changed paths, gates
 - Deviations: none.
 - Residual risk: Task 6 owns final multi-project Playwright visual acceptance; the fresh Task 5a actual is ignored and intentionally not committed.
 - Commit: `67132d2` (`fix: align document empty state to Penpot`); handoff ledgers in the subsequent documentation commit.
+- Independent review: Approved. The reviewer independently reproduced the card/halo pixel equality and all reported gates.

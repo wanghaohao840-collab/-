@@ -1,7 +1,7 @@
 ---
 id: "document-library-vertical-slice-06"
 title: "Verify the real vertical slice in three viewports"
-status: "waiting"
+status: "in_progress"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-05a"]
 base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
