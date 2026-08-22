@@ -42,7 +42,7 @@ create table if not exists import_tasks (
     file_suffix text not null,
     size_bytes integer not null,
     staged_relative_path text not null,
-    status text not null check(status in ('queued','running','retry_wait','succeeded','failed')),
+    status text not null check(status in ('queued','running','retry_wait','succeeded','failed','cancelled')),
     stage text not null,
     progress integer not null check(progress between 0 and 100),
     total_attempt_count integer not null default 0,
@@ -50,6 +50,7 @@ create table if not exists import_tasks (
     manual_retry_count integer not null default 0,
     max_auto_retries integer not null default 3,
     next_attempt_at text,
+    cancel_requested_at text,
     error_code text,
     error_summary text,
     created_at text not null,
@@ -96,9 +97,100 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
 def initialize_database(db_path: Path | str) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _upgrade_import_tasks_for_cancellation(conn)
         # F1: idempotent upgrade for existing databases missing
         # the conflict_summary column.
         _ensure_column(conn, "data_migrations", "conflict_summary", "text")
+
+
+def _upgrade_import_tasks_for_cancellation(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        "select sql from sqlite_master where type = 'table' and name = 'import_tasks'"
+    ).fetchone()
+    table_sql = row["sql"] if row is not None else ""
+    if "cancelled" in table_sql and "cancel_requested_at" in table_sql:
+        return
+
+    conn.execute("begin immediate")
+    try:
+        conn.execute(
+            """
+            create table import_tasks_new (
+                id text primary key,
+                batch_id text not null,
+                user_id text not null,
+                document_id text not null,
+                original_name text not null,
+                file_suffix text not null,
+                size_bytes integer not null,
+                staged_relative_path text not null,
+                status text not null check(status in (
+                    'queued','running','retry_wait','succeeded','failed','cancelled'
+                )),
+                stage text not null,
+                progress integer not null check(progress between 0 and 100),
+                total_attempt_count integer not null default 0,
+                auto_retry_count integer not null default 0,
+                manual_retry_count integer not null default 0,
+                max_auto_retries integer not null default 3,
+                next_attempt_at text,
+                cancel_requested_at text,
+                error_code text,
+                error_summary text,
+                created_at text not null,
+                started_at text,
+                finished_at text,
+                updated_at text not null,
+                foreign key(batch_id, user_id) references import_batches(id, user_id)
+                    on delete cascade,
+                unique(user_id, document_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into import_tasks_new (
+                id, batch_id, user_id, document_id, original_name, file_suffix,
+                size_bytes, staged_relative_path, status, stage, progress,
+                total_attempt_count, auto_retry_count, manual_retry_count,
+                max_auto_retries, next_attempt_at, cancel_requested_at,
+                error_code, error_summary, created_at, started_at, finished_at,
+                updated_at
+            )
+            select
+                id, batch_id, user_id, document_id, original_name, file_suffix,
+                size_bytes, staged_relative_path, status, stage, progress,
+                total_attempt_count, auto_retry_count, manual_retry_count,
+                max_auto_retries, next_attempt_at, null,
+                error_code, error_summary, created_at, started_at, finished_at,
+                updated_at
+            from import_tasks
+            """
+        )
+        conn.execute("drop table import_tasks")
+        conn.execute("alter table import_tasks_new rename to import_tasks")
+        conn.execute(
+            """
+            create unique index if not exists uq_import_tasks_running_user
+            on import_tasks(user_id) where status = 'running'
+            """
+        )
+        conn.execute(
+            """
+            create index if not exists ix_import_tasks_scheduler
+            on import_tasks(status, next_attempt_at, created_at)
+            """
+        )
+        conn.execute(
+            """
+            create index if not exists ix_import_tasks_user_created
+            on import_tasks(user_id, created_at)
+            """
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _ensure_column(conn, table: str, column: str, col_type: str) -> None:

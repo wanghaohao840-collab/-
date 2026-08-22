@@ -7,10 +7,168 @@ import pytest
 
 import app.import_repository as import_repository
 from app.auth import AuthService
-from app.database import initialize_database
+from app.database import connect, initialize_database
 from app.import_models import ImportTaskCreate
 from app.import_repository import ImportTaskRepository, InvalidImportTransition
 from app.storage import UserStorage
+
+
+PRE_CANCELLATION_IMPORT_SCHEMA = """
+create table if not exists users (
+    id text primary key,
+    username text not null,
+    username_key text not null unique,
+    password_hash text not null,
+    status text not null default 'active',
+    created_at text not null,
+    updated_at text not null
+);
+
+create table if not exists import_batches (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    created_at text not null,
+    updated_at text not null,
+    unique(id, user_id)
+);
+
+create table if not exists import_tasks (
+    id text primary key,
+    batch_id text not null,
+    user_id text not null,
+    document_id text not null,
+    original_name text not null,
+    file_suffix text not null,
+    size_bytes integer not null,
+    staged_relative_path text not null,
+    status text not null check(status in ('queued','running','retry_wait','succeeded','failed')),
+    stage text not null,
+    progress integer not null check(progress between 0 and 100),
+    total_attempt_count integer not null default 0,
+    auto_retry_count integer not null default 0,
+    manual_retry_count integer not null default 0,
+    max_auto_retries integer not null default 3,
+    next_attempt_at text,
+    error_code text,
+    error_summary text,
+    created_at text not null,
+    started_at text,
+    finished_at text,
+    updated_at text not null,
+    foreign key(batch_id, user_id) references import_batches(id, user_id)
+        on delete cascade,
+    unique(user_id, document_id)
+);
+
+create unique index if not exists uq_import_tasks_running_user
+on import_tasks(user_id) where status = 'running';
+create index if not exists ix_import_tasks_scheduler
+on import_tasks(status, next_attempt_at, created_at);
+create index if not exists ix_import_tasks_user_created
+on import_tasks(user_id, created_at);
+"""
+
+
+def test_new_import_schema_has_cancellation_contract(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+
+    with connect(db_path) as conn:
+        sql = conn.execute(
+            "select sql from sqlite_master where type='table' and name='import_tasks'"
+        ).fetchone()["sql"]
+        columns = {
+            row["name"] for row in conn.execute("pragma table_info('import_tasks')")
+        }
+
+    assert "cancelled" in sql
+    assert "cancel_requested_at" in columns
+
+
+def test_upgrade_pre_cancellation_import_tasks_preserves_data_and_indexes(tmp_path):
+    db_path = tmp_path / "app.db"
+    user_id = "00000000-0000-0000-0000-000000000101"
+    batch_id = "00000000-0000-0000-0000-000000000102"
+    task_id = "00000000-0000-0000-0000-000000000103"
+    document_id = "00000000-0000-0000-0000-000000000104"
+    expected_indexes = {
+        "uq_import_tasks_running_user",
+        "ix_import_tasks_scheduler",
+        "ix_import_tasks_user_created",
+    }
+
+    with connect(db_path) as conn:
+        conn.executescript(PRE_CANCELLATION_IMPORT_SCHEMA)
+        conn.execute(
+            """
+            insert into users (
+                id, username, username_key, password_hash, status,
+                created_at, updated_at
+            ) values (?, 'legacy', 'legacy', 'hash', 'active', ?, ?)
+            """,
+            (user_id, "2026-07-01T00:00:00Z", "2026-07-01T00:00:01Z"),
+        )
+        conn.execute(
+            """
+            insert into import_batches (id, user_id, created_at, updated_at)
+            values (?, ?, ?, ?)
+            """,
+            (
+                batch_id,
+                user_id,
+                "2026-07-02T00:00:00Z",
+                "2026-07-02T00:01:00Z",
+            ),
+        )
+        conn.execute(
+            """
+            insert into import_tasks (
+                id, batch_id, user_id, document_id, original_name, file_suffix,
+                size_bytes, staged_relative_path, status, stage, progress,
+                total_attempt_count, auto_retry_count, manual_retry_count,
+                max_auto_retries, next_attempt_at, error_code, error_summary,
+                created_at, started_at, finished_at, updated_at
+            ) values (
+                ?, ?, ?, ?, 'legacy.md', '.md', 17, ?, 'failed', 'failed', 63,
+                4, 2, 1, 7, null, 'legacy_error', 'legacy failure', ?, ?, ?, ?
+            )
+            """,
+            (
+                task_id,
+                batch_id,
+                user_id,
+                document_id,
+                f"imports/{batch_id}/{task_id}.md",
+                "2026-07-02T00:00:00Z",
+                "2026-07-02T00:00:10Z",
+                "2026-07-02T00:00:20Z",
+                "2026-07-02T00:00:20Z",
+            ),
+        )
+        legacy_row = dict(
+            conn.execute("select * from import_tasks where id = ?", (task_id,)).fetchone()
+        )
+
+    initialize_database(db_path)
+    initialize_database(db_path)
+
+    with connect(db_path) as conn:
+        upgraded_row = dict(
+            conn.execute("select * from import_tasks where id = ?", (task_id,)).fetchone()
+        )
+        index_names = {
+            row["name"] for row in conn.execute("pragma index_list('import_tasks')")
+        }
+        foreign_key_tables = {
+            row["table"] for row in conn.execute("pragma foreign_key_list('import_tasks')")
+        }
+        foreign_key_violations = conn.execute("pragma foreign_key_check").fetchall()
+
+    assert upgraded_row.pop("cancel_requested_at") is None
+    assert upgraded_row == legacy_row
+    assert expected_indexes <= index_names
+    assert foreign_key_tables == {"import_batches"}
+    assert foreign_key_violations == []
 
 
 def make_repo(tmp_path):
@@ -33,6 +191,239 @@ def make_task(user_id, *, batch_id=None, task_id=None, document_id=None):
         size_bytes=3,
         staged_relative_path=f"imports/{batch_id}/{task_id}.md",
     )
+
+
+def test_cancel_queued_task_is_immediate_durable_and_not_retryable(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task], now="2026-08-15T00:00:00Z")
+
+    decision = repo.request_cancel(
+        user_id,
+        task.batch_id,
+        task.task_id,
+        now="2026-08-15T00:00:01Z",
+    )
+
+    assert decision.outcome == "cancelled"
+    assert decision.task.status == "cancelled"
+    assert decision.task.stage == "cancelled"
+    assert decision.task.cancel_requested_at == "2026-08-15T00:00:01Z"
+    assert decision.task.finished_at == "2026-08-15T00:00:01Z"
+    assert repo.get_batch(user_id, task.batch_id).cancelled == 1
+    assert repo.claim_next(set()) is None
+    with pytest.raises(InvalidImportTransition):
+        repo.retry_task(user_id, task.task_id)
+
+    reloaded = ImportTaskRepository(repo.db_path).get_task(user_id, task.task_id)
+    assert reloaded == decision.task
+
+
+def test_cancel_retry_wait_task_is_immediate_and_not_claimable(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    running = repo.claim_next(set())
+    repo.mark_retry_wait(
+        user_id,
+        running.task_id,
+        next_attempt_at="2026-08-15T00:10:00Z",
+        error_code="temporary",
+        error_summary="retry later",
+    )
+
+    decision = repo.request_cancel(
+        user_id,
+        task.batch_id,
+        task.task_id,
+        now="2026-08-15T00:00:02Z",
+    )
+
+    assert decision.outcome == "cancelled"
+    assert decision.task.status == "cancelled"
+    assert decision.task.next_attempt_at is None
+    assert decision.task.auto_retry_count == 1
+    assert repo.claim_next(set(), now="2026-08-15T00:10:00Z") is None
+
+
+def test_cancel_wins_before_committing(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    running = repo.claim_next(set())
+
+    decision = repo.request_cancel(
+        running.user_id,
+        running.batch_id,
+        running.task_id,
+        now="2026-08-15T00:00:01Z",
+    )
+
+    assert decision.outcome == "cancel_requested"
+    assert repo.is_cancel_requested(running.user_id, running.task_id) is True
+    assert (
+        repo.try_begin_committing(
+            running.user_id,
+            running.task_id,
+            now="2026-08-15T00:00:02Z",
+        )
+        is False
+    )
+    cancelled = repo.mark_cancelled(
+        running.user_id,
+        running.task_id,
+        now="2026-08-15T00:00:03Z",
+    )
+    assert cancelled.status == "cancelled"
+    assert cancelled.stage == "cancelled"
+    assert cancelled.finished_at == "2026-08-15T00:00:03Z"
+
+
+def test_committing_wins_before_cancel(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    running = repo.claim_next(set())
+
+    assert (
+        repo.try_begin_committing(
+            running.user_id,
+            running.task_id,
+            now="2026-08-15T00:00:01Z",
+        )
+        is True
+    )
+    decision = repo.request_cancel(
+        running.user_id,
+        running.batch_id,
+        running.task_id,
+        now="2026-08-15T00:00:02Z",
+    )
+
+    assert decision.outcome == "not_cancellable"
+    assert decision.task.stage == "committing"
+    assert decision.task.cancel_requested_at is None
+    assert repo.is_cancel_requested(running.user_id, running.task_id) is False
+
+
+def test_mark_cancelled_requires_running_task_with_cancel_request(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+
+    with pytest.raises(InvalidImportTransition):
+        repo.mark_cancelled(user_id, task.task_id)
+
+    repo.claim_next(set())
+    with pytest.raises(InvalidImportTransition):
+        repo.mark_cancelled(user_id, task.task_id)
+
+    repo.request_cancel(user_id, task.batch_id, task.task_id)
+    assert repo.mark_cancelled(user_id, task.task_id).status == "cancelled"
+
+
+def test_cancel_is_idempotent_for_all_terminal_states(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    batch_id = str(uuid.uuid4())
+    succeeded = make_task(
+        user_id,
+        batch_id=batch_id,
+        task_id="00000000-0000-0000-0000-000000000210",
+    )
+    failed = make_task(
+        user_id,
+        batch_id=batch_id,
+        task_id="00000000-0000-0000-0000-000000000211",
+    )
+    cancelled = make_task(
+        user_id,
+        batch_id=batch_id,
+        task_id="00000000-0000-0000-0000-000000000212",
+    )
+    repo.create_batch(user_id, [succeeded, failed, cancelled])
+    repo.claim_next(set())
+    repo.mark_succeeded(user_id, succeeded.task_id)
+    repo.claim_next(set())
+    repo.mark_failed(user_id, failed.task_id, "invalid", "bad document")
+    repo.request_cancel(user_id, batch_id, cancelled.task_id)
+
+    for task in (succeeded, failed, cancelled):
+        before = repo.get_task(user_id, task.task_id)
+        decision = repo.request_cancel(
+            user_id,
+            batch_id,
+            task.task_id,
+            now="2026-08-15T01:00:00Z",
+        )
+        assert decision.outcome == "unchanged"
+        assert decision.task == before
+
+
+def test_cancel_and_commit_are_user_batch_and_task_scoped(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    other_user_id = AuthService(repo.db_path).register(
+        "cancel-other-user", "correct horse battery"
+    ).id
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    repo.claim_next(set())
+
+    for scoped_user_id, batch_id, task_id in (
+        (other_user_id, task.batch_id, task.task_id),
+        (user_id, str(uuid.uuid4()), task.task_id),
+        (user_id, task.batch_id, str(uuid.uuid4())),
+    ):
+        with pytest.raises(KeyError, match="not found"):
+            repo.request_cancel(scoped_user_id, batch_id, task_id)
+
+    assert repo.is_cancel_requested(other_user_id, task.task_id) is False
+    assert repo.try_begin_committing(other_user_id, task.task_id) is False
+    unchanged = repo.get_task(user_id, task.task_id)
+    assert unchanged.stage == "queued"
+    assert unchanged.cancel_requested_at is None
+
+
+def test_two_connections_racing_cancel_and_commit_have_one_legal_winner(tmp_path):
+    repo, user_id = make_repo(tmp_path)
+    task = make_task(user_id)
+    repo.create_batch(user_id, [task])
+    repo.claim_next(set())
+    cancel_repository = ImportTaskRepository(repo.db_path)
+    commit_repository = ImportTaskRepository(repo.db_path)
+    start = threading.Barrier(2)
+
+    def cancel_from_connection():
+        start.wait()
+        return cancel_repository.request_cancel(
+            user_id,
+            task.batch_id,
+            task.task_id,
+            now="2026-08-15T00:00:01Z",
+        )
+
+    def commit_from_connection():
+        start.wait()
+        return commit_repository.try_begin_committing(
+            user_id,
+            task.task_id,
+            now="2026-08-15T00:00:02Z",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        cancel_future = executor.submit(cancel_from_connection)
+        commit_future = executor.submit(commit_from_connection)
+        cancel_decision = cancel_future.result()
+        commit_won = commit_future.result()
+
+    final_task = repo.get_task(user_id, task.task_id)
+    if commit_won:
+        assert cancel_decision.outcome == "not_cancellable"
+        assert final_task.stage == "committing"
+        assert final_task.cancel_requested_at is None
+    else:
+        assert cancel_decision.outcome == "cancel_requested"
+        assert final_task.stage != "committing"
+        assert final_task.cancel_requested_at == "2026-08-15T00:00:01Z"
 
 
 def test_create_claim_and_complete_task(tmp_path):

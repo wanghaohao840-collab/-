@@ -1,6 +1,26 @@
+from typing import get_args
+
 import pytest
 
+import app.import_models as import_models
 from app.import_models import ImportLimits, validate_batch_sizes
+
+
+def test_cancellation_model_contract_is_exposed():
+    assert "cancelled" in get_args(import_models.ImportStatus)
+    assert "cancelled" in get_args(import_models.ImportStage)
+    assert get_args(import_models.CancelOutcome) == (
+        "cancelled",
+        "cancel_requested",
+        "not_cancellable",
+        "unchanged",
+    )
+    assert "cancel_requested_at" in import_models.ImportTaskRecord.__dataclass_fields__
+    assert "cancelled" in import_models.ImportBatchSummary.__dataclass_fields__
+    assert tuple(import_models.ImportCancelDecision.__dataclass_fields__) == (
+        "task",
+        "outcome",
+    )
 
 
 def test_validate_batch_sizes_accepts_20_files_and_500_mib():

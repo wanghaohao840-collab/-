@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Callable, Literal, Sequence
 
 
-ImportStatus = Literal["queued", "running", "retry_wait", "succeeded", "failed"]
+ImportStatus = Literal[
+    "queued", "running", "retry_wait", "succeeded", "failed", "cancelled"
+]
 ImportStage = Literal[
     "queued",
     "staged",
@@ -15,6 +17,10 @@ ImportStage = Literal[
     "committing",
     "succeeded",
     "failed",
+    "cancelled",
+]
+CancelOutcome = Literal[
+    "cancelled", "cancel_requested", "not_cancellable", "unchanged"
 ]
 ProgressCallback = Callable[[str, int, int, str], None]
 
@@ -62,6 +68,13 @@ class ImportTaskRecord:
     started_at: str | None
     finished_at: str | None
     updated_at: str
+    cancel_requested_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ImportCancelDecision:
+    task: ImportTaskRecord
+    outcome: CancelOutcome
 
 
 @dataclass(frozen=True)
@@ -77,6 +90,7 @@ class ImportBatchSummary:
     succeeded: int
     failed: int
     tasks: tuple[ImportTaskRecord, ...]
+    cancelled: int = 0
 
 
 def validate_batch_sizes(sizes: Sequence[int], limits: ImportLimits) -> None:
