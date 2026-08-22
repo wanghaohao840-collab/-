@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -265,6 +267,65 @@ def test_list_documents_sorts_valid_offsets_by_utc_and_nulls_malformed_timestamp
     assert items[1].loaded_at == "2026-08-15T10:00:00+08:00"
     assert items[2].loaded_at is None
     assert "not-a-timestamp" not in caplog.text
+
+
+def test_real_load_document_writes_zoned_time_visible_to_document_library(
+    tmp_path,
+):
+    user_id = "11111111-1111-4111-8111-111111111111"
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    storage = UserStorage(tmp_path / "data")
+    paths = storage.ensure_user_dirs(user_id)
+    source = paths.documents / f"{document_id}.md"
+    source.write_text("content", encoding="utf-8")
+    history = HistoryRepository(paths.history)
+    lock = RLock()
+    assistant = object.__new__(PDFLearningAssistant)
+    assistant.user_id = user_id
+    assistant.session_id = "session-test"
+    assistant.runtime = None
+    assistant._lock = lock
+    assistant.rag_tool = SimpleNamespace(
+        execute_result=Mock(
+            return_value=SimpleNamespace(success=True, message="imported")
+        )
+    )
+    assistant.memory_tool = SimpleNamespace(execute=Mock(return_value="stored"))
+    assistant.history_repository = history
+    assistant.coordinator = None
+    assistant.history = history.load()
+    assistant.current_document = None
+    assistant.current_document_id = None
+    assistant.stats = {
+        "documents_loaded": 0,
+        "questions_asked": 0,
+        "notes_added": 0,
+    }
+    runtime = SimpleNamespace(lock=lock, history=history)
+    session = SimpleNamespace(
+        user_id=user_id,
+        runtime=runtime,
+        assistant=assistant,
+    )
+    registry = FakeRegistry(session)
+    service = DocumentLibraryService(
+        registry,
+        storage,
+        FakeImportService(),
+    )
+
+    assistant.load_document(
+        str(source),
+        document_id=document_id,
+        original_name="lesson.md",
+    )
+    persisted = history.load()["documents"][0]["loaded_at"]
+    projected = service.list_documents("cookie-token")[0]
+
+    parsed = datetime.fromisoformat(persisted)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+    assert projected.loaded_at == persisted
 
 
 def test_list_documents_skips_reparse_source(service_fixture, tmp_path):

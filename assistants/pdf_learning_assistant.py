@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Optional, Dict, Any, Sequence
@@ -216,7 +216,7 @@ class PDFLearningAssistant:
             "document_path": str(path),
             "file_suffix": suffix,
             "session_id": self.session_id,
-            "loaded_at": datetime.now().isoformat(),
+            "loaded_at": datetime.now(timezone.utc).isoformat(),
             "import_task_id": import_task_id,
         }
 
