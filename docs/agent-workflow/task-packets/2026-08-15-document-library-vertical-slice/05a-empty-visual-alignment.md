@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-05a"
 title: "Align the real document empty state to Penpot"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-05"]
-base-commit: "6f592c7"
-owner: "unassigned"
+base-commit: "60e4525"
+owner: "codex"
 ---
 
 # Corrective Task Packet: Align the real document empty state to Penpot
@@ -51,3 +51,21 @@ Stop if matching requires a new asset/dependency, shared shell geometry change, 
 ## Handoff
 
 Record RED/GREEN evidence, exact geometry/comparison notes, changed paths, gates and commit. Leave the worktree clean for independent review.
+
+## Implementation handoff
+
+- Status: done; ready for independent visual re-review.
+- Files changed:
+  - `web/src/components/DocumentToolbar/DocumentToolbar.tsx`
+  - `web/src/pages/DocumentsPage.tsx`
+  - `web/src/pages/DocumentsPage.test.tsx`
+  - `web/src/styles/documents.css`
+  - this packet, `.superpowers/sdd/progress.md`, `.superpowers/sdd/task-5a-report.md`
+- RED: the focused empty-page case produced five soft assertion failures: approved subtitle absent, empty filter present, limits inside the card, standalone icon class present and standalone `文` visible. The complete/list filter case remained green.
+- GREEN: exact subtitle and copy render from real empty data; the filter is absent only for empty documents and remains present for the complete list; limits are outside the card; a CSS title halo replaces the standalone tile.
+- Desktop comparison: authoritative card border `x=540..1099`, `y=302..601` and halo pixels `x=788..850`, `y=420..482`; fresh ignored browser actual matches both exactly, with a `560 × 300` card and a 44 px empty action. Tablet retains a `560 × 320` card, mobile retains `342 × 320`, both have 44 px actions and neither overflows horizontally.
+- Verification: page `12/12`, Task 5 focused `36/36`, full frontend `101/101`, typecheck/lint/build, component map `6/6`, authoritative token and diff checks PASS.
+- Scope: implementation diff from `60e4525` is limited to the four Task 5-owned production/test files plus the three handoff ledgers. The four pre-existing Task 6 E2E changes were preserved byte-for-byte and never staged.
+- Deviations: none.
+- Residual risk: Task 6 owns final multi-project Playwright visual acceptance; the fresh Task 5a actual is ignored and intentionally not committed.
+- Commit: `67132d2` (`fix: align document empty state to Penpot`); handoff ledgers in the subsequent documentation commit.
