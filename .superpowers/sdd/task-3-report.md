@@ -6,6 +6,7 @@
 - Implementation base: `1b878b237d73b735eb3b5beee45a1910b21a2409`
 - Implementation commit: `e977a11` (`feat: stream and cancel document imports`)
 - Independent-review correction: `41c4178` (`fix: close import cancellation review gaps`)
+- Re-review correction: `17b420d` (`fix: reconcile ambiguous import batch commits`)
 - Packet: `document-library-vertical-slice-03`
 - Network/external services: not used
 
@@ -19,6 +20,7 @@
 - The worker checks cancellation around each meaningful file/Assistant stage and inside progress callbacks. `ImportCancelled` directly subclasses `BaseException`, crosses existing best-effort `Exception` wrappers, is caught before retry classification, and is never persisted as error text.
 - JSON and Qdrant replacements emit `committing` once after preparation/empty validation and immediately before their first mutation. Cancellation and commit-gate exceptions use distinct direct-`BaseException` signals, so a gate SQLite failure crosses producer best-effort wrappers, aborts before mutation, and is classified from the original exception using the existing safe retry/fail policy.
 - Cancellation removes exact temporary/formal/staged attempt files; cleanup failure still ends durably as cancelled. Startup terminal reconciliation derives all three paths from persisted UUIDs/suffixes and retries only validated cancelled task paths. The same startup path validates rollback markers, preserves malformed/unrelated/failed files, removes only exact no-batch staging, and treats markers for real DB batches as stale without deleting queued files.
+- If `create_batch()` raises, the service reads the exact session-derived user/batch back from SQLite before touching staging. A persisted batch is returned and notified as committed; an authoritative miss rolls back; an uncertain read preserves marker/staging evidence and returns the stable safe `ImportBatchCommitConfirmationError`.
 
 ## RED evidence
 
@@ -41,6 +43,12 @@ The failures directly demonstrated missing stream APIs/errors, actual-byte stagi
    `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/assistants/test_import_idempotency.py -k "rollback_marker_is or transient_rollback or persistent_rollback or stale_marker or malicious_marker or persists_while_shared or reconciles_exact_cancelled_attempt or commit_gate_database_failure" --basetemp=.runtime/pytest-task3-review-red`
 
    Result: expected failure, `8 failed, 1 passed, 82 deselected in 10.96s`. The failures proved commit-gate fail-open mutation, Runtime-lock-blocked cancellation, missing temp/formal reconciliation, missing durable rollback marker/safe cleanup error, and non-retried exact cleanup. The already-passing malicious-marker case remained a security guardrail.
+
+4. Re-review post-commit ambiguity RED:
+
+   `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_service.py -k "database_failure_removes_exact or commit_then_raise or confirmation_failure_preserves or post_commit_stale_marker" --basetemp=.runtime/pytest-task3-postcommit-red`
+
+   Result: expected failure, `3 failed, 1 passed, 35 deselected in 12.07s`. The failures proved that a commit-then-raise path deleted queued staging, confirmation failure lacked safe uncertain-state handling, and stale-marker unlink failure incorrectly entered rollback. The passing case preserved the authoritative pre-commit rollback guard.
 
 ## GREEN evidence
 
@@ -78,6 +86,16 @@ The failures directly demonstrated missing stream APIs/errors, actual-byte stagi
 
    Result: PASS (line-ending notices only; no whitespace errors).
 
+6. Re-review focused GREEN:
+
+   Same focused command with `--basetemp=.runtime/pytest-task3-postcommit-green` — `4 passed, 35 deselected in 6.80s`.
+
+7. Final re-review regression:
+
+   `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_import_service.py tests/test_import_worker.py tests/test_import_error_sanitization.py tests/ui/test_import_handlers.py tests/memory/rag/test_import_progress.py tests/assistants/test_import_idempotency.py --basetemp=.runtime/pytest-import-postcommit-final`
+
+   Result: `164 passed in 238.20s`; no warning summary, unhandled worker thread output or error traceback.
+
 ## Scope and security review
 
 - The corrective implementation changes are limited to `app/storage.py`, `app/import_service.py`, `app/import_worker.py` and their three allowed focused tests; the complete Task 3 implementation remains within the adjudicated five production and five test files.
@@ -87,6 +105,7 @@ The failures directly demonstrated missing stream APIs/errors, actual-byte stagi
 - Cleanup never uses recursive deletion or broad globs; only server-generated or persisted-and-revalidated exact task paths and one fixed marker name are unlinked.
 - User identity remains session-derived. Staging/retry continue to use the shared per-user Runtime lock; cancellation deliberately delegates arbitration directly to Task 2's durable SQLite transaction so a running request cannot be blocked by the Assistant lock.
 - Stable limit/cancellation errors and static cleanup diagnostics do not expose raw paths, credentials or internal cancellation text.
+- Ambiguous create confirmation never guesses state: it neither deletes evidence nor exposes the original create/query exception. Only an authoritative exact batch hit is treated as success, and only an authoritative miss permits rollback.
 
 ## Deviations and residual risks
 
