@@ -355,6 +355,110 @@ def test_database_failure_removes_exact_staged_files_and_leaves_no_batch(
     assert workers.notify_count == 0
 
 
+def test_create_batch_commit_then_raise_returns_persisted_batch_and_notifies(
+    tmp_path, monkeypatch
+):
+    service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
+    original_create_batch = repo.create_batch
+
+    def commit_then_raise(*args, **kwargs):
+        original_create_batch(*args, **kwargs)
+        raise RuntimeError(r"D:\private\post-commit token=secret")
+
+    monkeypatch.setattr(repo, "create_batch", commit_then_raise)
+
+    summary = service.submit_uploads(
+        "valid-token",
+        [import_service.ImportUpload("notes.md", io.BytesIO(b"body"))],
+    )
+
+    persisted = repo.get_batch(user_id, summary.batch_id)
+    assert persisted is not None
+    assert persisted.queued == 1
+    assert summary == persisted
+    staged = storage.user_paths(user_id).root / summary.tasks[0].staged_relative_path
+    assert staged.read_bytes() == b"body"
+    assert list(staged.parent.glob(".rollback.json")) == []
+    assert workers.notify_count == 1
+    claimed = repo.claim_next(set())
+    assert claimed is not None
+    assert claimed.task_id == summary.tasks[0].task_id
+
+
+def test_create_batch_confirmation_failure_preserves_recovery_evidence_safely(
+    tmp_path, monkeypatch
+):
+    service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
+    monkeypatch.setattr(
+        repo,
+        "create_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError(r"D:\private\create token=secret")
+        ),
+    )
+    monkeypatch.setattr(
+        repo,
+        "get_batch",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError(r"D:\private\confirm password=secret")
+        ),
+    )
+
+    with pytest.raises(
+        import_service.ImportBatchCommitConfirmationError
+    ) as captured:
+        service.submit_uploads(
+            "valid-token",
+            [import_service.ImportUpload("notes.md", io.BytesIO(b"body"))],
+        )
+
+    assert str(captured.value) == "could not confirm import batch creation"
+    assert "private" not in str(captured.value)
+    assert "secret" not in str(captured.value)
+    imports = storage.user_paths(user_id).imports
+    assert len(list(imports.rglob(".rollback.json"))) == 1
+    staged = [
+        path
+        for path in imports.rglob("*.md")
+        if not path.name.endswith(".partial")
+    ]
+    assert len(staged) == 1
+    assert staged[0].read_bytes() == b"body"
+    assert repo.list_batches(user_id) == []
+    assert workers.notify_count == 0
+
+
+def test_post_commit_stale_marker_unlink_failure_never_deletes_staging(
+    tmp_path, monkeypatch
+):
+    service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
+    original_create_batch = repo.create_batch
+    real_unlink = Path.unlink
+
+    def commit_then_raise(*args, **kwargs):
+        original_create_batch(*args, **kwargs)
+        raise RuntimeError("post-commit transport failure")
+
+    def fail_marker(path, *args, **kwargs):
+        if path.name == ".rollback.json":
+            raise OSError(r"D:\private\marker token=secret")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(repo, "create_batch", commit_then_raise)
+    monkeypatch.setattr(Path, "unlink", fail_marker)
+
+    summary = service.submit_uploads(
+        "valid-token",
+        [import_service.ImportUpload("notes.md", io.BytesIO(b"body"))],
+    )
+
+    staged = storage.user_paths(user_id).root / summary.tasks[0].staged_relative_path
+    assert repo.get_batch(user_id, summary.batch_id).queued == 1
+    assert staged.read_bytes() == b"body"
+    assert (staged.parent / ".rollback.json").exists()
+    assert workers.notify_count == 1
+
+
 def test_rollback_marker_is_durable_before_first_upload_byte(tmp_path, monkeypatch):
     service, repo, storage, workers, user_id, _ = make_import_service(tmp_path)
     stream = TrackingStream(b"body")

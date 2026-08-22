@@ -42,6 +42,16 @@ class ImportStagingCleanupError(RuntimeError):
         super().__init__("could not clean up staged import files")
 
 
+class ImportBatchCommitConfirmationError(RuntimeError):
+    """Raised when a failed create call cannot be reconciled with SQLite."""
+
+    code = "import_batch_commit_confirmation_failed"
+    status_code = 500
+
+    def __init__(self) -> None:
+        super().__init__("could not confirm import batch creation")
+
+
 @dataclass(frozen=True)
 class ImportUpload:
     original_name: str
@@ -187,8 +197,17 @@ class ImportTaskService:
             try:
                 summary = self.repository.create_batch(user_id, creates)
             except Exception:
-                self._rollback_staging_or_raise(owned_paths, rollback_marker)
-                raise
+                try:
+                    persisted = self.repository.get_batch(user_id, batch_id)
+                except Exception:
+                    # SQLite reality is unknown.  Preserve the exact marker
+                    # and staged files so startup reconciliation can decide
+                    # from a later authoritative read.
+                    raise ImportBatchCommitConfirmationError() from None
+                if persisted is None:
+                    self._rollback_staging_or_raise(owned_paths, rollback_marker)
+                    raise
+                summary = persisted
             self._remove_committed_rollback_marker(rollback_marker)
 
         self.worker_pool.notify()
