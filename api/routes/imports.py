@@ -23,7 +23,7 @@ from app.import_service import (
     ImportTaskService,
     ImportUpload,
 )
-from app.session import UserSession
+from app.session import InvalidSessionError, UserSession
 
 
 router = APIRouter(prefix="/api/v1/imports", tags=["imports"])
@@ -89,6 +89,8 @@ def submit_imports(
     ]
     try:
         summary = service.submit_uploads(get_session_token(request), uploads)
+    except InvalidSessionError:
+        raise
     except (
         ImportLimitError,
         ImportStagingCleanupError,

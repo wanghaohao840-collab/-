@@ -17,7 +17,10 @@ from app.document_library import (
 from app.history import HistoryRepository
 from app.session import SessionRegistry
 from app.storage import UserStorage
-from assistants.pdf_learning_assistant import PDFLearningAssistant
+from assistants.pdf_learning_assistant import (
+    DocumentDeleteResult,
+    PDFLearningAssistant,
+)
 
 
 class TrackingLock:
@@ -81,7 +84,16 @@ def service_fixture(tmp_path):
     paths = storage.ensure_user_dirs(user_id)
     lock = TrackingLock()
     history = FakeHistory(lock, [])
-    assistant = SimpleNamespace(delete_document=Mock(return_value=object()))
+    assistant = SimpleNamespace(
+        delete_document=Mock(
+            side_effect=lambda document_id: DocumentDeleteResult(
+                document_id=document_id,
+                rag_message="deleted",
+                documents_removed=1,
+                questions_removed=0,
+            )
+        )
+    )
     runtime = SimpleNamespace(lock=lock, history=history)
     session = SimpleNamespace(user_id=user_id, runtime=runtime, assistant=assistant)
     registry = FakeRegistry(session)
@@ -215,6 +227,46 @@ def test_list_documents_derives_user_scope_from_session_and_keeps_missing_size_n
     assert service_fixture.service.list_documents("cookie-token") == ()
 
 
+def test_list_documents_sorts_valid_offsets_by_utc_and_nulls_malformed_timestamp(
+    service_fixture,
+    caplog,
+):
+    early = service_fixture.paths.documents / "early.md"
+    later = service_fixture.paths.documents / "later.md"
+    malformed = service_fixture.paths.documents / "malformed.md"
+    for path in (early, later, malformed):
+        path.write_text(path.stem, encoding="utf-8")
+    service_fixture.history.documents = [
+        _record(
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            early,
+            loaded_at="2026-08-15T10:00:00+08:00",
+        ),
+        _record(
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            later,
+            loaded_at="2026-08-15T03:00:00Z",
+        ),
+        _record(
+            "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            malformed,
+            loaded_at="not-a-timestamp",
+        ),
+    ]
+
+    items = service_fixture.service.list_documents("cookie-token")
+
+    assert [item.document_id for item in items] == [
+        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    ]
+    assert items[0].loaded_at == "2026-08-15T03:00:00Z"
+    assert items[1].loaded_at == "2026-08-15T10:00:00+08:00"
+    assert items[2].loaded_at is None
+    assert "not-a-timestamp" not in caplog.text
+
+
 def test_list_documents_skips_reparse_source(service_fixture, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -267,6 +319,80 @@ def test_delete_document_coordinates_then_invalidates_exact_same_user_selection(
     assert service_fixture.registry.clear_calls == [
         (service_fixture.user_id, document_id)
     ]
+
+
+def test_delete_preflights_every_duplicate_source_before_assistant_or_clear(
+    service_fixture,
+    tmp_path,
+):
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    escaping_old = tmp_path / "outside" / "old.md"
+    escaping_old.parent.mkdir()
+    escaping_old.write_text("outside", encoding="utf-8")
+    safe_latest = service_fixture.paths.documents / "latest.md"
+    safe_latest.write_text("safe", encoding="utf-8")
+    service_fixture.history.documents = [
+        _record(document_id, escaping_old),
+        _record(document_id, safe_latest),
+    ]
+
+    with pytest.raises(DocumentDeleteFailedError):
+        service_fixture.service.delete_document("cookie-token", document_id)
+
+    service_fixture.assistant.delete_document.assert_not_called()
+    assert service_fixture.registry.clear_calls == []
+
+
+def test_delete_rejects_structured_partial_result_without_clearing_selection(
+    service_fixture,
+):
+    target = service_fixture.paths.documents / "target.md"
+    target.write_text("target", encoding="utf-8")
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    service_fixture.history.documents = [_record(document_id, target)]
+    service_fixture.assistant.delete_document.side_effect = None
+    service_fixture.assistant.delete_document.return_value = DocumentDeleteResult(
+        document_id=document_id,
+        rag_message="partial",
+        documents_removed=1,
+        questions_removed=0,
+        skipped_source_files=1,
+    )
+
+    with pytest.raises(DocumentDeleteFailedError):
+        service_fixture.service.delete_document("cookie-token", document_id)
+
+    assert service_fixture.registry.clear_calls == []
+
+
+@pytest.mark.parametrize(
+    ("returned_id", "documents_removed"),
+    [
+        ("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 1),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 0),
+    ],
+)
+def test_delete_rejects_mismatched_or_zero_removal_result(
+    service_fixture,
+    returned_id,
+    documents_removed,
+):
+    target = service_fixture.paths.documents / "target.md"
+    target.write_text("target", encoding="utf-8")
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    service_fixture.history.documents = [_record(document_id, target)]
+    service_fixture.assistant.delete_document.side_effect = None
+    service_fixture.assistant.delete_document.return_value = DocumentDeleteResult(
+        document_id=returned_id,
+        rag_message="deleted",
+        documents_removed=documents_removed,
+        questions_removed=0,
+    )
+
+    with pytest.raises(DocumentDeleteFailedError):
+        service_fixture.service.delete_document("cookie-token", document_id)
+
+    assert service_fixture.registry.clear_calls == []
 
 
 @pytest.mark.parametrize("records", [[], [{"document_id": "other-document"}]])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -52,7 +53,10 @@ class DocumentLibraryService:
 
         dated = sorted(
             (item for item in items if item.loaded_at is not None),
-            key=lambda item: (item.loaded_at, item.document_id),
+            key=lambda item: (
+                self._parse_loaded_at(item.loaded_at),
+                item.document_id,
+            ),
             reverse=True,
         )
         undated = sorted(
@@ -66,20 +70,40 @@ class DocumentLibraryService:
         user_id = str(session.user_id)
         with session.runtime.lock:
             history = session.runtime.history.load()
-            record = self._latest_records(history.get("documents", [])).get(
-                document_id
-            )
+            records = history.get("documents", [])
+            record = self._latest_records(records).get(document_id)
             if record is None or self._project_record(user_id, record) is None:
                 raise DocumentNotFoundError()
+            try:
+                for related in records:
+                    if (
+                        isinstance(related, dict)
+                        and related.get("document_id") == document_id
+                    ):
+                        raw_path = related["document_path"]
+                        if not isinstance(raw_path, str) or not raw_path.strip():
+                            raise ValueError("invalid document source path")
+                        self._safe_document_path(user_id, raw_path)
+            except (KeyError, OSError, TypeError, ValueError):
+                logger.warning("document deletion source preflight failed")
+                raise DocumentDeleteFailedError() from None
             if self.import_service.has_active_task_for_document(
                 user_id, document_id
             ):
                 raise DocumentImportActiveError()
             try:
-                session.assistant.delete_document(document_id)
+                result = session.assistant.delete_document(document_id)
             except Exception:
                 logger.warning("coordinated document deletion failed")
                 raise DocumentDeleteFailedError() from None
+            if (
+                getattr(result, "document_id", None) != document_id
+                or not isinstance(getattr(result, "documents_removed", None), int)
+                or result.documents_removed < 1
+                or getattr(result, "skipped_source_files", None) != 0
+            ):
+                logger.warning("coordinated document deletion was incomplete")
+                raise DocumentDeleteFailedError()
 
         try:
             self.session_registry.clear_document_selection(user_id, document_id)
@@ -123,6 +147,12 @@ class DocumentLibraryService:
             loaded_at = record.get("loaded_at")
             if not isinstance(loaded_at, str) or not loaded_at.strip():
                 loaded_at = None
+            else:
+                try:
+                    self._parse_loaded_at(loaded_at)
+                except ValueError:
+                    logger.warning("invalid document loaded_at was ignored")
+                    loaded_at = None
             try:
                 size_bytes = source.stat().st_size if source.is_file() else None
             except OSError:
@@ -137,6 +167,17 @@ class DocumentLibraryService:
         except (KeyError, OSError, TypeError, ValueError):
             logger.warning("skipping malformed document history record")
             return None
+
+    @staticmethod
+    def _parse_loaded_at(value: str) -> datetime:
+        normalized = f"{value[:-1]}+00:00" if value.endswith(("Z", "z")) else value
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            raise ValueError("loaded_at must be ISO-8601") from None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("loaded_at must include a timezone")
+        return parsed.astimezone(timezone.utc)
 
     def _safe_document_path(self, user_id: str, value: str) -> Path:
         source = Path(value)

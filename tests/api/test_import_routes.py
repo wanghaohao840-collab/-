@@ -501,6 +501,21 @@ def test_submit_maps_limit_and_staging_failures_without_raw_details(
     assert "private" not in response.text.lower()
 
 
+def test_submit_propagates_session_expiry_to_existing_401_handler(
+    client,
+    services,
+):
+    services.import_service.error = InvalidSessionError("expired between checks")
+
+    response = client.post(
+        "/api/v1/imports",
+        headers=_auth(client),
+        files=[("files", ("one.md", b"one", "text/markdown"))],
+    )
+
+    _error(response, 401, "invalid_session")
+
+
 @pytest.mark.parametrize(
     ("url", "error", "status", "code"),
     [
