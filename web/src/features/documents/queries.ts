@@ -42,6 +42,13 @@ function taskStatuses(batches: ImportBatch[]): Map<string, ImportStatus> {
 }
 
 function cacheServerBatch(queryClient: QueryClient, serverBatch: ImportBatch) {
+  const importsQuery = queryClient.getQueryCache().find({
+    queryKey: IMPORTS_QUERY_KEY,
+    exact: true,
+  });
+  if (!importsQuery || importsQuery.getObserversCount() === 0) {
+    return;
+  }
   queryClient.setQueryData<ImportBatch[]>(IMPORTS_QUERY_KEY, (current = []) => {
     const index = current.findIndex(
       (batch) => batch.batch_id === serverBatch.batch_id,

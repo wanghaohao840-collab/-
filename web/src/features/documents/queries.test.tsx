@@ -107,7 +107,21 @@ function UserDataHarness() {
 function MutationHarness() {
   const mutations = useDocumentMutations();
   return (
+    <button
+      type="button"
+      onClick={() => mutations.removeDocument.mutate({ documentId: "document-1" })}
+    >
+      删除
+    </button>
+  );
+}
+
+function ImportMutationHarness() {
+  const imports = useImportsQuery();
+  const mutations = useDocumentMutations();
+  return (
     <>
+      <output>{imports.data?.[0]?.tasks[0]?.original_name ?? "loading"}</output>
       <button
         type="button"
         onClick={() => mutations.retryTask.mutate({ batchId: "batch-1", taskId: "task-1" })}
@@ -116,12 +130,20 @@ function MutationHarness() {
       </button>
       <button
         type="button"
-        onClick={() => mutations.removeDocument.mutate({ documentId: "document-1" })}
+        onClick={() => mutations.submit.mutate([new File(["notes"], "notes.md")])}
       >
-        删除
+        提交
       </button>
     </>
   );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
 }
 
 describe("document query contracts", () => {
@@ -275,14 +297,19 @@ describe("document query contracts", () => {
 
   it("writes a mutation's server batch into cache before invalidating imports", async () => {
     const authoritative = batch("queued");
-    requestMock.mockResolvedValue(authoritative);
+    requestMock.mockImplementation((url: string) => {
+      if (url === "/api/v1/imports?limit=20") {
+        return Promise.resolve([batch("failed")]);
+      }
+      return Promise.resolve(authoritative);
+    });
     const client = createClient();
-    client.setQueryData(IMPORTS_QUERY_KEY, [batch("failed")]);
     const invalidate = vi.spyOn(client, "invalidateQueries").mockResolvedValue();
 
-    render(<MutationHarness />, {
+    render(<ImportMutationHarness />, {
       wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
     });
+    expect(await screen.findByText("notes.md")).toBeVisible();
     screen.getByRole("button", { name: "重试" }).click();
 
     await waitFor(() => {
@@ -291,6 +318,56 @@ describe("document query contracts", () => {
       );
     });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: IMPORTS_QUERY_KEY });
+  });
+
+  it("does not resurrect user A imports when a pending mutation resolves after unmount", async () => {
+    let user: "a" | "b" = "a";
+    const lateBatch = batch("queued");
+    lateBatch.batch_id = "late-user-a";
+    lateBatch.tasks[0]!.original_name = "late-user-a.md";
+    const pending = deferred<ImportBatch>();
+    requestMock.mockImplementation((url: string) => {
+      if (url === "/api/v1/imports?limit=20") {
+        const current = batch("failed");
+        current.batch_id = `batch-${user}`;
+        current.tasks[0]!.original_name = `user-${user}-import.md`;
+        return Promise.resolve([current]);
+      }
+      if (url === "/api/v1/imports") {
+        return pending.promise;
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    const client = createClient();
+    const first = render(<ImportMutationHarness />, {
+      wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
+    });
+    expect(await screen.findByText("user-a-import.md")).toBeVisible();
+    screen.getByRole("button", { name: "提交" }).click();
+    await waitFor(() => {
+      expect(requestMock).toHaveBeenCalledWith(
+        "/api/v1/imports",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    first.unmount();
+    await waitFor(() => {
+      expect(client.getQueryData(IMPORTS_QUERY_KEY)).toBeUndefined();
+    });
+    await act(async () => {
+      pending.resolve(lateBatch);
+      await pending.promise;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.getQueryData(IMPORTS_QUERY_KEY)).toBeUndefined();
+
+    user = "b";
+    render(<ImportMutationHarness />, {
+      wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
+    });
+    expect(screen.queryByText("late-user-a.md")).not.toBeInTheDocument();
+    expect(await screen.findByText("user-b-import.md")).toBeVisible();
   });
 
   it.each([
