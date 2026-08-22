@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-04"
 title: "Expose authenticated document-library APIs"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-03"]
-base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
-owner: "unassigned"
+base-commit: "6d9ed6f19e1f97082a9e85d5b5da448cfa7f6f29"
+owner: "completed"
 ---
 
 # Task Packet: Expose authenticated document-library APIs
@@ -143,4 +143,65 @@ Stop on any standard reality conflict, incomplete Packet 03, need to parse user 
 
 ## Implementation handoff
 
-Replace with the template handoff, including endpoint matrix/status evidence, service/lifecycle tests, response-field scans, scope confirmation, deviations/risks and commit.
+- Status: done; ready for independent review
+- Files changed:
+  - `app/document_library.py`
+  - `assistants/pdf_learning_assistant.py`
+  - `app/session.py`
+  - `app/bootstrap.py`
+  - `api/dependencies.py`
+  - `api/schemas/documents.py`
+  - `api/schemas/imports.py`
+  - `api/routes/documents.py`
+  - `api/routes/imports.py`
+  - `api/app.py`
+  - `tests/test_document_library_service.py`
+  - `tests/test_app_bootstrap.py`
+  - `tests/api/test_document_routes.py`
+  - `tests/api/test_import_routes.py`
+- Changed interfaces:
+  - Added immutable `DocumentLibraryItem`, safe typed document errors and authenticated `DocumentLibraryService.list_documents()` / `delete_document()`.
+  - Added immutable structured `DocumentDeleteResult` and public `PDFLearningAssistant.delete_document(document_id)`; the existing Gradio wrapper delegates and retains display formatting.
+  - Added `SessionRegistry.clear_document_selection(user_id, document_id) -> int`.
+  - Added exactly one `ApplicationServices.document_library` instance plus request-state getters for document/import services.
+  - Added safe document/import Pydantic projections and both API routers.
+- Endpoint matrix:
+
+  | Endpoint | Success | Authentication / mutation guard | Stable domain failures |
+  |---|---:|---|---|
+  | `GET /api/v1/documents` | 200 | Cookie | invalid session 401 |
+  | `DELETE /api/v1/documents/{document_id}` | 204 | Cookie + CSRF | not found 404; active import 409; delete failure 500 retryable |
+  | `POST /api/v1/imports` | 202 | Cookie + CSRF | unsupported/empty/count 422; byte limits 413; stage failure 500 retryable |
+  | `GET /api/v1/imports?limit=20` | 200 | Cookie; limit 1–50 | validation 422 |
+  | `GET /api/v1/imports/{batch_id}` | 200 | Cookie | batch not found 404 |
+  | `POST /api/v1/imports/{batch_id}/tasks/{task_id}/retry` | 200 | Cookie + CSRF | task/membership not found 404; not retryable 409 |
+  | `POST /api/v1/imports/{batch_id}/retry-failed` | 200 | Cookie + CSRF | batch not found 404 |
+  | `POST /api/v1/imports/{batch_id}/tasks/{task_id}/cancel` | 200 | Cookie + CSRF | task/membership not found 404; not cancellable 409 |
+- Acceptance criteria:
+  - [x] Session-derived user scope, shared Runtime lock and fresh persisted history are asserted.
+  - [x] Latest duplicate wins; nullable metadata, descending/null ordering and malformed/escaping/Windows-junction records are covered.
+  - [x] Exact coordinated RAG/history/question/formal-file deletion, exact active-import conflict, safe failure and same-user multi-session invalidation are covered.
+  - [x] Service identity is stable and worker start/stop counts remain one each.
+  - [x] Every endpoint has success/authentication coverage; every mutation has missing/forged CSRF coverage; UUID, query and multipart validation are covered.
+  - [x] Actual repeated `files` multipart returns 202; real streamed byte limits return stable 413 errors.
+  - [x] List/get/retry/retry-failed/cancel enforce user scope and nested membership with indistinguishable 404 behavior.
+  - [x] Document and import response-field scans allow only the accepted DTO keys and exclude user/path/session/CSRF/internal fields.
+  - [x] Existing auth, lifecycle, `/legacy`, assets, SPA Accept/fallback and unknown `/api/*` tests pass.
+- Verification:
+  - Baseline `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_app_bootstrap.py tests/api --basetemp=.runtime/pytest-document-api-baseline` — PASS, `45 passed in 45.86s`.
+  - Collection RED with the three new focused files — expected failure, `2 errors` because `app.document_library` did not exist.
+  - Behavior RED after public type skeleton — expected failure, `65 failed, 1 skipped in 7.22s`; services were unimplemented and routes absent.
+  - Focused GREEN after implementation — `65 passed, 1 skipped in 5.00s`; the host-disabled symlink case was then replaced by a real Windows junction assertion.
+  - Reparse-focused GREEN — `10 passed in 2.06s`.
+  - Final required regression `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_document_library_service.py tests/test_app_bootstrap.py tests/api --basetemp=.runtime/pytest-document-api-final` — PASS, `114 passed in 43.33s`.
+  - Existing Assistant/worker delete compatibility — `8 passed, 54 deselected in 8.36s`.
+  - Existing real multi-user delete/clear integration — `2 passed, 10 deselected in 15.93s`.
+  - `git diff --check` — PASS; line-ending notices only.
+- Response-field scan:
+  - Documents contain only `document_id`, `name`, `file_suffix`, `size_bytes`, `loaded_at`, `status`.
+  - Import batches contain only `batch_id`, timestamps, accepted counts and accepted task DTOs; `user_id`, `staged_relative_path`, absolute/formal/temp paths, Cookie/CSRF values, raw exceptions and contents are not projected.
+- Scope confirmation:
+  - Implementation commit changes only the fourteen production/test files allowed by Packet 04. Packet 03/import internals, dependencies, frontend/design/E2E, RAG/Memory internals, deployment, `/legacy`, assets and SPA fallback are unchanged.
+- Deviations: None.
+- Residual risks: None known within Packet 04; independent review and mandatory final cross-packet integration review remain pending.
+- Commit: `dcd64cd` (`feat: add document library APIs`).
