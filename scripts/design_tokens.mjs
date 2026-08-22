@@ -87,7 +87,8 @@ export function writeCss(inputPath, outputPath) {
 }
 
 export function checkCss(inputPath, outputPath) {
-  return readFileSync(outputPath, "utf8") === renderCss(loadTokens(inputPath));
+  const actual = readFileSync(outputPath, "utf8").replaceAll("\r\n", "\n");
+  return actual === renderCss(loadTokens(inputPath));
 }
 
 function main(args) {

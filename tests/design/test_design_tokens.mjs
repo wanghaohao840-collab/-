@@ -95,7 +95,7 @@ test("rejects invalid or incomplete shadows with token paths", () => {
   );
 });
 
-test("CLI --check accepts matching CSS and rejects stale output", () => {
+test("CLI --check accepts matching LF or CRLF CSS and rejects stale output", () => {
   const directory = mkdtempSync(join(tmpdir(), "design-tokens-"));
   const input = join(directory, "tokens.json");
   const output = join(directory, "tokens.css");
@@ -107,6 +107,11 @@ test("CLI --check accepts matching CSS and rejects stale output", () => {
     const success = spawnSync(process.execPath, ["scripts/design_tokens.mjs", "--check", input, output]);
     assert.equal(success.status, 0, success.stderr.toString());
     assert.match(readFileSync(output, "utf8"), /--color-brand: #287A60;/);
+
+    const crlf = readFileSync(output, "utf8").replaceAll("\n", "\r\n");
+    writeFileSync(output, crlf, "utf8");
+    const windows = spawnSync(process.execPath, ["scripts/design_tokens.mjs", "--check", input, output]);
+    assert.equal(windows.status, 0, windows.stderr.toString());
 
     writeFileSync(output, "stale\n", "utf8");
     const stale = spawnSync(process.execPath, ["scripts/design_tokens.mjs", "--check", input, output]);
