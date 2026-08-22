@@ -1,7 +1,7 @@
 ---
 id: "document-library-vertical-slice-01"
 title: "Create the verified Penpot document-library source"
-status: "blocked"
+status: "done"
 parallel-safe: true
 depends-on: []
 base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
@@ -107,12 +107,12 @@ Follow Task 1 in the source plan exactly. Write the failing contract first. Befo
 
 ## Acceptance criteria
 
-- [ ] Seven named boards exist in the correct pages with exact viewport dimensions.
-- [ ] All new repeated copies are linked; broken link, text overflow and actual-bounds overflow counts are zero.
-- [ ] Every mobile interactive target is at least 44×44.
-- [ ] Seven direct PNGs decode to the expected dimensions and pass visual inspection.
-- [ ] Handoff names all IDs, exports, states, responsive rules and non-production sample boundary.
-- [ ] Focused contract and `git diff --check` pass.
+- [x] Seven named boards exist in the correct pages with exact viewport dimensions.
+- [x] All new repeated copies are linked; broken link, text overflow and actual-bounds overflow counts are zero.
+- [x] Every mobile interactive target is at least 44×44.
+- [x] Seven direct PNGs decode to the expected dimensions and pass visual inspection.
+- [x] Handoff names all IDs, exports, states, responsive rules and non-production sample boundary.
+- [x] Focused contract and `git diff --check` pass.
 
 ## Test and verification commands
 
@@ -133,51 +133,47 @@ Stop and report `blocked` if any standard reality-conflict condition in `docs/ag
 ## Implementation handoff
 
 - Packet: `document-library-vertical-slice-01`
-- Status: `blocked`
+- Status: `done`
 - Delivered:
-  - Verified the repository prerequisite state and stopped before implementation because this session exposes no Penpot MCP/connector capable of fresh-reading or writing the required file.
+  - Fresh-read the expected Penpot file, seven pages, seven Task 1 boards and three `DocumentLibrary` component masters through the Penpot MCP connector.
+  - Preserved the prior design and made only three in-scope one-pixel title-height corrections on the Empty, Importing and Partial failure boards; no existing shared master was edited.
+  - Refreshed all seven direct PNG exports from final Penpot revision `115` and completed the ID-, state-, responsive-, interaction- and accessibility-complete handoff.
+  - Added the focused repository contract for exact export names, PNG set and decoded dimensions.
 - Files changed:
-  - `docs/agent-workflow/task-packets/2026-08-15-document-library-vertical-slice/01-penpot-design-source.md` — records the blocked handoff and reality conflict.
+  - `docs/product-ui/penpot-handoff.md`
+  - `docs/product-ui/reference/penpot/desktop-documents.png`
+  - `docs/product-ui/reference/penpot/tablet-documents.png`
+  - `docs/product-ui/reference/penpot/mobile-documents.png`
+  - `docs/product-ui/reference/penpot/documents-empty.png`
+  - `docs/product-ui/reference/penpot/documents-importing.png`
+  - `docs/product-ui/reference/penpot/documents-partial-failure.png`
+  - `docs/product-ui/reference/penpot/mobile-import-sheet.png`
+  - `tests/deploy/test_document_library_contract.py`
+  - `docs/agent-workflow/task-packets/2026-08-15-document-library-vertical-slice/01-penpot-design-source.md`
 - Interfaces added or changed:
-  - `none`
+  - Penpot boards: the seven exact named boards and IDs recorded in `docs/product-ui/penpot-handoff.md`.
+  - Penpot components: `DocumentRow`, `ImportTaskRow` and `FilePicker` component/main IDs and token bindings recorded in the handoff.
+  - Repository contract: `tests/deploy/test_document_library_contract.py` owns the exact seven-export set and dimensions.
 - Acceptance evidence:
-  - [ ] Seven named boards exist — not attempted because the Penpot connector prerequisite is unavailable.
-  - [ ] Direct PNG exports and ID-complete handoff exist — not attempted because board identity cannot be verified or safely written.
-  - [ ] Focused contract passes — no contract was written because TDD implementation may not begin past the external-prerequisite stop condition.
+  - [x] Exact names/pages/dimensions — fresh read found one board per required name at 1440 × 1024, 1024 × 768 or 390 × 844 as specified.
+  - [x] Links and geometry — component-root counts are 6/6/6/4/7/5/5 with zero broken roots; visible text-bounds and actual-bounds overflow are zero on all boards and new masters.
+  - [x] Mobile targets — 13 named targets on Complete and 10 on Import sheet, with zero below 44 × 44.
+  - [x] Exports — seven original-size PNGs decoded in the contract and were visually inspected for clipping, alignment, missing glyphs and state clarity.
+  - [x] Handoff — names final revision `115`, all board/component IDs, export paths, state semantics, responsive rules, accessibility/interaction behavior and the non-production sample boundary.
 - Verification:
-  - `git rev-parse HEAD` — PASS (`7ae7314d09acfddf91653db644649fa0b55add9d`, the planning commit specified by the assignment)
-  - `git status --short` — PASS (clean before this blocked-report update)
-  - `ALL_TOOLS.filter(tool => /penpot/i.test(tool.name))` — FAIL prerequisite (zero Penpot tools exposed)
-  - `list_mcp_resources({})` and `list_mcp_resource_templates({})` — FAIL prerequisite (no Penpot server/resource; no resource templates)
+  - Penpot MCP fresh-read at revision `115` — PASS (seven unique boards, exact IDs/pages/dimensions, zero broken component roots, zero visible text/actual overflow, zero undersized mobile targets).
+  - Direct Penpot export plus visual inspection — PASS (seven files; no clipping, malformed alignment, missing glyphs or unclear state).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_document_library_contract.py --basetemp=.runtime/pytest-penpot-documents-red` — expected RED (`1 failed, 2 passed`; handoff names absent).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_document_library_contract.py --basetemp=.runtime/pytest-penpot-documents` — PASS (`3 passed`).
+  - Task 1 allowed-path scope check — PASS.
+  - Credential-pattern scan over textual Task 1 artifacts — PASS.
+  - `git diff --check` — PASS.
 - Scope confirmation:
   - changed only allowed files: yes
   - forbidden areas untouched: yes
 - Deviations:
-  - `none`; implementation stopped exactly at the connector-unavailable stop condition.
+  - `none`
 - Residual risks/follow-ups:
-  - Connect an authenticated Penpot MCP session with file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c` open, then return this packet to `ready` only after the file and all seven page IDs can be fresh-read.
+  - Task 1 is ready for independent review but is not review-clean until the mandatory reviewer gate accepts the commit.
 - Commit:
-  - `not committed`
-
-## Reality-conflict report
-
-- Packet: `document-library-vertical-slice-01`
-- Status: blocked
-- Expected by packet:
-  - A user-authenticated Penpot tab with an MCP plugin connected and target file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c` open.
-  - A connector that can fresh-read the active file, the seven recorded page IDs, component IDs and parent IDs before every write.
-- Observed in repository:
-  - `docs/product-ui/penpot-handoff.md:8-24` records the expected file ID and all seven expected page IDs.
-  - Current tool discovery returned zero tool names containing `penpot`.
-  - Current MCP discovery returned no Penpot server or resource, and no MCP resource templates.
-  - The available recommended-plugin list contains no Penpot plugin, so no approved install path is available in this session.
-- Impact:
-  - The active file/page/component/parent identities cannot be asserted. Continuing would require guessing IDs or substituting a non-Penpot authoring path, both explicitly forbidden by this packet.
-- Work completed before pause:
-  - Read `PROJECT_KNOWLEDGE.md`, the assigned packet, workflow protocol and task-packet template.
-  - Verified HEAD `7ae7314d09acfddf91653db644649fa0b55add9d` and a clean initial worktree.
-  - No Penpot nodes, handoff documentation, tests or PNG exports were created or modified.
-- Recommended resolution:
-  - revise packet
-- Decision required:
-  - Expose/connect the Penpot MCP connector in this Codex session with the authenticated target file open, then confirm the packet may be returned to `ready` and resumed.
+  - This Task 1 delivery commit; exact hash is recorded in `.superpowers/sdd/task-1-report.md` and the final handoff response after commit creation.

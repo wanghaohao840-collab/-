@@ -2,6 +2,8 @@
 
 Validated on 2026-08-11 against Penpot 2.17.1 at file revision `89`. Penpot is the sole design source for this product UI; the former design file is an archive only.
 
+The document-library vertical slice was fresh-read and directly exported on 2026-08-22 against Penpot 2.17.2 at final file revision `115`.
+
 ## Source file
 
 - File: `知研 · 智能文档学习助手`
@@ -80,6 +82,53 @@ Fresh readback found 14 linked component copies on Desktop Login, 12 on Tablet L
 | Session expired | 1440 × 1024 | `9b1e7a6b-703c-8060-8008-70776404ef6f` | [`session-expired.png`](reference/penpot/session-expired.png) |
 
 The seven exports were generated directly from these boards at their original dimensions and visually checked for clipping, overflow, alignment, contrast, and missing glyphs. The three Login exports were refreshed after the responsive field cleanup and contain no remember control.
+
+## Document-library vertical slice
+
+The following top-level boards are the implementation authority for the document-library slice. The page ID identifies the owning Penpot page; the board ID is the direct-export source.
+
+| Board | Page / page ID | Viewport | Penpot board ID | Direct export |
+|---|---|---:|---|---|
+| `Desktop / Documents / Complete` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `f35db4ee-075c-8075-8008-7c1fd37b7550` | [`desktop-documents.png`](reference/penpot/desktop-documents.png) |
+| `Tablet / Documents / Complete` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `f35db4ee-075c-8075-8008-7c1ff9755c8f` | [`tablet-documents.png`](reference/penpot/tablet-documents.png) |
+| `Mobile / Documents / Complete` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `f35db4ee-075c-8075-8008-7c203fbd929a` | [`mobile-documents.png`](reference/penpot/mobile-documents.png) |
+| `State / Documents / Empty` | `05 States` / `9b1e7a6b-703c-8060-8008-7071d0888e76` | 1440 × 1024 | `f35db4ee-075c-8075-8008-7c20be8943e5` | [`documents-empty.png`](reference/penpot/documents-empty.png) |
+| `State / Documents / Importing` | `05 States` / `9b1e7a6b-703c-8060-8008-7071d0888e76` | 1440 × 1024 | `f35db4ee-075c-8075-8008-7c210d9ab874` | [`documents-importing.png`](reference/penpot/documents-importing.png) |
+| `State / Documents / Partial failure` | `05 States` / `9b1e7a6b-703c-8060-8008-7071d0888e76` | 1440 × 1024 | `f35db4ee-075c-8075-8008-7c214b03b87f` | [`documents-partial-failure.png`](reference/penpot/documents-partial-failure.png) |
+| `Mobile / Documents / Import sheet` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `f35db4ee-075c-8075-8008-7c207f34321c` | [`mobile-import-sheet.png`](reference/penpot/mobile-import-sheet.png) |
+
+### Document-library components
+
+These local library components live on `01 Components` (`9b1e7a6b-703c-8060-8008-7071c343b8c2`) under the `DocumentLibrary` path. The component ID is used to create linked instances; the main shape ID is the editable source.
+
+| Component | Component ID | Main shape ID | Source size | Bound tokens |
+|---|---|---|---:|---|
+| `DocumentRow` | `f35db4ee-075c-8075-8008-7c1eea45d28f` | `f35db4ee-075c-8075-8008-7c1ee50626f5` | 1080 × 84 | `color.border`, `color.brand.100`, `color.brand.700`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill` |
+| `ImportTaskRow` | `f35db4ee-075c-8075-8008-7c1eefe300f4` | `f35db4ee-075c-8075-8008-7c1eea61d96f` | 1080 × 96 | `color.border`, `color.brand.100`, `color.brand.600`, `color.brand.700`, `color.surface`, `color.text.primary`, `radius.md`, `radius.pill`, `space.2` |
+| `FilePicker` | `f35db4ee-075c-8075-8008-7c1ef1831cf3` | `f35db4ee-075c-8075-8008-7c1eeffad986` | 560 × 180 | `color.border`, `color.brand.600`, `color.surface`, `color.text.primary`, `radius.md`, `space.2` |
+
+`DocumentRow` is ordered file icon → filename/metadata → textual status badge → 44 × 44 delete action. `ImportTaskRow` is ordered file icon → filename/stage → textual status badge → 44 px-high action. `FilePicker` is ordered title → supported-format/limit copy → 44 px-high browse action. Instances may resize horizontally for their viewport, but this reading order and the linked component identity must remain intact.
+
+### State and data semantics
+
+- Complete: list-first layout with filename filtering, a primary import action, status text and per-row delete actions. Repeated filenames are allowed; `document_id`, not the visible filename, remains the identity. Most-recent import sorts first.
+- Empty: show “还没有文档”, “导入 PDF、TXT、Markdown 或 DOCX，开始构建你的知识库。” and the import action. The limit note remains “每批最多 20 个文件 · 单文件 100 MiB · 每批 500 MiB”. Do not replace this state with fabricated counts or statistics.
+- Importing: desktop/tablet use the Dialog pattern. File selection creates persistent per-file tasks immediately; progress is announced as processing state, and one file may succeed or fail independently of another. Cancel applies to the addressed task; “继续导入” starts another selection without discarding current progress.
+- Partial failure: successful documents remain usable. Each failed task exposes its text reason and a retry action, with a separate “重试全部失败项” action. The summary uses text and iconography as well as color. User-visible failures must not expose local paths, user IDs, credentials, stack traces or raw exceptions.
+- Mobile import: use the bottom-sheet board, not a centered dialog. “开始导入” and “取消” are full-width 342 × 44 controls; the close control is 44 × 44. Opening moves focus into the sheet, `Escape` closes it, and focus returns to the “导入文档” trigger.
+
+All filenames, dates, sizes, progress values and task outcomes shown on these boards—including `RAG 系统设计说明.pdf`, `research-notes.md`, `scanned-contract.pdf` and `meeting-notes.docx`—are illustrative design samples only. They are not fixtures, seed records, fallback content, analytics, or permission to fabricate production data. Production renders only records returned for the authenticated user.
+
+### Responsive, interaction and accessibility rules
+
+- Desktop keeps the 248 px sidebar and 64 px top bar. The document content begins at `x=296`; the list panel is 1096 px wide, the name filter is 420 px wide, and the import action is 180 × 44.
+- Tablet keeps the 72 px rail and 64 px top bar. The list panel is 856 px wide, the name filter is 360 px wide, and the import action is 160 × 44. Import follows the same modal Dialog semantics as desktop while remaining within the tablet viewport.
+- Mobile uses one 342 px content column with the existing 64 px bottom navigation. The filter is 342 × 70, the import action is 342 × 44, and document rows reflow to 310 × 84 inside the list panel. Import uses the 390 × 594 bottom sheet and the 342 × 196 `FilePicker` instance.
+- Keyboard order is page heading → import → filename filter → document/task rows and their actions. Use native list semantics for rows, an explicit label for the filename filter, and filename-qualified accessible names for destructive and retry actions.
+- File selection supports keyboard activation as well as drag/drop. Announce queued/running/progress/completed/failed/cancelled changes through a polite live region without moving focus. Busy state, failure and success remain understandable without color.
+- Every named interactive target on both mobile boards is at least 44 × 44. The bottom navigation targets are 78 × 64; visible focus treatment follows the existing 2 px ring contract.
+
+At revision `115`, fresh readback found 6/6/6 linked component roots on the desktop/tablet/mobile complete boards, 4 on empty, 7 on importing, 5 on partial failure and 5 on the mobile import sheet, with zero broken component-root links. Visible text-bounds overflow and actual-bounds overflow are zero on all seven boards and the three new component masters. The mobile complete and import-sheet audits found 13 and 10 named interactive targets respectively, with zero below 44 × 44. All seven PNGs were exported directly at original board size and visually checked for clipping, alignment, missing glyphs and state clarity. Browser output should match these boards except for the documented font-rendering differences below; no additional document-library deviation is approved.
 
 ## Responsive and navigation rules
 
