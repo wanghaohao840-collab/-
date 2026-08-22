@@ -8,5 +8,6 @@
 - Task 4: complete (commits `6d9ed6f..45959a5`, review clean after two corrective rounds; final GREEN `121 passed`)
 - Task 5: complete (implementation `9571ee9`; corrections through `3b22198`; final independent re-review approved with no findings; focused GREEN `36 passed`; final frontend `101 passed`; typecheck/lint/build, component map `6/6`, token and diff checks PASS)
 - Task 5a: complete (commits `67132d2`, `a291e79`; independent review approved; desktop card/halo pixel geometry matches Penpot; frontend `101/101`)
-- Task 6: in progress; functional `6/6` and document accessibility `6/6` already pass across three projects
+- Task 5b: in progress (remove unapproved terminal-success block from Complete state)
+- Task 6: waiting on Task 5b; functional `6/6`, accessibility `6/6`, and focused visual generation `6/6` pass, but snapshots remain unaccepted/untracked
 - Final integration review: pending

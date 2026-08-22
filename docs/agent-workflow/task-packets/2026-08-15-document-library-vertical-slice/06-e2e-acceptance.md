@@ -1,9 +1,9 @@
 ---
 id: "document-library-vertical-slice-06"
 title: "Verify the real vertical slice in three viewports"
-status: "in_progress"
+status: "waiting"
 parallel-safe: false
-depends-on: ["document-library-vertical-slice-05a"]
+depends-on: ["document-library-vertical-slice-05b"]
 base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
 owner: "unassigned"
 ---
@@ -147,3 +147,4 @@ Replace with template handoff, including exact totals per command/project, six s
 - Decision: Task 6 owns the acceptance-only update that moves the migration CTA assertion to `/qa`, which remains a `MigrationPage`. This preserves both the legacy redirect/CTA contract and the new `/documents` behavior.
 - Scope impact: `web/e2e/auth-shell.spec.ts` is added to the allowed files; production, fixtures, configuration and acceptance criteria are unchanged.
 - Visual conflict: the first desktop empty actual exposed unapproved structural differences from `documents-empty.png`. Corrective Packet `document-library-vertical-slice-05a` owns the production alignment; Task 6 resumes only after that packet is independently approved.
+- Complete-state conflict: focused visual generation exposed an extra terminal-success summary above the document list in all three viewports. Corrective Packet `document-library-vertical-slice-05b` removes that unapproved visual/semantic block while preserving active and failed imports.
