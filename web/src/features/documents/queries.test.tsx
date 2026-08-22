@@ -370,6 +370,65 @@ describe("document query contracts", () => {
     expect(await screen.findByText("user-b-import.md")).toBeVisible();
   });
 
+  it("does not write a late user A mutation into user B's replacement query", async () => {
+    let user: "a" | "b" = "a";
+    const lateBatch = batch("queued");
+    lateBatch.batch_id = "late-user-a";
+    lateBatch.tasks[0]!.original_name = "late-user-a.md";
+    const pending = deferred<ImportBatch>();
+    requestMock.mockImplementation((url: string) => {
+      if (url === "/api/v1/imports?limit=20") {
+        const current = batch("failed");
+        current.batch_id = `batch-${user}`;
+        current.tasks[0]!.original_name = `user-${user}-import.md`;
+        return Promise.resolve([current]);
+      }
+      if (url === "/api/v1/imports") {
+        return pending.promise;
+      }
+      return Promise.reject(new Error(`Unexpected request: ${url}`));
+    });
+    const client = createClient();
+    vi.spyOn(client, "invalidateQueries").mockResolvedValue();
+    const first = render(<ImportMutationHarness />, {
+      wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
+    });
+    expect(await screen.findByText("user-a-import.md")).toBeVisible();
+    screen.getByRole("button", { name: "提交" }).click();
+    await waitFor(() => {
+      expect(requestMock).toHaveBeenCalledWith(
+        "/api/v1/imports",
+        expect.objectContaining({ method: "POST" }),
+      );
+    });
+
+    first.unmount();
+    await waitFor(() => {
+      expect(client.getQueryData(IMPORTS_QUERY_KEY)).toBeUndefined();
+    });
+
+    user = "b";
+    render(<ImportMutationHarness />, {
+      wrapper: ({ children }) => <Wrapper client={client}>{children}</Wrapper>,
+    });
+    expect(await screen.findByText("user-b-import.md")).toBeVisible();
+    expect(
+      client.getQueryCache().find({ queryKey: IMPORTS_QUERY_KEY, exact: true })
+        ?.getObserversCount(),
+    ).toBe(1);
+
+    await act(async () => {
+      pending.resolve(lateBatch);
+      await pending.promise;
+    });
+    await waitFor(() => {
+      expect(client.getQueryData<ImportBatch[]>(IMPORTS_QUERY_KEY)?.[0]?.tasks[0]
+        ?.original_name).toBe("user-b-import.md");
+    });
+    expect(screen.getByText("user-b-import.md")).toBeVisible();
+    expect(screen.queryByText("late-user-a.md")).not.toBeInTheDocument();
+  });
+
   it.each([
     ["success", undefined],
     ["failure", new ApiError(500, "document_delete_failed", "文档删除失败，请重试")],

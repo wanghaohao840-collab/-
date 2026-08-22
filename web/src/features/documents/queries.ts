@@ -41,14 +41,16 @@ function taskStatuses(batches: ImportBatch[]): Map<string, ImportStatus> {
   );
 }
 
-function cacheServerBatch(queryClient: QueryClient, serverBatch: ImportBatch) {
-  const importsQuery = queryClient.getQueryCache().find({
+function findImportsQuery(queryClient: QueryClient) {
+  return queryClient.getQueryCache().find({
     queryKey: IMPORTS_QUERY_KEY,
     exact: true,
   });
-  if (!importsQuery || importsQuery.getObserversCount() === 0) {
-    return;
-  }
+}
+
+type ImportsQueryIdentity = ReturnType<typeof findImportsQuery>;
+
+function cacheServerBatch(queryClient: QueryClient, serverBatch: ImportBatch) {
   queryClient.setQueryData<ImportBatch[]>(IMPORTS_QUERY_KEY, (current = []) => {
     const index = current.findIndex(
       (batch) => batch.batch_id === serverBatch.batch_id,
@@ -126,28 +128,47 @@ export function useDocumentMutations() {
   const auth = useAuth();
   const queryClient = useQueryClient();
 
-  function acceptServerBatch(serverBatch: ImportBatch) {
-    cacheServerBatch(queryClient, serverBatch);
+  function captureImportsQuery() {
+    return findImportsQuery(queryClient);
+  }
+
+  function acceptServerBatch(
+    serverBatch: ImportBatch,
+    _variables: unknown,
+    originatingQuery: ImportsQueryIdentity,
+  ) {
+    const currentQuery = findImportsQuery(queryClient);
+    if (
+      originatingQuery &&
+      currentQuery === originatingQuery &&
+      currentQuery.getObserversCount() > 0
+    ) {
+      cacheServerBatch(queryClient, serverBatch);
+    }
     consumeInvalidations(queryClient, [IMPORTS_QUERY_KEY]);
   }
 
   const submit = useMutation({
     mutationFn: (files: File[]) => submitImports(auth.request, files),
+    onMutate: captureImportsQuery,
     onSuccess: acceptServerBatch,
   });
   const retryTask = useMutation({
     mutationFn: ({ batchId, taskId }: { batchId: string; taskId: string }) =>
       retryImportTask(auth.request, batchId, taskId),
+    onMutate: captureImportsQuery,
     onSuccess: acceptServerBatch,
   });
   const retryFailed = useMutation({
     mutationFn: ({ batchId }: { batchId: string }) =>
       retryFailedImports(auth.request, batchId),
+    onMutate: captureImportsQuery,
     onSuccess: acceptServerBatch,
   });
   const cancelTask = useMutation({
     mutationFn: ({ batchId, taskId }: { batchId: string; taskId: string }) =>
       cancelImportTask(auth.request, batchId, taskId),
+    onMutate: captureImportsQuery,
     onSuccess: acceptServerBatch,
   });
   const removeDocument = useMutation({
