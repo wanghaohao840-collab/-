@@ -2,14 +2,14 @@
 
 ## Status
 
-Done and ready for independent re-review from implementation base `1ac419a`. Initial implementation commit: `9571ee9`; independent-review correction commit: `2a6ea75`.
+Done and ready for independent re-review from implementation base `1ac419a`. Initial implementation: `9571ee9`; review corrections: `2a6ea75` and `aed0d5f`.
 
 ## Delivered
 
 - Real authenticated `/documents` route; the other five protected navigation routes still render the migration page.
 - Packet 04 public DTOs and exact document/import list, upload, retry, retry-all, cancel and delete routes through `useAuth().request<T>()`.
 - TanStack Query keys, active-only 2 s polling, focus refresh, active-to-success document invalidation, server-authoritative mutation cache writes and document/import refresh after delete success or failure.
-- Zero-lifetime inactive document/import caches prevent fixed query keys from retaining one authenticated user's data for the next user; TanStack visibility is the sole focus-refetch owner.
+- Zero-lifetime inactive document/import caches prevent fixed query keys from retaining one authenticated user's data for the next user. Late import mutations write their authoritative batch only while the exact imports query still has an active observer; TanStack visibility is the sole focus-refetch owner.
 - Loading, reloadable error, stale-data preservation, exact empty, complete/filter, active, partial-failure and terminal states with no production fake data.
 - Responsive 342/856/1096 px content, approved filter/action widths, desktop/tablet modal, 390 x 594 mobile bottom sheet and token-only styling.
 - Import validation for 20 files, 100 MiB each and 500 MiB per batch; real repeated-file `FormData` without a manual multipart content type.
@@ -31,10 +31,16 @@ Done and ready for independent re-review from implementation base `1ac419a`. Ini
 - Corrective GREEN: query, batch and page tests passed 28/28; all four Task 5 focused files passed 34/34.
 - Full corrected regression: ten files, 99 tests passed.
 
+### Second independent re-review correction
+
+- RED: a real deferred submit started with user A mounted, then resolved after A unmounted and the zero-lifetime imports query disappeared. `cacheServerBatch()` recreated the default-lifetime cache containing `late-user-a.md`.
+- GREEN: `cacheServerBatch()` locates the exact imports query and writes only when `getObserversCount() > 0`. The late result leaves the key absent and user B never renders A; the still-mounted authoritative cache-write regression remains green.
+- Corrected query suite: 9/9. All Task 5 focused tests: 35/35. Full frontend: 100/100.
+
 ## Verification
 
 - `npm ci` — PASS; 274 locked packages installed/audited.
-- `npm test` — PASS; 10 files, 99 tests.
+- `npm test` — PASS; 10 files, 100 tests.
 - `npm run typecheck` — PASS.
 - `npm run lint` — PASS.
 - `npm run build` — PASS; 114 modules transformed.
@@ -51,6 +57,8 @@ Done and ready for independent re-review from implementation base `1ac419a`. Ini
 - Confirmed the three component-map entries point to real exported components and exact verified Penpot identities.
 - Compared the corrective diff with `3ad5252`; it contains only seven Task 5-owned query, batch, page, style and focused-test paths.
 - Confirmed user-A document/import caches are removed before user-B mount, focus has one refetch owner, and repeated identical live summaries do not mutate the DOM.
+- Compared the second corrective diff with `265bb99`; production/test changes are limited to `queries.ts` and `queries.test.tsx`, and the three Task 5 handoff ledgers record the evidence.
+- Confirmed a late mutation cannot create an absent or inactive imports query, while a mounted page still receives the returned server batch before invalidation.
 
 ## Deviations and concerns
 
