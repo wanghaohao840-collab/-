@@ -1,9 +1,9 @@
 # Final Integration Review: document-library-vertical-slice
 
 - Source review: `REVIEW.md`
-- Reviewed commit/worktree: `14a990ed6e5260760411b2d7fad0c2ead7dda342`; clean tracked worktree before this review
+- Reviewed commit/worktree: `78f7f9d876ce2a42307ccb1c67898c92c1b33e8f`; clean tracked worktree before the accepted-review update
 - Review date: `2026-08-25`
-- Result: `changes-required`
+- Result: `accepted`
 
 ## Delivered packet inventory
 
@@ -17,13 +17,16 @@
 | `05a-empty-visual-alignment` | done | `67132d2` | empty-state presentation and focused tests | PASS |
 | `05b-complete-visual-alignment` | done | `e9707ee` | terminal-only batch presentation and tests | PASS |
 | `06-e2e-acceptance` | done | `af469ba` | real-server E2E, accessibility, six snapshots and contracts | PASS |
+| `07-commit-gate-integration-tracking` | done | `f909bc2` | import acceptance tracking test | PASS |
+| `08-track-golden-eval-fixture` | done | `50d0ee6` | narrow ignore exception and four-case golden JSON | PASS |
+| `09-refresh-nanoid-dev-lock` | done | `7f385f4` | frontend lockfile only | PASS |
 
 ## Combined diff reviewed
 
 - Files added: document service/API schemas and routes; cancellation/streaming tests; React document feature; Penpot and browser reference PNGs; E2E and workflow artifacts.
 - Files modified: import persistence/service/worker and both active RAG backends; Assistant/session/bootstrap/API wiring; React route/main entry; design mapping/handoff; acceptance contracts.
 - Pre-existing changes excluded from findings: the plan/review documentation itself and the newline-agnostic design-token checker correction at `1ac419a`; both remain regression-tested.
-- Review span: `git diff f90883e71d2fa73a7cb981b11478b68519d8ce80..14a990ed6e5260760411b2d7fad0c2ead7dda342` (83 paths; tracked worktree clean).
+- Review span: `git diff f90883e71d2fa73a7cb981b11478b68519d8ce80..78f7f9d876ce2a42307ccb1c67898c92c1b33e8f`; tracked worktree clean.
 
 ## Cross-packet interface audit
 
@@ -47,15 +50,15 @@
 | Responsive real-data `/documents` UI | 01, 05, 05a, 05b | frontend `102/102`, Penpot mapping and six browser baselines | pass |
 | Accessibility and mobile 44 px controls | 05, 06 | axe/focus/target E2E across three viewports | pass |
 | Real-server end-to-end closure and cleanup | 06 | Playwright `46 passed`, two existing conditional skips; zero owned runtime/process residue | pass |
-| Clean-clone/worktree repository-wide regression | corrective 07, 08 | full pytest exposed two integration-gate failures | fail |
-| Zero npm advisory requested for productization | corrective 09 | production audit clean; full audit reports dev-only `nanoid@3.3.17` | fail |
+| Clean-clone/worktree repository-wide regression | corrective 07, 08 | tracked golden fixture plus atomic-gate tracking; full pytest `948 passed` | pass |
+| Zero npm advisory requested for productization | corrective 09 | lock resolves `nanoid@3.3.18`; full and production audits zero | pass |
 
 ## Overlap and duplication audit
 
 - Conflicting edits: none. Packet dependencies serialize shared central files; corrective 05a/05b deliberately own narrow presentation deltas after Task 6 visual RED.
 - Duplicate responsibilities/helpers: none. There is one import repository/service/worker pipeline, one `DocumentLibraryService`, one set of API routers and one React query layer.
 - Overwritten packet work: none found in the combined diff or handoffs.
-- Missing central integration points: product wiring is complete. Two test-infrastructure integration points require corrective packets below.
+- Missing central integration points: none. The two test-infrastructure gaps found by the initial full regression are closed by corrective Packets 07 and 08.
 
 ## Architecture and invariant audit
 
@@ -73,10 +76,12 @@
 - `npx playwright test --workers=1` — PASS, `46 passed`, 2 existing conditional skips.
 - Focused document snapshots no-update — PASS, `6/6`; contract — PASS, `6/6`.
 - Penpot component map — PASS, `6/6`; token freshness and `git diff --check` PASS.
-- Full repository `pytest -q --basetemp=.runtime/pytest-final-integration` — FAIL, `946 passed, 7 skipped, 2 failed`:
-  - `tests/integration/test_batch_import_acceptance.py` does not record the new atomic commit-gate transition in its tracking repository.
-  - `tests/evals/test_multi_document_qa_golden.py` cannot find the ignored `evals/data/multi_document_qa.json` in this Git worktree.
-- `npm audit --omit=dev --json` — PASS, zero production findings; full `npm audit --json` — one dev-only high `nanoid@3.3.17` finding with a patch available.
+- Initial full repository run — expected corrective RED, `946 passed, 7 skipped, 2 failed`; findings became Packets 07 and 08.
+- Corrective focused verification — PASS: import acceptance `6/6`, golden evaluation `1/1`.
+- Final full repository `pytest -q --basetemp=.runtime/pytest-final-integration-rerun` — PASS, `948 passed, 7 skipped`.
+- `npm audit --json` and `npm audit --omit=dev --json` — PASS, zero findings after lock-only `nanoid@3.3.18` refresh.
+- Docker Desktop Linux daemon — PASS, `linux 29.6.2`.
+- Penpot MCP runtime — PASS, 4400/4401/4402 listening and 4402 plugin WebSocket established.
 
 ## Findings
 
@@ -86,14 +91,12 @@
 
 ### Changes required
 
-1. `document-library-vertical-slice-07`: update the integration tracking seam to observe successful `try_begin_committing()` transitions; do not change product code or weaken the expected stage order.
-2. `document-library-vertical-slice-08`: make the four-case multi-document golden JSON a tracked test fixture so clean clones and Git worktrees can run the test.
-3. `document-library-vertical-slice-09`: refresh only the frontend lockfile to a patched transitive `nanoid` and prove full npm audit plus frontend gates are clean.
+- None. Corrective Packets 07–09 are `done` and verified.
 
 ### Residual risks
 
-- Docker Desktop's Linux daemon is currently unavailable on `dockerDesktopLinuxEngine`; this is an external local-runtime prerequisite, not a document-library code defect.
+- None known within the accepted scope.
 
 ## Decision
 
-Result is `changes-required`. The product vertical slice itself passes focused backend, frontend, real-server, accessibility, visual, isolation and cleanup gates, but the mandatory repository-wide regression and full dependency audit are not clean. Corrective packets 07–09 are ready and non-overlapping; rerun this final review after all three are `done`.
+Result is `accepted`. All implementation and corrective packets are `done`; producer/consumer contracts, architecture, persistence, compatibility, isolation, failure/concurrency behavior, three-viewport visuals and runtime cleanup are verified. Focused gates, full frontend/E2E, the full `948`-test Python regression, full npm audit, Docker Linux daemon and Penpot MCP connection are green.

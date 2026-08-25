@@ -11,4 +11,4 @@
 - Task 5b: complete (implementation `e9707ee`; terminal-only import batches render no DOM; frontend `102/102`; typecheck/lint/build, component map `6/6`, token and diff checks PASS)
 - Task 6: complete (implementation `af469ba`; Python `227/227`, frontend `102/102`, E2E `46 passed` with 2 existing conditional skips; six reviewed no-update snapshots; process/runtime cleanup clean)
 - Corrective packets 07–09: complete (`f909bc2`, `50d0ee6`, `7f385f4`; focused tests and full npm audit green)
-- Final integration review: rerun pending
+- Final integration review: accepted (`948 passed`, frontend `102/102`, E2E `46 passed` + 2 existing conditional skips, npm audit 0, Docker Linux daemon and Penpot MCP green)
