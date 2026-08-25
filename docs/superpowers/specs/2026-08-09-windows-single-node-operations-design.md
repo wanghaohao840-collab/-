@@ -282,6 +282,38 @@ Enabled / Inbound / Allow / TCP 7860 / Private / LocalSubnet；环境文件 ACL 
 内部计算下一个日期、注册一次性任务后自行重排的方案；它引入跨月状态、自修改与崩溃
 恢复语义，不能替代 Task Scheduler 原生月度合同。
 
+#### 8.3.2 人为部分状态恢复与隐藏窗口执行
+
+2026-08-25 的复核确认，`PythonSelfAgent-LoginRecovery` 被用户主动删除，
+`PythonSelfAgent-Health` 与 `PythonSelfAgent-DailyBackup` 被用户主动禁用；这不是
+canary 或安装脚本造成的漂移。此后 canary 的生产不变性门禁不得假定开始时必有三个
+任务。它必须先对当时实际存在的精确 `PythonSelfAgent-*` 对象逐个导出 XML 并记录
+名称、状态与哈希，同时记录防火墙规则、环境文件字节与 ACL、备份根、Docker 容器
+身份与健康状态以及网络配置。canary 结束后，这一完整快照必须逐项相同，且随机
+canary 仍须经 provider 与 `schtasks` 双重证明不存在。快照只用于证明 canary 没有
+越界修改，不能把缺失或禁用的生产任务认定为安装成功。
+
+canary 通过后的生产安装负责从零个、两个、三个或四个目标任务的部分状态幂等收敛。
+成功条件仍是根路径下恰好四个精确任务、无额外 `PythonSelfAgent-*` 对象，且四个任务
+全部启用。每个持久化 XML 都必须明确验证任务级 `Settings/Enabled=true`；只检查
+provider 对象存在或触发器的 `Enabled` 字段不够。第二次安装必须保持相同四任务、
+一条防火墙规则和精确 ACL，不能产生重复对象。
+
+四个任务继续使用当前活动 WTS 用户、`Interactive` 与 `Highest`，以便访问同一用户
+会话中的 Docker Desktop；不改为 S4U、服务账户或“无论用户是否登录都运行”。每个
+任务的 `powershell.exe` action 在既有 `-NoProfile -NonInteractive -ExecutionPolicy
+Bypass -File ...` 参数中加入 `-WindowStyle Hidden`，默认在后台运行且不持续弹出控制台
+窗口。Task Scheduler 的任务可见性设置不用于替代该参数，因为隐藏任务本身不能保证
+隐藏 PowerShell 窗口。日志、状态文件和既有失败报告仍保留；本决定只改变交互窗口，
+不吞掉非零退出码，也不放宽安装器的持久化验证或通知合同。
+
+测试必须覆盖：任意合法部分状态经一次安装收敛为四个已启用任务；第二次安装保持
+幂等；任一任务持久化为 disabled 时安装失败且包装器不得写 success；四个 action 均
+包含且仅包含一个 `-WindowStyle Hidden`；不存在 S4U、保存密码、服务账户或仅设置任务
+`Hidden` 的替代实现。真实主机验收还必须独立导出四个任务 XML，验证任务级 Enabled、
+隐藏窗口参数、既定 action/trigger/principal/settings，并手动启动 LoginRecovery 与
+Health，确认无控制台弹窗且默认冒烟检查仍通过。
+
 ## 9. 备份、保留与恢复演练
 
 ### 9.1 Windows 冷备份
