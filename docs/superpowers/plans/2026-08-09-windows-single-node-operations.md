@@ -17,6 +17,7 @@
 - Run a cold backup daily at 03:00; retain 7 daily sets and 4 weekly sets.
 - Run an isolated restore drill on the first Sunday of each month at 04:00.
 - Run health checks every 5 minutes and bound login recovery to 180 seconds.
+- Run all four scheduled PowerShell actions as the active interactive WTS user with `Highest` and exactly one `-WindowStyle Hidden`; do not use S4U, saved credentials, or a service account.
 - Never commit, archive, print, or copy `deploy/.env` outside a temporary ACL-restricted drill file that is always deleted.
 - Do not run `git pull`, clean user changes, delete rollback data, or use `docker compose down --volumes`.
 - Use project `venv` for Python validation: `.\venv\Scripts\python.exe -m pytest`.
@@ -386,7 +387,7 @@ New-NetFirewallRule -DisplayName $firewallName -Direction Inbound -Action Allow 
     -Protocol TCP -LocalPort 7860 -Profile Private -RemoteAddress LocalSubnet
 ```
 
-Create task actions using `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <absolute-script> ...`. Use an interactive current-user principal, highest run level, `StartWhenAvailable = $true`, `WakeToRun = $true` for backup/drill, and `MultipleInstances = IgnoreNew`. Use logon, five-minute repetition, daily 03:00, and first-Sunday 04:00 triggers. Register with `-Force` so reruns update instead of duplicate.
+Create task actions using `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File <absolute-script> ...`. Use an interactive current-user principal, highest run level, `StartWhenAvailable = $true`, `WakeToRun = $true` for backup/drill, and `MultipleInstances = IgnoreNew`. Use logon, five-minute repetition, daily 03:00, and first-Sunday 04:00 triggers. Register with `-Force` so reruns update instead of duplicate.
 
 - [ ] **Step 5: Implement narrow uninstall**
 
@@ -1447,7 +1448,7 @@ Expected: the staged list contains exactly those two files. Before any UAC launc
 
 This is a hard decision gate implementing design section 8.3.1. Do not edit
 `deploy/windows/Install-Operations.ps1`, do not retry the production installer,
-and do not change the existing three production tasks, firewall rule, env ACL,
+and do not change the production-state snapshot captured immediately before the canary, firewall rule, env ACL,
 backup, or application data in this step. Create only this ignored runtime
 artifact with `apply_patch`; never stage or commit it:
 
@@ -1490,6 +1491,7 @@ helpers before evaluating only those function extents in memory:
 
 ```text
 Get-OperationsWtsNativeMethods
+Get-WtsSessionValue
 Get-OperationsInteractiveUserName
 New-OperationsTaskAction
 New-OperationsTaskSettings
@@ -1550,7 +1552,7 @@ DaysOfWeek contains only Sunday
 Weeks contains only Week=1
 Months contains January through December exactly once
 Exec Command = powershell.exe
-Exec Arguments contain only the trusted Invoke-RestoreDrill.ps1 and exact
+Exec Arguments contain exactly one -WindowStyle Hidden plus the trusted Invoke-RestoreDrill.ps1 and exact
   repository/env/state/backup paths required by New-OperationsTaskAction
 Principal resolves to the same WTS SID
 LogonType = InteractiveToken
@@ -1581,31 +1583,33 @@ failure exits 51, semantic validation failure 52, and cleanup/absence failure
 53. A cleanup failure is a hard blocker and must preserve/report the exact
 canary name; do not broaden cleanup.
 
-Before creating the wrapper, capture the current baseline without printing an
-identity or env contents:
+Before creating or changing the wrapper, capture the current baseline without
+printing an identity or env contents. The user intentionally deleted
+`PythonSelfAgent-LoginRecovery` and disabled the two remaining tasks on
+2026-08-25, so the snapshot must describe the actual root-path production
+objects rather than require a historical three-task state:
 
 ```powershell
-$productionNames = @(
-  'PythonSelfAgent-LoginRecovery',
-  'PythonSelfAgent-Health',
-  'PythonSelfAgent-DailyBackup'
-)
+$productionTasks = @(Get-ScheduledTask | Where-Object {
+  $_.TaskPath -eq '\' -and
+  $_.TaskName -like 'PythonSelfAgent-*' -and
+  $_.TaskName -notlike 'PythonSelfAgent-Canary-*'
+} | Sort-Object TaskName)
 $taskXmlHashes = @{}
-foreach ($name in $productionNames) {
-  $xml = Export-ScheduledTask -TaskName $name -ErrorAction Stop
-  $taskXmlHashes[$name] = [Convert]::ToBase64String(
+$taskStates = @{}
+foreach ($task in $productionTasks) {
+  $xml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -ErrorAction Stop
+  $taskXmlHashes[$task.TaskName] = [Convert]::ToBase64String(
     [Security.Cryptography.SHA256]::Create().ComputeHash(
       [Text.Encoding]::UTF8.GetBytes($xml)))
+  $taskStates[$task.TaskName] = [string]$task.State
 }
 $envContentHash = (Get-FileHash 'D:\python_self_agent\deploy\.env' -Algorithm SHA256).Hash
 $envAcl = Get-Acl 'D:\python_self_agent\deploy\.env'
 $envAclHash = [Convert]::ToBase64String(
   [Security.Cryptography.SHA256]::Create().ComputeHash(
     [Text.Encoding]::UTF8.GetBytes($envAcl.Sddl)))
-$productionTaskCount = @(Get-ScheduledTask | Where-Object {
-  $_.TaskName -like 'PythonSelfAgent-*' -and
-  $_.TaskName -notlike 'PythonSelfAgent-Canary-*'
-}).Count
+$productionTaskCount = $productionTasks.Count
 $canaryCount = @(Get-ScheduledTask | Where-Object {
   $_.TaskName -like 'PythonSelfAgent-Canary-*'
 }).Count
@@ -1629,12 +1633,18 @@ $firewallHash = [Convert]::ToBase64String(
     [Text.Encoding]::UTF8.GetBytes($firewallCanonical)))
 ```
 
-Expected baseline on this host: the three exact production names and hashes,
-`productionTaskCount=3`, `canaryCount=0`, `firewallCount=1`, unchanged env
-content hash, and the protected three-ACE ACL hash already recorded in the Task
-8 report. Also capture canonical firewall port/address/profile fields and the
-total unrelated task/rule counts. After canary completion, recompute every
-value and require byte-for-byte/hash/count equality plus canary count zero.
+Record the sorted production names, states and XML hashes exactly as observed;
+the current expected observation is Health and DailyBackup present/disabled,
+LoginRecovery and MonthlyRestoreDrill absent, but equality with the freshly
+captured snapshot—not that observation—is the gate. Require `canaryCount=0`,
+`firewallCount=1`, the current env content hash, and the protected three-ACE ACL
+hash. Also capture canonical firewall port/address/profile fields, backup-root
+entries/reparse state, Compose container IDs/state/health, InterfaceIndex 17
+profile, and total unrelated task/rule counts. After ValidateOnly and after the
+real canary, recompute every value and require byte-for-byte/hash/count equality
+plus canary count zero. A missing production task is not canary failure when it
+was absent in the fresh baseline; it remains an installer failure until Step 7
+converges the host to four enabled tasks.
 
 Validate the runtime wrapper before UAC:
 
@@ -1670,7 +1680,10 @@ The static scan must allow the restore-drill script path only as action data;
 it must find no call operator or `Start-Process` that executes it. Require the
 wrapper to contain exactly one `Register-ScheduledTask`, exactly one
 `Unregister-ScheduledTask`, both with `-ErrorAction Stop`, and no generic task
-name input. The file remains ignored and unstaged.
+name input. Require the AST helper allowlist to include the direct dependency
+`Get-WtsSessionValue` exactly once before `Get-OperationsInteractiveUserName`;
+this corrects the retained exit-50 ValidateOnly evidence without changing
+canary semantics. The file remains ignored and unstaged.
 
 Generate a dry-run RunId from 16 new cryptographic bytes, not GUID/time/Random,
 and run normal Windows PowerShell non-elevated:
@@ -1748,15 +1761,27 @@ queries, and `Get-Acl` so no system mutation occurs. Required red cases are:
 monthly task uses -Action/-Trigger/-Settings/-Principal/-ErrorAction Stop,
   not -InputObject; the other three retain the validated InputObject path
 every Register-ScheduledTask call binds -ErrorAction Stop
+all four actions contain exactly one -WindowStyle Hidden and retain
+  -NoProfile/-NonInteractive/-ExecutionPolicy Bypass/-File
+no action uses S4U, a service account, saved credentials, or task Hidden as a substitute
 provider emits a nonterminating 0x80041001-equivalent error -> installer fails
 provider returns zero or two objects -> installer fails
 provider returns one object but requery omits monthly -> installer fails
 persisted task has wrong name/path/action/principal/settings/trigger/XML -> fail
+provider or exported XML reports Settings/Enabled=false for any task -> fail
 only three exact tasks or an extra PythonSelfAgent-* task -> installer fails
 wrong/missing firewall or env ACL postcondition -> installer fails
 all four exact persisted tasks/rule/ACL -> completion output allowed
-current three-task partial state plus successful monthly registration -> four
-second identical pass -> still exactly four tasks, one rule, exact ACL
+current two-task disabled partial state -> four enabled tasks
+zero-, two-, three-, or four-task legal partial state -> four enabled tasks
+second identical pass -> still exactly four enabled tasks, one rule, exact ACL
+```
+
+Change only the argument template in `New-OperationsTaskAction`; preserve all
+existing quoting and path parameters:
+
+```powershell
+$arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -RepositoryRoot "{1}" -EnvFile "{2}" -StateRoot "{3}"' -f $ScriptPath, $Config.RepositoryRoot, $Config.EnvFile, $Config.StateRoot
 ```
 
 Add these minimum installer interfaces before changing the registration loop:
@@ -1810,18 +1835,26 @@ function Assert-OperationsPersistedTask {
       [string]$actual.Actions[0].Arguments -ne [string]$ExpectedTask.Action.Arguments) {
     throw "Persisted action is invalid: $($ExpectedTask.Name)"
   }
-  if ([bool]$actual.Settings.StartWhenAvailable -ne $true -or
+  if ([bool]$actual.Settings.Enabled -ne $true -or
+      [bool]$actual.Settings.StartWhenAvailable -ne $true -or
       [string]$actual.Settings.MultipleInstances -ne 'IgnoreNew' -or
       [bool]$actual.Settings.WakeToRun -ne [bool]$ExpectedTask.Settings.WakeToRun) {
     throw "Persisted settings are invalid: $($ExpectedTask.Name)"
+  }
+  [xml]$persistedXml = Export-ScheduledTask -TaskName $ExpectedTask.Name `
+    -TaskPath '\' -ErrorAction Stop
+  $persistedNs = New-Object Xml.XmlNamespaceManager($persistedXml.NameTable)
+  $persistedNs.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+  $enabledNode = $persistedXml.SelectSingleNode('/t:Task/t:Settings/t:Enabled', $persistedNs)
+  if ($null -eq $enabledNode -or $enabledNode.InnerText -cne 'true') {
+    throw "Persisted task is disabled: $($ExpectedTask.Name)"
   }
   if (@($actual.Triggers).Count -ne 1) {
     throw "Persisted trigger count is invalid: $($ExpectedTask.Name)"
   }
   if ($RequireMonthlyXml) {
-    [xml]$xml = Export-ScheduledTask -TaskName $ExpectedTask.Name `
-      -TaskPath '\' -ErrorAction Stop
-    $ns = New-Object Xml.XmlNamespaceManager($xml.NameTable)
+    $xml = $persistedXml
+    $ns = $persistedNs
     $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
     $monthly = $xml.SelectSingleNode(
       '/t:Task/t:Triggers/t:CalendarTrigger/t:ScheduleByMonthDayOfWeek', $ns)
@@ -1926,7 +1959,8 @@ The monthly loop call alone sets
 requeried, and validated. Move the completion output after
 `Assert-OperationsInstalledState`. A partial state is retained but returns
 nonzero; rerunning uses exact-name `-Force` to converge safely without deleting
-the three valid tasks/rule/ACL.
+valid tasks/rule/ACL. The current intentional state of two disabled tasks is a
+required recovery fixture, not an accepted final state.
 
 Run the red selector using a fresh pre-created repository-local basetemp:
 
@@ -1957,10 +1991,10 @@ git commit -m "fix: verify persisted Windows task registration"
 
 Only after all green gates and independent review PASS, continue with the
 existing visible two-pass installer procedure below. It must recover in place
-from the current three-task partial state, produce exactly four tasks, and pass
+from the current two-task disabled partial state, produce exactly four enabled tasks, and pass
 the persisted task/firewall/ACL assertions on both passes. The wrapper marker
 is accepted only after an independent postflight proves the same state; any
-provider error, output mismatch, three-task state, or marker/state disagreement
+provider error, output mismatch, any non-four-task/disabled-task state, or marker/state disagreement
 stops without cleanup, retry, or false-success.
 
 Immediately before UAC, require Docker Server readiness, healthy `app` and `qdrant`, a passing default smoke test, InterfaceIndex 17 still `Private`, the current active WTS identity, the exact trusted repository/env/state/backup paths, and no existing object whose exact name or `PythonSelfAgent-` prefix collides with the four intended tasks or firewall rule unexpectedly. Never display `deploy/.env` contents.
@@ -2004,7 +2038,7 @@ if ($marker.RunId -cne $runId -or $marker.Outcome -cne 'success' -or
 
 Expected: the visible elevated child exits 0 and the strict UTF-8 marker has the exact RunId, `Outcome=success`, wrapper code 0, pass-1 code 0, and pass-2 code 0 with nonempty timestamps. Exit 41 means pass 1 failed; exit 42 means pass 2 failed. If UAC is declined, times out, the marker is absent/malformed, or any code differs, stop without editing, retrying, or improvising. Retain the wrapper and marker as ignored redacted evidence.
 
-Independently re-read system state rather than trusting installer output. Require exactly these four tasks and no duplicate/prefix collision: `PythonSelfAgent-LoginRecovery`, `PythonSelfAgent-Health`, `PythonSelfAgent-DailyBackup`, and `PythonSelfAgent-MonthlyRestoreDrill`. Each principal must use the current active WTS `DOMAIN\user`, `Interactive`, and `Highest`; each action must invoke `powershell.exe` with the trusted script and effective absolute repository/env/state paths (plus the exact backup root for backup/drill). Require login at-logon, health daily from 00:00 with five-minute repetition for one day, backup daily 03:00, and restore drill first Sunday 04:00. All settings must have `StartWhenAvailable=True`, `MultipleInstances=IgnoreNew`; only backup and drill have `WakeToRun=True`.
+Independently re-read system state rather than trusting installer output. Require exactly these four tasks and no duplicate/prefix collision: `PythonSelfAgent-LoginRecovery`, `PythonSelfAgent-Health`, `PythonSelfAgent-DailyBackup`, and `PythonSelfAgent-MonthlyRestoreDrill`. Each principal must use the current active WTS `DOMAIN\user`, `Interactive`, and `Highest`; each action must invoke `powershell.exe` with exactly one `-WindowStyle Hidden`, the trusted script, and effective absolute repository/env/state paths (plus the exact backup root for backup/drill). Require login at-logon, health daily from 00:00 with five-minute repetition for one day, backup daily 03:00, and restore drill first Sunday 04:00. All task-level settings and exported XML must have `Enabled=True`; all settings must have `StartWhenAvailable=True`, `MultipleInstances=IgnoreNew`; only backup and drill have `WakeToRun=True`.
 
 Require exactly one `Python Self Agent - Private Intranet 7860` rule with `Enabled=True`, `Inbound`, `Allow`, `TCP`, local port 7860, `Private`, and `LocalSubnet`; it must not enable Public. Verify `deploy/.env` inheritance is removed and its access entries are only the active WTS identity with Modify, plus SYSTEM and Administrators with Full Control. Compare the before/after inventories and prove no unrelated scheduled task, firewall rule, or ACL changed. Redact identities and paths in shared evidence where required, and never print environment values.
 
@@ -2034,6 +2068,9 @@ foreach ($task in $tasks) {
     throw "Invalid action executable: $($task.TaskName)"
   }
   $arguments = [string]$task.Actions[0].Arguments
+  if ([regex]::Matches($arguments, '(?i)(?<!\S)-WindowStyle\s+Hidden(?!\S)').Count -ne 1) {
+    throw "Missing or duplicate hidden-window argument: $($task.TaskName)"
+  }
   foreach ($required in @(
     $expectedScripts[$task.TaskName],
     'D:\python_self_agent',
@@ -2043,7 +2080,13 @@ foreach ($task in $tasks) {
   if ($task.TaskName -in @('PythonSelfAgent-DailyBackup', 'PythonSelfAgent-MonthlyRestoreDrill') -and
       -not $arguments.Contains('D:\python_self_agent_backups')) { throw "Missing backup root: $($task.TaskName)" }
   $expectedWake = $task.TaskName -in @('PythonSelfAgent-DailyBackup', 'PythonSelfAgent-MonthlyRestoreDrill')
-  if (-not $task.Settings.StartWhenAvailable -or
+  [xml]$taskXml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath '\' -ErrorAction Stop
+  $taskNs = New-Object Xml.XmlNamespaceManager($taskXml.NameTable)
+  $taskNs.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+  $taskEnabled = $taskXml.SelectSingleNode('/t:Task/t:Settings/t:Enabled', $taskNs)
+  if (-not $task.Settings.Enabled -or $null -eq $taskEnabled -or
+      $taskEnabled.InnerText -cne 'true' -or
+      -not $task.Settings.StartWhenAvailable -or
       [string]$task.Settings.MultipleInstances -ne 'IgnoreNew' -or
       [bool]$task.Settings.WakeToRun -ne $expectedWake) { throw "Invalid settings: $($task.TaskName)" }
 }
@@ -2123,9 +2166,9 @@ if (($userRule.FileSystemRights -band [Security.AccessControl.FileSystemRights]:
 
 Expected: the block exits 0 with no output. Compare canonical preflight/postflight snapshots for all non-`PythonSelfAgent-*` task definitions, all non-target firewall rules, and parent-directory ACLs; their hashes must be identical.
 
-- [ ] **Step 8: Exercise startup, health, notification, and backup**
+- [ ] **Step 8: Exercise hidden startup, health, notification, and backup**
 
-Manually start login recovery and health tasks and wait for completion. Require `app`/`qdrant` healthy and default smoke passing within 180 seconds. Trigger a test notification. Run the backup task and require one complete set under `D:\python_self_agent_backups\daily`, valid SHA-256, safe metadata, restarted healthy services, and a successful status/report entry.
+Manually start login recovery and health tasks and wait for completion. Observe the interactive desktop for the full run and require no PowerShell/console window to appear; confirm the exported actions still contain exactly one `-WindowStyle Hidden`. Require `app`/`qdrant` healthy and default smoke passing within 180 seconds. Trigger a test notification. Run the backup task and require one complete set under `D:\python_self_agent_backups\daily`, valid SHA-256, safe metadata, restarted healthy services, and a successful status/report entry.
 
 - [ ] **Step 9: Exercise retention and isolated restore drill**
 
@@ -2191,7 +2234,9 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 - System changes occur only after repository tests and explicit network/admin gates.
 - The monthly trigger accepts exactly one documented/local month-mask field, preserves masks `1 / 1 / 4095` and 04:00, and all four task definitions validate in memory before the first system write.
 - The canary derives one exact allowlisted name from 16 cryptographic bytes, never starts its action, and proves provider/XML/schtasks semantics plus exact finally cleanup before any production correction.
+- The canary compares against a fresh snapshot of the actual production task names/states/XML hashes and does not mistake an intentional partial baseline for installation success.
 - Production registration is contingent on the canary: every provider write uses explicit `-ErrorAction Stop`, captures one output, re-queries persisted state, and cannot report success with fewer than four exact tasks, one exact firewall rule, or the exact protected env ACL.
+- All four persisted tasks must be enabled and use exactly one `-WindowStyle Hidden` while retaining the active WTS `Interactive`/`Highest` principal; S4U, saved credentials, service accounts, and task-visibility-only substitutes are forbidden.
 - No task authorizes touching the existing GraphRAG task-packet modifications or committing secrets/runtime data.
 
 **Plan complete and saved to `docs/superpowers/plans/2026-08-09-windows-single-node-operations.md`.**
