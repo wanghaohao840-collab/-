@@ -1739,12 +1739,15 @@ production code or retry. Append the evidence and request a separately reviewed
 monthly-only documented XML design; never substitute a weekly trigger or an
 internally calculated/rescheduled date.
 
-- [ ] **Step 7: Only if the canary passes, implement the monthly RegisterByPrincipal path with TDD, then retry the installer twice**
+- [ ] **Step 7: Implement the reviewed monthly XML fallback with TDD, then retry the installer twice**
 
-This step is forbidden unless Step 6 produced the exact passing marker,
-double-absence proof, unchanged production hashes, and a clean WMI window. If
-Step 6 failed, end Task 8 at the XML fallback design gate without changing
-`deploy/windows/Install-Operations.ps1` or its tests.
+Step 6 produced a truthful `register_failed` marker with exit 51,
+`CimException / InvalidArgument`, zero registration output, exact cleanup,
+provider/`schtasks` double absence, and a production snapshot identical to the
+fresh baseline. Design section 8.3.3 is now approved. Do not retry either CIM
+registration parameter set and do not create another canary. Implement only the
+monthly `Register-ScheduledTask -Xml` fallback described here; the other three
+tasks retain `-InputObject`.
 
 **Files:**
 
@@ -1758,16 +1761,22 @@ Add focused synthetic tests first. The test harness must stub
 queries, and `Get-Acl` so no system mutation occurs. Required red cases are:
 
 ```text
-monthly task uses -Action/-Trigger/-Settings/-Principal/-ErrorAction Stop,
-  not -InputObject; the other three retain the validated InputObject path
+monthly task uses -TaskPath '\'/-Xml/-Force/-ErrorAction Stop and never
+  -InputObject/-Action/-Trigger/-Settings/-Principal at registration
+the other three retain only the validated -InputObject path
 every Register-ScheduledTask call binds -ErrorAction Stop
 all four actions contain exactly one -WindowStyle Hidden and retain
   -NoProfile/-NonInteractive/-ExecutionPolicy Bypass/-File
 no action uses S4U, a service account, saved credentials, or task Hidden as a substitute
-provider emits a nonterminating 0x80041001-equivalent error -> installer fails
+XML is built with XmlDocument nodes, not interpolation/template/fragment input
+constructed XML is parsed and semantically validated before the first write
+special characters in action arguments remain one escaped text value
+provider emits a nonterminating error -> installer fails
 provider returns zero or two objects -> installer fails
 provider returns one object but requery omits monthly -> installer fails
+schtasks query returns nonzero/native stderr or different XML -> installer fails
 persisted task has wrong name/path/action/principal/settings/trigger/XML -> fail
+missing/duplicate month, day, week, principal, action, setting, or hidden flag -> fail
 provider or exported XML reports Settings/Enabled=false for any task -> fail
 only three exact tasks or an extra PythonSelfAgent-* task -> installer fails
 wrong/missing firewall or env ACL postcondition -> installer fails
@@ -1787,19 +1796,211 @@ $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy By
 Add these minimum installer interfaces before changing the registration loop:
 
 ```powershell
+function Add-OperationsTaskXmlElement {
+  param(
+    [Parameter(Mandatory)][xml]$Document,
+    [Parameter(Mandatory)][Xml.XmlNode]$Parent,
+    [Parameter(Mandatory)][string]$Namespace,
+    [Parameter(Mandatory)][string]$Name,
+    [AllowNull()][string]$Value
+  )
+  $element = $Document.CreateElement($Name, $Namespace)
+  if ($PSBoundParameters.ContainsKey('Value')) { $element.InnerText = $Value }
+  [void]$Parent.AppendChild($element)
+  return $element
+}
+
+function Assert-OperationsMonthlyRestoreDrillXml {
+  param(
+    [Parameter(Mandatory)][string]$XmlText,
+    [Parameter(Mandatory)]$ExpectedTask,
+    [Parameter(Mandatory)][string]$ExpectedSid
+  )
+  [xml]$document = $XmlText
+  $namespace = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
+  $manager = New-Object Xml.XmlNamespaceManager($document.NameTable)
+  $manager.AddNamespace('t', $namespace)
+  $one = {
+    param([string]$Path)
+    $nodes = @($document.SelectNodes($Path, $manager))
+    if ($nodes.Count -ne 1) { throw "Monthly XML node count is invalid: $Path" }
+    return $nodes[0]
+  }
+  $root = & $one '/t:Task'
+  if ($root.GetAttribute('version') -cne '1.4') { throw 'Monthly XML version is invalid.' }
+  $schedule = & $one '/t:Task/t:Triggers/t:CalendarTrigger/t:ScheduleByMonthDayOfWeek'
+  $start = & $one '/t:Task/t:Triggers/t:CalendarTrigger/t:StartBoundary'
+  $triggerEnabled = & $one '/t:Task/t:Triggers/t:CalendarTrigger/t:Enabled'
+  $days = @($schedule.SelectNodes('t:DaysOfWeek/*', $manager) | ForEach-Object LocalName)
+  $weeks = @($schedule.SelectNodes('t:Weeks/t:Week', $manager) | ForEach-Object InnerText)
+  $months = @($schedule.SelectNodes('t:Months/*', $manager) | ForEach-Object LocalName)
+  $expectedMonths = @(
+    'January','February','March','April','May','June',
+    'July','August','September','October','November','December'
+  )
+  if (([datetime]$start.InnerText).TimeOfDay -ne [timespan]'04:00:00' -or
+      $triggerEnabled.InnerText -cne 'true' -or
+      $days.Count -ne 1 -or $days[0] -cne 'Sunday' -or
+      $weeks.Count -ne 1 -or $weeks[0] -cne '1' -or
+      $months.Count -ne 12 -or
+      @(Compare-Object ($expectedMonths | Sort-Object) ($months | Sort-Object)).Count -ne 0) {
+    throw 'Monthly XML schedule is invalid.'
+  }
+  $userId = & $one '/t:Task/t:Principals/t:Principal/t:UserId'
+  $logonType = & $one '/t:Task/t:Principals/t:Principal/t:LogonType'
+  $runLevel = & $one '/t:Task/t:Principals/t:Principal/t:RunLevel'
+  if ($userId.InnerText -cne $ExpectedSid -or
+      $logonType.InnerText -cne 'InteractiveToken' -or
+      $runLevel.InnerText -cne 'HighestAvailable') {
+    throw 'Monthly XML principal is invalid.'
+  }
+  $command = & $one '/t:Task/t:Actions/t:Exec/t:Command'
+  $arguments = & $one '/t:Task/t:Actions/t:Exec/t:Arguments'
+  if ($command.InnerText -cne [string]$ExpectedTask.Action.Execute -or
+      $arguments.InnerText -cne [string]$ExpectedTask.Action.Arguments -or
+      [regex]::Matches($arguments.InnerText,
+        '(?i)(?<!\S)-WindowStyle\s+Hidden(?!\S)').Count -ne 1) {
+    throw 'Monthly XML action is invalid.'
+  }
+  $expectedSettings = [ordered]@{
+    MultipleInstancesPolicy = 'IgnoreNew'
+    DisallowStartIfOnBatteries = 'true'
+    StopIfGoingOnBatteries = 'true'
+    AllowHardTerminate = 'true'
+    StartWhenAvailable = 'true'
+    RunOnlyIfNetworkAvailable = 'false'
+    AllowStartOnDemand = 'true'
+    Enabled = 'true'
+    Hidden = 'false'
+    RunOnlyIfIdle = 'false'
+    WakeToRun = 'true'
+    ExecutionTimeLimit = 'PT72H'
+    Priority = '7'
+    DisallowStartOnRemoteAppSession = 'false'
+    UseUnifiedSchedulingEngine = 'true'
+  }
+  foreach ($entry in $expectedSettings.GetEnumerator()) {
+    $node = & $one ("/t:Task/t:Settings/t:{0}" -f $entry.Key)
+    if ($node.InnerText -cne $entry.Value) {
+      throw "Monthly XML setting is invalid: $($entry.Key)"
+    }
+  }
+  $idle = & $one '/t:Task/t:Settings/t:IdleSettings'
+  foreach ($entry in ([ordered]@{
+    Duration='PT10M'; WaitTimeout='PT1H'; StopOnIdleEnd='true'; RestartOnIdle='false'
+  }).GetEnumerator()) {
+    $nodes = @($idle.SelectNodes(("t:{0}" -f $entry.Key), $manager))
+    if ($nodes.Count -ne 1 -or $nodes[0].InnerText -cne $entry.Value) {
+      throw "Monthly XML idle setting is invalid: $($entry.Key)"
+    }
+  }
+}
+
+function New-OperationsMonthlyRestoreDrillXml {
+  param(
+    [Parameter(Mandatory)]$Task,
+    [Parameter(Mandatory)]$Principal
+  )
+  if ($Task.Name -cne 'PythonSelfAgent-MonthlyRestoreDrill' -or
+      @($Task.Action).Count -ne 1 -or @($Task.Trigger).Count -ne 1) {
+    throw 'Monthly XML input task is invalid.'
+  }
+  $sid = ([Security.Principal.NTAccount]
+    ([string]$Principal.UserId)).Translate(
+      [Security.Principal.SecurityIdentifier]).Value
+  $namespace = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
+  $document = New-Object Xml.XmlDocument
+  [void]$document.AppendChild($document.CreateXmlDeclaration('1.0', 'UTF-16', $null))
+  $root = $document.CreateElement('Task', $namespace)
+  $root.SetAttribute('version', '1.4')
+  [void]$document.AppendChild($root)
+  $triggers = Add-OperationsTaskXmlElement $document $root $namespace 'Triggers'
+  $calendar = Add-OperationsTaskXmlElement $document $triggers $namespace 'CalendarTrigger'
+  Add-OperationsTaskXmlElement $document $calendar $namespace 'StartBoundary' `
+    ([datetime]$Task.Trigger.StartBoundary).ToString('yyyy-MM-ddTHH:mm:ss') | Out-Null
+  Add-OperationsTaskXmlElement $document $calendar $namespace 'Enabled' 'true' | Out-Null
+  $schedule = Add-OperationsTaskXmlElement $document $calendar $namespace 'ScheduleByMonthDayOfWeek'
+  $weeks = Add-OperationsTaskXmlElement $document $schedule $namespace 'Weeks'
+  Add-OperationsTaskXmlElement $document $weeks $namespace 'Week' '1' | Out-Null
+  $days = Add-OperationsTaskXmlElement $document $schedule $namespace 'DaysOfWeek'
+  Add-OperationsTaskXmlElement $document $days $namespace 'Sunday' | Out-Null
+  $months = Add-OperationsTaskXmlElement $document $schedule $namespace 'Months'
+  foreach ($month in @(
+    'January','February','March','April','May','June',
+    'July','August','September','October','November','December'
+  )) { Add-OperationsTaskXmlElement $document $months $namespace $month | Out-Null }
+  $principals = Add-OperationsTaskXmlElement $document $root $namespace 'Principals'
+  $principalNode = Add-OperationsTaskXmlElement $document $principals $namespace 'Principal'
+  $principalNode.SetAttribute('id', 'Author')
+  Add-OperationsTaskXmlElement $document $principalNode $namespace 'UserId' $sid | Out-Null
+  Add-OperationsTaskXmlElement $document $principalNode $namespace 'LogonType' 'InteractiveToken' | Out-Null
+  Add-OperationsTaskXmlElement $document $principalNode $namespace 'RunLevel' 'HighestAvailable' | Out-Null
+  $settings = Add-OperationsTaskXmlElement $document $root $namespace 'Settings'
+  $settingValues = [ordered]@{
+    MultipleInstancesPolicy='IgnoreNew'; DisallowStartIfOnBatteries='true'
+    StopIfGoingOnBatteries='true'; AllowHardTerminate='true'; StartWhenAvailable='true'
+    RunOnlyIfNetworkAvailable='false'; AllowStartOnDemand='true'; Enabled='true'
+    Hidden='false'; RunOnlyIfIdle='false'; WakeToRun='true'; ExecutionTimeLimit='PT72H'
+    Priority='7'; DisallowStartOnRemoteAppSession='false'; UseUnifiedSchedulingEngine='true'
+  }
+  foreach ($entry in $settingValues.GetEnumerator()) {
+    Add-OperationsTaskXmlElement $document $settings $namespace $entry.Key $entry.Value | Out-Null
+  }
+  $idle = Add-OperationsTaskXmlElement $document $settings $namespace 'IdleSettings'
+  foreach ($entry in ([ordered]@{
+    Duration='PT10M'; WaitTimeout='PT1H'; StopOnIdleEnd='true'; RestartOnIdle='false'
+  }).GetEnumerator()) {
+    Add-OperationsTaskXmlElement $document $idle $namespace $entry.Key $entry.Value | Out-Null
+  }
+  $actions = Add-OperationsTaskXmlElement $document $root $namespace 'Actions'
+  $actions.SetAttribute('Context', 'Author')
+  $exec = Add-OperationsTaskXmlElement $document $actions $namespace 'Exec'
+  Add-OperationsTaskXmlElement $document $exec $namespace 'Command' `
+    ([string]$Task.Action.Execute) | Out-Null
+  Add-OperationsTaskXmlElement $document $exec $namespace 'Arguments' `
+    ([string]$Task.Action.Arguments) | Out-Null
+  $xmlText = $document.OuterXml
+  Assert-OperationsMonthlyRestoreDrillXml -XmlText $xmlText `
+    -ExpectedTask $Task -ExpectedSid $sid
+  return $xmlText
+}
+
+function Get-OperationsSchtasksXml {
+  param([Parameter(Mandatory)][string]$TaskName)
+  if ($TaskName -cne 'PythonSelfAgent-MonthlyRestoreDrill') {
+    throw 'schtasks XML query is outside the exact monthly task allowlist.'
+  }
+  $oldPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $output = @(& schtasks.exe /Query /TN ("\" + $TaskName) /XML 2>$null)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $oldPreference
+  }
+  if ($exitCode -ne 0 -or $output.Count -eq 0) {
+    throw "schtasks XML query failed: $exitCode"
+  }
+  return ($output -join [Environment]::NewLine)
+}
+
 function Register-OperationsTask {
   param(
     [Parameter(Mandatory)]$Task,
-    [Parameter(Mandatory)]$Principal,
-    [switch]$UsePrincipalParameterSet
+    [AllowNull()][string]$MonthlyXml
   )
-  if ($UsePrincipalParameterSet) {
+  if ($Task.Name -ceq 'PythonSelfAgent-MonthlyRestoreDrill') {
+    if ([string]::IsNullOrWhiteSpace($MonthlyXml)) {
+      throw 'Monthly task XML is required.'
+    }
     $result = @(Register-ScheduledTask -TaskName $Task.Name `
-      -Action $Task.Action -Trigger $Task.Trigger -Settings $Task.Settings `
-      -Principal $Principal -Force -ErrorAction Stop)
+      -TaskPath '\' -Xml $MonthlyXml -Force -ErrorAction Stop)
   } else {
+    if (-not [string]::IsNullOrEmpty($MonthlyXml)) {
+      throw "Monthly XML is not allowed for task: $($Task.Name)"
+    }
     $result = @(Register-ScheduledTask -TaskName $Task.Name `
-      -InputObject $Task.Definition -Force -ErrorAction Stop)
+      -TaskPath '\' -InputObject $Task.Definition -Force -ErrorAction Stop)
   }
   if ($result.Count -ne 1 -or $null -eq $result[0]) {
     throw "Scheduled task registration returned an invalid result: $($Task.Name)"
@@ -1853,27 +2054,13 @@ function Assert-OperationsPersistedTask {
     throw "Persisted trigger count is invalid: $($ExpectedTask.Name)"
   }
   if ($RequireMonthlyXml) {
-    $xml = $persistedXml
-    $ns = $persistedNs
-    $ns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
-    $monthly = $xml.SelectSingleNode(
-      '/t:Task/t:Triggers/t:CalendarTrigger/t:ScheduleByMonthDayOfWeek', $ns)
-    if ($null -eq $monthly) { throw 'Persisted monthly XML is missing.' }
-    $start = $xml.SelectSingleNode(
-      '/t:Task/t:Triggers/t:CalendarTrigger/t:StartBoundary', $ns)
-    $days = @($monthly.SelectNodes('t:DaysOfWeek/*', $ns) | ForEach-Object LocalName)
-    $weeks = @($monthly.SelectNodes('t:Weeks/t:Week', $ns) | ForEach-Object InnerText)
-    $months = @($monthly.SelectNodes('t:Months/*', $ns) | ForEach-Object LocalName)
-    $expectedMonths = @(
-      'January','February','March','April','May','June',
-      'July','August','September','October','November','December'
-    )
-    if (([datetime]$start.InnerText).TimeOfDay -ne [timespan]'04:00:00' -or
-        @($days).Count -ne 1 -or $days[0] -cne 'Sunday' -or
-        @($weeks).Count -ne 1 -or $weeks[0] -cne '1' -or
-        @(Compare-Object ($expectedMonths | Sort-Object) ($months | Sort-Object)).Count -ne 0) {
-      throw 'Persisted monthly XML is invalid.'
-    }
+    Assert-OperationsMonthlyRestoreDrillXml `
+      -XmlText $persistedXml.OuterXml -ExpectedTask $ExpectedTask `
+      -ExpectedSid $expectedSid
+    $schtasksXml = Get-OperationsSchtasksXml -TaskName $ExpectedTask.Name
+    Assert-OperationsMonthlyRestoreDrillXml `
+      -XmlText $schtasksXml -ExpectedTask $ExpectedTask `
+      -ExpectedSid $expectedSid
   }
   return $actual
 }
@@ -1954,9 +2141,36 @@ function Assert-OperationsInstalledState {
 }
 ```
 
-The monthly loop call alone sets
-`-UsePrincipalParameterSet`; all four results are captured, immediately
-requeried, and validated. Move the completion output after
+After all four existing in-memory definitions validate, but still before the
+write-boundary comment, build and validate the XML exactly once:
+
+```powershell
+$monthlyTask = @($taskDefinitions | Where-Object {
+  $_.Name -ceq 'PythonSelfAgent-MonthlyRestoreDrill'
+})
+if ($monthlyTask.Count -ne 1) { throw 'Monthly task definition count is invalid.' }
+$monthlyXml = New-OperationsMonthlyRestoreDrillXml `
+  -Task $monthlyTask[0] -Principal $principal
+```
+
+The registration loop passes `$monthlyXml` only for the exact monthly name and
+passes `$null` for the other three. All four results are captured, immediately
+requeried, and validated:
+
+```powershell
+foreach ($task in $taskDefinitions) {
+  $xmlArgument = if ($task.Name -ceq 'PythonSelfAgent-MonthlyRestoreDrill') {
+    $monthlyXml
+  } else { $null }
+  Register-OperationsTask -Task $task -MonthlyXml $xmlArgument | Out-Null
+  Assert-OperationsPersistedTask -ExpectedTask $task `
+    -ExpectedPrincipal $principal `
+    -RequireMonthlyXml:($task.Name -ceq 'PythonSelfAgent-MonthlyRestoreDrill') |
+    Out-Null
+}
+```
+
+Move the completion output after
 `Assert-OperationsInstalledState`. A partial state is retained but returns
 nonzero; rerunning uses exact-name `-Force` to converge safely without deleting
 valid tasks/rule/ACL. The current intentional state of two disabled tasks is a
@@ -1966,11 +2180,11 @@ Run the red selector using a fresh pre-created repository-local basetemp:
 
 ```powershell
 $redBase = Join-Path (Get-Location) `
-  ('.operations-test-task8-registerbyprincipal-red-' + [guid]::NewGuid().ToString('N'))
+  ('.operations-test-task8-monthly-xml-red-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $redBase | Out-Null
 .\venv\Scripts\python.exe -m pytest -q -p no:cacheprovider `
   --basetemp=$redBase tests/deploy/test_windows_operations.py `
-  -k 'registerbyprincipal or registration_error or persisted_postcondition or partial_state'
+  -k 'monthly_xml or registration_error or persisted_postcondition or partial_state or hidden_window'
 ```
 
 Expected: the new tests fail against the current InputObject/Out-Null/no-requery
@@ -1979,14 +2193,14 @@ green. Implement only the interfaces above, then run fresh basetemps for the
 same selector, full `test_windows_operations.py`, full `tests/deploy`, and the
 full repository suite. Run the Windows PowerShell 5.1 AST parser,
 `git diff --check`, scoped diff/name review, and an independent review against
-design sections 8.3/8.3.1. Commit only the two files:
+design sections 8.3/8.3.1/8.3.2/8.3.3. Commit only the two files:
 
 ```powershell
 git add -- deploy/windows/Install-Operations.ps1 `
   tests/deploy/test_windows_operations.py
 git diff --cached --check
 git diff --cached --name-only
-git commit -m "fix: verify persisted Windows task registration"
+git commit -m "fix: register monthly Windows task from XML"
 ```
 
 Only after all green gates and independent review PASS, continue with the
@@ -2220,6 +2434,7 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 | Docker Desktop wildcard binding with fail-closed loopback forwarders | 8 |
 | Task Scheduler monthly-DOW CIM schema compatibility and pre-mutation task validation | 8 |
 | Isolated RegisterByPrincipal canary, exact cleanup, and XML fallback gate | 8 |
+| Monthly-only XmlDocument registration and provider/export/schtasks semantic verification | 8 |
 | Provider-error promotion, persisted four-task postconditions, and truthful wrapper marker | 8 |
 | Preserve single replica and business contracts | Global constraints, 8 |
 | Real reboot and LAN acceptance | 8 |
@@ -2233,9 +2448,10 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 - CI uses a full checkout SHA and a digest-pinned Trivy image, avoiding mutable action/scanner tags.
 - System changes occur only after repository tests and explicit network/admin gates.
 - The monthly trigger accepts exactly one documented/local month-mask field, preserves masks `1 / 1 / 4095` and 04:00, and all four task definitions validate in memory before the first system write.
-- The canary derives one exact allowlisted name from 16 cryptographic bytes, never starts its action, and proves provider/XML/schtasks semantics plus exact finally cleanup before any production correction.
+- The canary derives one exact allowlisted name from 16 cryptographic bytes, never starts its action, and selects the registration path only after truthful provider/XML/schtasks evidence plus exact finally cleanup.
 - The canary compares against a fresh snapshot of the actual production task names/states/XML hashes and does not mistake an intentional partial baseline for installation success.
-- Production registration is contingent on the canary: every provider write uses explicit `-ErrorAction Stop`, captures one output, re-queries persisted state, and cannot report success with fewer than four exact tasks, one exact firewall rule, or the exact protected env ACL.
+- The rejected RegisterByPrincipal canary is never retried; only the monthly task uses the reviewed `XmlDocument`/`Register-ScheduledTask -Xml` fallback, while the other three retain `-InputObject`.
+- Every provider write uses explicit `-ErrorAction Stop`, captures one output, re-queries persisted state, and cannot report success with fewer than four exact tasks, one exact firewall rule, or the exact protected env ACL.
 - All four persisted tasks must be enabled and use exactly one `-WindowStyle Hidden` while retaining the active WTS `Interactive`/`Highest` principal; S4U, saved credentials, service accounts, and task-visibility-only substitutes are forbidden.
 - No task authorizes touching the existing GraphRAG task-packet modifications or committing secrets/runtime data.
 
