@@ -127,10 +127,7 @@ class ImportTaskRunner:
             "failed",
         }:
             return
-        requested_action = {
-            "pause_requested": "pause",
-            "cancel_requested": "cancel",
-        }.get(current.status)
+        requested_action = self._control_action(current.status)
         try:
             staged_path = self._resolve_staged_path(task)
             if requested_action is not None:
@@ -148,7 +145,6 @@ class ImportTaskRunner:
                 )
                 self._finish_control(
                     task,
-                    requested_action,
                     assistant,
                     staged_path,
                     temporary_path,
@@ -222,20 +218,34 @@ class ImportTaskRunner:
                 )
             else:
                 self._remove_empty_batch_dir(staged_path.parent)
-        except ImportControlSignal as signal:
+        except ImportControlSignal:
             self._finish_control(
                 task,
-                signal.action,
                 assistant,
                 staged_path,
                 temporary_path,
                 formal_path,
             )
         except Exception as error:
-            self._remove_attempt_files(temporary_path, formal_path)
-            if requested_action is not None:
-                self._mark_control_failed(task, requested_action, error)
+            current = self.repository.get_task(task.user_id, task.task_id)
+            if current is None or current.status in {
+                "paused",
+                "cancelled",
+                "succeeded",
+                "failed",
+            }:
                 return
+            current_action = self._control_action(current.status)
+            if current_action is not None:
+                self._finish_control(
+                    task,
+                    assistant,
+                    staged_path,
+                    temporary_path,
+                    formal_path,
+                )
+                return
+            self._remove_attempt_files(temporary_path, formal_path)
             error_code, retryable, summary = classify_import_failure(error)
             if retryable and task.auto_retry_count < task.max_auto_retries:
                 delay = _RETRY_DELAYS[
@@ -272,7 +282,6 @@ class ImportTaskRunner:
     def _finish_control(
         self,
         task: ImportTaskRecord,
-        action: str,
         assistant: Any,
         staged_path: Path | None,
         temporary_path: Path | None,
@@ -282,19 +291,38 @@ class ImportTaskRunner:
             if assistant is None:
                 raise RuntimeError("Import assistant is unavailable for cleanup")
             assistant.compensate_import(task.document_id, task.task_id)
-            self._remove_attempt_files(temporary_path, formal_path)
-            if action == "cancel" and staged_path is not None:
+            latest_action = self._current_control_action(task)
+            if latest_action is None:
+                return
+            self._remove_control_attempt_files(temporary_path, formal_path)
+            if latest_action == "cancel" and staged_path is not None:
                 self._cleanup_staged_file(staged_path)
                 self._remove_empty_batch_dir(staged_path.parent)
             terminal = (
                 self.repository.mark_paused
-                if action == "pause"
+                if latest_action == "pause"
                 else self.repository.mark_cancelled
             )
             terminal(task.user_id, task.task_id, now=self._now_iso())
         except Exception as error:
             self._remove_attempt_files(temporary_path, formal_path)
-            self._mark_control_failed(task, action, error)
+            failure_action = self._current_control_action(task)
+            if failure_action is None:
+                return
+            self._mark_control_failed(task, failure_action, error)
+
+    def _current_control_action(self, task: ImportTaskRecord) -> str | None:
+        current = self.repository.get_task(task.user_id, task.task_id)
+        if current is None:
+            return None
+        return self._control_action(current.status)
+
+    @staticmethod
+    def _control_action(status: str) -> str | None:
+        return {
+            "pause_requested": "pause",
+            "cancel_requested": "cancel",
+        }.get(status)
 
     def _mark_control_failed(
         self,
@@ -341,6 +369,12 @@ class ImportTaskRunner:
                 path.unlink(missing_ok=True)
             except OSError:
                 logger.warning("could not remove failed import file", exc_info=True)
+
+    @staticmethod
+    def _remove_control_attempt_files(*paths: Path | None) -> None:
+        for path in paths:
+            if path is not None:
+                path.unlink(missing_ok=True)
 
     @staticmethod
     def _cleanup_staged_file(path: Path) -> None:

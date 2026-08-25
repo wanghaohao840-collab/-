@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from app.import_models import ImportTaskCreate
 from app.import_repository import ImportTaskRepository
 from app.import_worker import ImportTaskRunner, ImportWorkerPool
 from app.storage import UserStorage
+from hello_agents.memory.rag.errors import RAGConnectionError
 
 
 CHECKPOINTS = ["parsing", "chunking", "embedding", "persisting", "committing"]
@@ -36,9 +38,14 @@ class FakeRuntimeRegistry:
 @dataclass
 class AssistantState:
     target_stage: str | None = None
+    failure_after_checkpoint_stage: str | None = None
+    load_failure: BaseException | None = None
     compensation_failure: BaseException | None = None
+    gate_compensation: bool = False
     reached: threading.Event = field(default_factory=threading.Event)
     release: threading.Event = field(default_factory=threading.Event)
+    compensation_reached: threading.Event = field(default_factory=threading.Event)
+    compensation_release: threading.Event = field(default_factory=threading.Event)
     load_calls: list[dict] = field(default_factory=list)
     compensation_calls: list[tuple[str, str]] = field(default_factory=list)
     close_count: int = 0
@@ -58,6 +65,10 @@ class ControlledAssistant:
                 self.state.reached.set()
                 assert self.state.release.wait(timeout=3)
             checkpoint(stage)
+            if stage == self.state.failure_after_checkpoint_stage:
+                self.state.reached.set()
+                assert self.state.release.wait(timeout=3)
+                raise self.state.load_failure or RuntimeError("late import failure")
         if self.state.target_stage == "post_load":
             self.state.reached.set()
             assert self.state.release.wait(timeout=3)
@@ -65,6 +76,9 @@ class ControlledAssistant:
 
     def compensate_import(self, document_id, import_task_id):
         self.state.compensation_calls.append((document_id, import_task_id))
+        if self.state.gate_compensation:
+            self.state.compensation_reached.set()
+            assert self.state.compensation_release.wait(timeout=3)
         if self.state.compensation_failure is not None:
             raise self.state.compensation_failure
 
@@ -213,6 +227,95 @@ def test_cancel_staging_cleanup_failure_does_not_report_cancelled(tmp_path, monk
     assert current.status == "failed"
     assert current.error_code == "cancel_cleanup_failed"
     assert harness.staged.exists()
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_code"),
+    [("pause", "pause_cleanup_failed"), ("cancel", "cancel_cleanup_failed")],
+)
+@pytest.mark.parametrize("failed_path", ["temporary", "formal"])
+def test_attempt_unlink_failure_never_reports_control_success(
+    tmp_path, monkeypatch, action, expected_code, failed_path
+):
+    harness = make_runner(tmp_path, AssistantState(target_stage="embedding"))
+    formal = harness.storage.document_path(
+        harness.user_id, harness.document_id, ".md"
+    )
+    temporary = harness.storage.temporary_document_path(
+        harness.user_id, harness.document_id, ".md"
+    )
+    failing_target = temporary if failed_path == "temporary" else formal
+    original_unlink = Path.unlink
+
+    def fail_attempt_unlink(path, *args, **kwargs):
+        if path == failing_target:
+            raise OSError(f"{failed_path} unlink failed")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_attempt_unlink)
+
+    run_until_control(harness, action)
+
+    current = harness.repository.get_task(harness.user_id, harness.task_id)
+    assert current.status == "failed"
+    assert current.error_code == expected_code
+    assert harness.staged.exists()
+    assert formal.exists() is (failed_path == "formal")
+
+
+@pytest.mark.parametrize("action", ["pause", "cancel"])
+def test_control_requested_after_checkpoint_before_import_error_uses_control_cleanup(
+    tmp_path, action
+):
+    state = AssistantState(
+        failure_after_checkpoint_stage="committing",
+        load_failure=RAGConnectionError("late backend failure"),
+    )
+    harness = make_runner(tmp_path, state)
+
+    run_until_control(harness, action)
+
+    current = harness.repository.get_task(harness.user_id, harness.task_id)
+    assert current.status == ("paused" if action == "pause" else "cancelled")
+    assert current.auto_retry_count == 0
+    assert current.error_code is None
+    assert state.compensation_calls == [(harness.document_id, harness.task_id)]
+    assert harness.staged.exists() is (action == "pause")
+
+
+def test_pause_upgraded_to_cancel_during_compensation_uses_latest_action(tmp_path):
+    state = AssistantState(target_stage="embedding", gate_compensation=True)
+    harness = make_runner(tmp_path, state)
+    claimed = harness.repository.claim_next(set())
+    assert claimed is not None and claimed.status == "running"
+    finished = threading.Event()
+    errors = []
+
+    def invoke():
+        try:
+            harness.runner.run(claimed)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=invoke)
+    thread.start()
+    assert state.reached.wait(timeout=3)
+    harness.repository.request_pause(harness.user_id, harness.task_id)
+    state.release.set()
+    assert state.compensation_reached.wait(timeout=3)
+    harness.repository.request_cancel(harness.user_id, harness.task_id)
+    state.compensation_release.set()
+    assert finished.wait(timeout=3)
+    thread.join()
+
+    assert errors == []
+    current = harness.repository.get_task(harness.user_id, harness.task_id)
+    assert current.status == "cancelled"
+    assert current.error_code is None
+    assert not harness.staged.exists()
+    assert state.compensation_calls == [(harness.document_id, harness.task_id)]
 
 
 def test_claimed_cancel_request_runs_cleanup_only_without_import(tmp_path):
