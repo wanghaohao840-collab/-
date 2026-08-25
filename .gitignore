@@ -37,3 +37,6 @@ knowledge_base/.graph/
 deploy/.env
 deploy-data/
 backups/
+deploy-state/
+.operations-test/
+.operations-test-*/
