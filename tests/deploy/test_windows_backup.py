@@ -107,7 +107,7 @@ def write_drill_harness(
         "  }\n"
         "  if ($FilePath -like '*python.exe') {\n"
         "    $envPath = $ArgumentList[[Array]::IndexOf($ArgumentList, '--env-file') + 1]\n"
-        "    if (-not (Get-Acl -LiteralPath $envPath).AreAccessRulesProtected) { throw 'drill env ACL still inherits access' }\n"
+        "    if (-not ([IO.File]::GetAccessControl($envPath)).AreAccessRulesProtected) { throw 'drill env ACL still inherits access' }\n"
         f"    Get-Content -LiteralPath $envPath -Raw | Set-Content -LiteralPath '{ps_quote(captured_env)}' -NoNewline\n"
         + failure_line
         + "  }\n"
@@ -239,6 +239,16 @@ def test_backup_and_restore_scripts_have_static_safety_contracts():
     assert ".failed-" in restore
     assert "Rename-Item" in restore
     assert "Remove-Item -Recurse" not in restore
+
+
+def test_mutating_operation_entry_points_hold_the_shared_exclusive_lock():
+    for script in (BACKUP, RESTORE, DRILL):
+        source = script.read_text(encoding="utf-8")
+        assert "Enter-OperationsLock -StateRoot $config.StateRoot" in source
+        assert "Exit-OperationsLock -Lock $operationLock" in source
+
+    drill = DRILL.read_text(encoding="utf-8")
+    assert "function Get-Acl" not in drill
 
 
 def test_backup_restore_round_trip_uses_fake_docker_and_retains_rollback(tmp_path: Path):

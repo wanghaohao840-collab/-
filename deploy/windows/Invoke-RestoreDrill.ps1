@@ -15,12 +15,6 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Common.psm1') -Force
-if ($null -eq (Get-Command Get-Acl -ListImported -ErrorAction SilentlyContinue)) {
-    function Get-Acl {
-        param([Parameter(Mandatory)][string]$LiteralPath)
-        return [IO.File]::GetAccessControl($LiteralPath)
-    }
-}
 
 function Invoke-DrillExternal {
     param(
@@ -241,6 +235,7 @@ $composeAttempted = $false
 $failureMessage = $null
 $failureStage = $null
 $failureCategory = $null
+$operationLock = $null
 $stage = 'configuration'
 $category = 'preflight'
 
@@ -288,6 +283,7 @@ try {
         throw 'Backup checksum changed during restore drill validation'
     }
 
+    $operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
     $stage = 'drill-setup'
     $drillsRoot = Join-Path $backupPath '.drills'
     Assert-BackupPathAncestorsSafe -Path $drillsRoot | Out-Null
@@ -367,6 +363,9 @@ try {
                 $failureMessage = "$failureMessage; $cleanupError"
             }
         }
+    }
+    if ($null -ne $operationLock) {
+        Exit-OperationsLock -Lock $operationLock
     }
 }
 

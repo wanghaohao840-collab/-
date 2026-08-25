@@ -155,6 +155,8 @@ if (-not $preExtractionHash.Equals($checksumMatch.Groups['hash'].Value, [StringC
     throw 'Backup checksum changed during restore validation'
 }
 
+$operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
+try {
 $dataParent = [IO.Path]::GetDirectoryName($dataRoot)
 Assert-BackupTreeSafe -Path $dataRoot -AllowedRoot $dataParent | Out-Null
 $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
@@ -247,3 +249,6 @@ try {
 }
 
 [PSCustomObject]@{ RestoredArchive = $archivePath; DataRoot = $dataRoot; Rollback = $rollbackPath }
+} finally {
+    Exit-OperationsLock -Lock $operationLock
+}

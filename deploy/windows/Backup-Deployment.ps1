@@ -139,6 +139,9 @@ if ((Test-PathOverlap $dataRoot $backupPath) -or (Test-PathOverlap $dataRoot $co
     throw 'Deployment data must not overlap backup or operations state roots'
 }
 
+$operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
+try {
+
 $dataParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($dataRoot))
 Assert-BackupTreeSafe -Path $dataRoot -AllowedRoot $dataParent | Out-Null
 $backupParent = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($backupPath))
@@ -234,4 +237,7 @@ foreach ($set in @($weeklyPlan.Remove)) {
     Checksum = "$archive.sha256"
     Metadata = "$archive.meta"
     WeeklyArchive = $weeklyArchive
+}
+} finally {
+    Exit-OperationsLock -Lock $operationLock
 }

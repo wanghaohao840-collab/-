@@ -153,6 +153,8 @@ def test_common_module_exports_exact_public_command_set():
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().split(",") == [
         "Assert-SafePath",
+        "Enter-OperationsLock",
+        "Exit-OperationsLock",
         "Get-FreeTcpPort",
         "Get-OperationsConfig",
         "Invoke-External",
@@ -165,6 +167,24 @@ def test_common_module_exports_exact_public_command_set():
         "Write-OperationsLog",
         "Write-OperationsStatus",
     ]
+
+
+def test_operations_lock_rejects_overlap_and_releases(tmp_path: Path):
+    state = tmp_path / "state"
+    result = run_ps(
+        import_module()
+        + f"$state = '{ps_quote(state)}'; "
+        + "$first = Enter-OperationsLock -StateRoot $state; "
+        + "try { "
+        + "  try { $second = Enter-OperationsLock -StateRoot $state; exit 11 } "
+        + "  catch { if ($_.Exception.Message -notmatch 'already in progress') { throw } } "
+        + "} finally { Exit-OperationsLock -Lock $first }; "
+        + "$second = Enter-OperationsLock -StateRoot $state; "
+        + "try { 'released' } finally { Exit-OperationsLock -Lock $second }"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "released"
 
 
 def test_operations_log_rotates_at_ten_mebibytes_and_discards_eighth_archive(

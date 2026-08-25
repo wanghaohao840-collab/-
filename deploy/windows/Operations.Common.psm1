@@ -363,6 +363,32 @@ function Get-FreeTcpPort {
     }
 }
 
+function Enter-OperationsLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StateRoot)
+
+    $root = [IO.Path]::GetFullPath($StateRoot)
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    $lockPath = Join-Path $root 'operations.lock'
+    try {
+        return [IO.File]::Open(
+            $lockPath,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None
+        )
+    } catch [IO.IOException] {
+        throw 'Another deployment operation is already in progress'
+    }
+}
+
+function Exit-OperationsLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][IDisposable]$Lock)
+
+    $Lock.Dispose()
+}
+
 function Wait-Until {
     [CmdletBinding()]
     param(
@@ -399,5 +425,7 @@ Export-ModuleMember -Function @(
     'Test-ComposeHealth',
     'Read-DeployEnvValue',
     'Get-FreeTcpPort',
+    'Enter-OperationsLock',
+    'Exit-OperationsLock',
     'Wait-Until'
 )
