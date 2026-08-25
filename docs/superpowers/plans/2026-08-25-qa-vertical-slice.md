@@ -62,7 +62,6 @@
 - Create `app/qa_deletion.py`: deletion request service and durable deletion worker.
 - Create `app/qa_memory.py`: deterministic, retryable QA Memory linking and unlinking.
 - Create `app/qa_migration.py`: per-user idempotent `history.json.questions` migration.
-- Delete `app/summary_tasks.py`: remove the superseded in-memory summary state after all callers move to durable QA jobs.
 - Modify `hello_agents/memory/manager.py` and `hello_agents/memory/types/episodic.py`: exact QA Memory removal by deterministic ID.
 - Modify `app/document_library.py`, `app/bootstrap.py`, `app/runtime.py`, `ui/gradio_app.py`, `app/reports.py` and focused tests.
 
@@ -276,7 +275,6 @@ Add `create table if not exists` statements for `qa_conversations`, `qa_conversa
 
 ```sql
 unique(user_id, id);
-unique(user_id, conversation_id, client_request_id);
 check(role in ('user','assistant'));
 check(status in ('pending','completed','failed','cancelled'));
 check(mode is null or mode in ('auto','joint','compare','summary'));
@@ -284,7 +282,7 @@ foreign key(conversation_id, user_id)
   references qa_conversations(id, user_id) on delete cascade;
 ```
 
-`qa_messages` includes `turn_id`, `retry_of_message_id`, `source_state`, `memory_id`, `memory_sync_status` (`pending/completed/failed/not_required`), `memory_sync_attempt_count`, `safe_error_code`, `trace_id`, `version`, and timestamps. Add deterministic recent-conversation, message-page, pending-memory-sync and source-order indexes. Running `initialize_database()` twice must be a no-op and preserve existing rows.
+`qa_messages` includes `turn_id`, nullable `client_request_id`, `retry_of_message_id`, `source_state`, `memory_id`, `memory_sync_status` (`pending/running/completed/failed/not_required`), `memory_sync_attempt_count`, Memory-sync lease owner/expiry, `safe_error_code`, `trace_id`, `version`, and timestamps. Only the user message carries `client_request_id`; its paired assistant message uses the shared `turn_id`. Add deterministic recent-conversation, message-page, pending-memory-sync and source-order indexes. Running `initialize_database()` twice must be a no-op and preserve existing rows.
 
 Enforce the active synchronous slot in SQLite as well as service code:
 
@@ -292,6 +290,10 @@ Enforce the active synchronous slot in SQLite as well as service code:
 create unique index if not exists uq_qa_messages_pending_conversation
 on qa_messages(user_id, conversation_id)
 where role = 'assistant' and status = 'pending';
+
+create unique index if not exists uq_qa_messages_client_request
+on qa_messages(user_id, conversation_id, client_request_id)
+where role = 'user' and client_request_id is not null;
 ```
 
 - [ ] **Step 5: Write repository isolation, idempotency and transition tests**
@@ -426,6 +428,7 @@ Mirror the pattern for `_last_action_error`. `execute_result()` continues return
 @dataclass(frozen=True)
 class QaAnswerRequest:
     question: str
+    conversation_context: str
     document_ids: tuple[str, ...]
     mode: Literal["auto", "joint", "compare", "summary"]
     limit: int = 5
@@ -484,6 +487,7 @@ class RagQaAnswerEngine:
         result = runtime.rag_tool.execute_result(
             "ask",
             query=request.question,
+            conversation_context=request.conversation_context,
             document_ids=list(request.document_ids),
             mode=request.mode,
             limit=request.limit,
@@ -508,7 +512,7 @@ class RagQaAnswerEngine:
         )
 ```
 
-Only include optional kwargs when non-null if the existing RAG path distinguishes absence. Map `data.sources` and `data.graph_sources` to safe drafts and reject a failed result with typed `QaEngineError(code, retryable)`.
+Only include optional kwargs when non-null if the existing RAG path distinguishes absence. Extend the RAG ask/prompt builders so `query` alone drives retrieval while `conversation_context` is added only to the final answer prompt under the existing token budget. Compare/joint prompt builders receive the same optional context; document-summary jobs pass an empty context. Map `data.sources` and `data.graph_sources` to safe drafts and reject a failed result with typed `QaEngineError(code, retryable)`. Add tests proving the retriever sees only the current question while the LLM prompt receives the persisted conversation context.
 
 - [ ] **Step 5: Remove question-history persistence from generation**
 
@@ -603,13 +607,18 @@ class QaContextBuilder:
         current_question: str,
     ) -> QaContextWindow:
         after_boundary = summary_through_message_id is None
-        recent: list[QaMessage] = []
+        grouped: dict[str, list[QaMessage]] = {}
         for message in messages:
             if message.id == summary_through_message_id:
                 after_boundary = True
                 continue
             if after_boundary and message.status == "completed":
-                recent.append(message)
+                grouped.setdefault(message.turn_id, []).append(message)
+        complete_turns = [
+            sorted(items, key=lambda item: (item.role != "user", item.created_at))
+            for items in grouped.values()
+            if {item.role for item in items} == {"user", "assistant"}
+        ]
 
         def render(items: Sequence[QaMessage], summary: str | None) -> str:
             parts = [f"历史摘要：{summary}"] if summary else []
@@ -620,10 +629,12 @@ class QaContextBuilder:
             parts.append(f"当前问题：{current_question}")
             return "\n\n".join(parts)
 
+        recent = [item for turn in complete_turns for item in turn]
         rendered = render(recent, rolling_summary)
         truncated = False
-        while recent and estimate_tokens(rendered) > self.max_input_tokens:
-            recent = recent[2:]
+        while complete_turns and estimate_tokens(rendered) > self.max_input_tokens:
+            complete_turns.pop(0)
+            recent = [item for turn in complete_turns for item in turn]
             truncated = True
             rendered = render(recent, rolling_summary)
         if estimate_tokens(rendered) > self.max_input_tokens and rolling_summary:
@@ -708,7 +719,8 @@ def ask(self, session_token, conversation_id, question, mode, client_request_id)
         result = self.answer_engine.answer(
             session.runtime,
             QaAnswerRequest(
-                question=context.rendered,
+                question=question,
+                conversation_context=context.rendered,
                 document_ids=tuple(item.document_id for item in conversation.documents),
                 mode=mode,
                 structured_output=mode == "compare",
@@ -742,7 +754,7 @@ Model/RAG work is outside transactions. A false conditional completion means can
 
 - [ ] **Step 6: Implement retry and recovery**
 
-`retry()` accepts only the current user's failed assistant message with a retryable safe code, reuses its user question, creates a new assistant message linked through `retry_of_message_id`, and executes once. `ApplicationServices.start()` will call `recover_interrupted_questions()` in Task 8; the repository transition must turn only pre-start synchronous `pending` messages into `failed/QA_REQUEST_INTERRUPTED`.
+`retry()` accepts only the current user's failed assistant message with a retryable safe code, reuses its user question, creates a new assistant message linked through `retry_of_message_id`, and executes once. `ApplicationServices.start()` will call `recover_interrupted_questions()` in Task 8; implement this as one conditional update that turns only pre-start synchronous `pending` messages with no joined `qa_jobs` row in `queued/running` into `failed/QA_REQUEST_INTERRUPTED`. Pending `mode=summary` messages backed by active jobs remain owned by job recovery. Add a restart test containing one sync pending turn and one queued summary turn: only the sync turn fails.
 
 - [ ] **Step 7: Run GREEN**
 
@@ -1016,17 +1028,18 @@ QA stores only deterministic episodic Memory IDs. Do not add a broad metadata de
 
 - [ ] **Step 5: Add durable deterministic QA Memory linking**
 
-`QaMemoryLinker` computes `qa-<uuid5(user_id:assistant_message_id)>`, writes exactly one episodic memory with `conversation_id`, `qa_message_id`, fixed document IDs and `event_type="pdf_qa"`, then conditionally attaches the ID and marks `memory_sync_status=completed`. Completed answers enter `memory_sync_status=pending`; `QaWorkerPool` claims pending/failed Memory sync records and retries them with the deterministic ID. A failure increments attempts, marks `failed`, emits a content-free metric and leaves the completed answer intact. Before and after Memory write, check the deletion fence; if attach loses a deletion race, remove the deterministic memory immediately.
+`QaMemoryLinker` computes `qa-<uuid5(user_id:assistant_message_id)>`, writes exactly one episodic memory with `conversation_id`, `qa_message_id`, fixed document IDs and `event_type="pdf_qa"`, then conditionally attaches the ID and marks `memory_sync_status=completed`. Completed answers enter `memory_sync_status=pending`; `QaWorkerPool` atomically claims `pending`, retryable `failed`, or lease-expired `running` records by setting `running`, lease owner/expiry and incremented attempts inside `begin immediate`. Only the current lease owner may complete or fail a claim. A failure increments attempts, marks `failed`, clears the lease, emits a content-free metric and leaves the completed answer intact. Before and after Memory write, check the deletion fence; if attach loses a deletion race, remove the deterministic memory immediately.
 
 Expose repository methods:
 
 ```python
 claim_next_memory_sync(worker_id, *, lease_seconds, now=None) -> QaMessage | None
-complete_memory_sync(user_id, message_id, memory_id, expected_version) -> bool
-fail_memory_sync(user_id, message_id, expected_version, safe_error_code) -> bool
+heartbeat_memory_sync(message_id, worker_id, *, lease_seconds, now=None) -> bool
+complete_memory_sync(user_id, message_id, worker_id, memory_id, expected_version) -> bool
+fail_memory_sync(user_id, message_id, worker_id, expected_version, safe_error_code) -> bool
 ```
 
-Startup/wake scans make failures compensatable without a new generic event bus.
+Startup/wake scans make failures compensatable without a new generic event bus. Tests must prove two workers cannot own the same live claim, an expired lease can be reclaimed once, and a stale owner cannot attach or fail Memory after lease loss.
 
 - [ ] **Step 6: Implement deletion service and worker stages**
 
@@ -1069,8 +1082,6 @@ git commit -m "feat: add safe QA cascade deletion"
 - Modify: `ui/gradio_app.py`
 - Modify: `assistants/pdf_learning_assistant.py`
 - Modify: `app/reports.py`
-- Delete: `app/summary_tasks.py`
-- Delete: `tests/test_summary_tasks.py`
 - Create: `tests/test_qa_migration.py`
 - Modify: `tests/ui/test_authenticated_handlers.py`
 - Modify: `tests/ui/test_summary_polling.py`
@@ -1112,7 +1123,7 @@ Expected: FAIL because migration and shared Gradio service path are absent.
 
 Create `qa_legacy_imports(user_id primary key, migration_version, source_digest, imported_count, skipped_count, completed_at)` with a user FK. Hash a canonical JSON projection of `questions[]`, not paths or secrets. `ensure_user_migrated()` uses `begin immediate`; each valid record becomes one `origin=legacy_json` conversation with one completed user/assistant turn and `source_state=legacy_unavailable`. It never groups unrelated records or injects them into rolling context.
 
-After a successful migration, keep the original history file unchanged as a read-only rollback source for one release cycle. Product/Gradio/report paths read QA from SQLite and never append, clear or rewrite `questions[]`.
+After a successful migration, keep the original history file as a non-authoritative rollback source for one release cycle. Product/Gradio/report paths never append new questions. Privacy operations are the exception: conversation/document deletion must remove the affected legacy question/document entries and any owned rollback copy so deleted content is not retained merely for rollback.
 
 - [ ] **Step 4: Add repository report projections**
 
@@ -1152,7 +1163,7 @@ return message.content
 
 `ask_pdf_with_sources()` formats `message.sources` rather than `_last_action_data`. Summary start/poll/cancel call `QaService` job methods. Preserve existing Gradio return shapes and safe Chinese messages. If no conversation ID exists in legacy state, one submission remains one truthful single-turn conversation.
 
-After the Gradio switch, remove `PDFLearningAssistant.start_summary_task()`, `get_summary_task()`, `cancel_summary_task()`, `_get_summary_task_manager`, its manager field/import/close hook, and delete `app/summary_tasks.py`. Move any still-relevant state/cancel/recovery assertions into Task 5 repository/worker tests; no in-memory background summary implementation remains.
+After the Gradio switch, production and Gradio callers no longer use `PDFLearningAssistant.start_summary_task()`, `get_summary_task()` or `cancel_summary_task()`. Keep those methods and `app/summary_tasks.py` for one release as explicitly deprecated direct-Python compatibility, with tests proving the product path never reaches them. Document their removal as a later breaking cleanup; do not maintain or extend the in-memory manager in this slice.
 
 - [ ] **Step 6: Switch report/statistics QA input and prove no dual write**
 
@@ -1169,7 +1180,7 @@ Expected: selected tests PASS; legacy handlers retain their public output tuple/
 - [ ] **Step 8: Commit**
 
 ```powershell
-git add -A app/database.py app/qa_migration.py app/qa_repository.py app/qa_service.py app/summary_tasks.py ui/gradio_app.py assistants/pdf_learning_assistant.py app/reports.py tests/test_summary_tasks.py tests/test_qa_migration.py tests/ui/test_authenticated_handlers.py tests/ui/test_summary_polling.py tests/test_report_service.py tests/test_legacy_migration.py
+git add app/database.py app/qa_migration.py app/qa_repository.py app/qa_service.py ui/gradio_app.py assistants/pdf_learning_assistant.py app/reports.py tests/test_qa_migration.py tests/ui/test_authenticated_handlers.py tests/ui/test_summary_polling.py tests/test_report_service.py tests/test_legacy_migration.py
 git commit -m "feat: migrate legacy QA history"
 ```
 
@@ -1255,7 +1266,7 @@ qa_deletion_worker: QaDeletionWorker
 qa_legacy_migration: QaLegacyMigrationService
 ```
 
-`start()` recovers interrupted sync questions and expired job/deletion leases before starting import, QA and deletion workers. `stop()` stops deletion, QA and import workers in reverse order. Repeated start/stop remains idempotent.
+`start()` first requeues expired summary/deletion/Memory-sync leases, then calls `recover_interrupted_questions()` with the active-job exclusion described in Task 4, and finally starts import, QA and deletion workers. This ordering preserves queued/running summary turns while failing only orphaned synchronous work. `stop()` stops deletion, QA and import workers in reverse order. Repeated start/stop remains idempotent.
 
 - [ ] **Step 4: Define exact Pydantic request/response schemas**
 
