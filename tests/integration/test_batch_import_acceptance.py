@@ -142,6 +142,14 @@ class TrackingImportTaskRepository(ImportTaskRepository):
             user_id, task_id, stage, progress, now=now
         )
 
+    def try_begin_committing(self, user_id, task_id, now=None):
+        committed = super().try_begin_committing(
+            user_id, task_id, now=now
+        )
+        if committed:
+            self.progress_updates.append((task_id, "committing", 0))
+        return committed
+
 
 class RecoveryTrackingImportTaskRepository(ImportTaskRepository):
     """Captures the synchronous recovery transition performed by pool.start()."""
