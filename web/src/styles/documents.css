@@ -361,13 +361,6 @@
   grid-column: 1 / -1;
 }
 
-.import-batch--terminal {
-  display: flex;
-  min-height: var(--document-control-target);
-  padding: var(--space-3) var(--space-4);
-  align-items: center;
-}
-
 .document-dialog-layer {
   position: fixed;
   z-index: 80;

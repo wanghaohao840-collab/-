@@ -114,19 +114,14 @@ describe("ImportBatchPanel", () => {
     expect(screen.queryByRole("button", { name: "取消 notes.md" })).not.toBeInTheDocument();
   });
 
-  it("renders terminal results as a non-interactive status block", () => {
-    renderPanel([
-      importTask({ status: "succeeded", stage: "succeeded", progress: 100 }),
-      importTask({
-        task_id: "cancelled",
-        original_name: "cancelled.md",
-        status: "cancelled",
-        stage: "cancelled",
-      }),
-    ]);
+  it.each([
+    ["succeeded", { status: "succeeded", stage: "succeeded", progress: 100 }],
+    ["cancelled", { status: "cancelled", stage: "cancelled" }],
+  ] as const)("omits a %s-only terminal batch from the DOM", (_label, overrides) => {
+    const { container } = renderPanel([importTask(overrides)]);
 
-    const terminal = screen.getByRole("region", { name: "最近导入结果" });
-    expect(terminal).toHaveTextContent("完成 1 · 取消 1");
-    expect(terminal.querySelector("summary")).not.toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByRole("region", { name: "最近导入结果" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/最近导入结果/)).not.toBeInTheDocument();
   });
 });

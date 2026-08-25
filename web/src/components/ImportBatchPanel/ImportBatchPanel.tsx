@@ -136,27 +136,26 @@ export function ImportBatchPanel({
   retryingBatchId,
   retryingTask,
 }: ImportBatchPanelProps) {
+  const visibleBatches = batches.filter(
+    (batch) =>
+      batch.counts.failed > 0 ||
+      batch.tasks.some(
+        (task) =>
+          task.status === "queued" ||
+          task.status === "running" ||
+          task.status === "retry_wait",
+      ),
+  );
+  if (!visibleBatches.length) return null;
+
   return (
     <div className="import-batches">
-      {batches.map((batch) => {
+      {visibleBatches.map((batch) => {
         const visibleTasks = batch.tasks.filter((task) => task.status !== "succeeded");
         const active = batch.tasks.some((task) =>
           task.status === "queued" || task.status === "running" || task.status === "retry_wait",
         );
         const failed = batch.counts.failed > 0;
-        if (!active && !failed) {
-          return (
-            <section
-              className="import-batch import-batch--terminal"
-              key={batch.batch_id}
-              aria-label="最近导入结果"
-            >
-              <p>
-                最近导入结果 · 完成 {batch.counts.succeeded} · 取消 {batch.counts.cancelled}
-              </p>
-            </section>
-          );
-        }
         return (
           <section
             className={`import-batch${failed ? " import-batch--failed" : ""}`}

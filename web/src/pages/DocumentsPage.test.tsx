@@ -263,7 +263,7 @@ describe("DocumentsPage", () => {
     expect(screen.getByText("索引失败，请稍后重试")).toBeVisible();
     expect(screen.getByRole("button", { name: "重试 task-notes.md" })).toBeVisible();
     expect(screen.getByRole("button", { name: "重试全部失败项" })).toBeVisible();
-    expect(screen.getByText("最近导入结果 · 完成 1 · 取消 0")).toBeVisible();
+    expect(screen.queryByText("最近导入结果 · 完成 1 · 取消 0")).not.toBeInTheDocument();
   });
 
   it("uses exact retry, retry-all and cancel routes without unhandled promises", async () => {
