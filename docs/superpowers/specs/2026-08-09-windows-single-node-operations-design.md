@@ -314,6 +314,78 @@ Bypass -File ...` 参数中加入 `-WindowStyle Hidden`，默认在后台运行�
 隐藏窗口参数、既定 action/trigger/principal/settings，并手动启动 LoginRecovery 与
 Health，确认无控制台弹窗且默认冒烟检查仍通过。
 
+#### 8.3.3 月度任务的受控 XML fallback
+
+2026-08-25 的隔离 canary 已证明本机 `RegisterByPrincipal` 也不能接受验证后的月度
+CIM trigger：唯一一次提升运行返回 `CimException / InvalidArgument`、零注册输出和
+exit 51；finally 清理与 provider/`schtasks` 双重不存在证明均成功，生产快照完全不变。
+因此不得重试 `RegisterByObject` 或 `RegisterByPrincipal`，月度任务进入本节预留的
+XML fallback。其他三个任务继续使用现有 `-InputObject` 路径；只有
+`PythonSelfAgent-MonthlyRestoreDrill` 使用 `Register-ScheduledTask -Xml`。
+
+安装器新增一个单一职责构造器：
+
+```powershell
+New-OperationsMonthlyRestoreDrillXml `
+  -Task <validated task definition> `
+  -Principal <validated active-WTS principal> `
+  -> [string]
+```
+
+构造器必须使用 `System.Xml.XmlWriter` 或 `XmlDocument` 节点 API 和 Task Scheduler
+命名空间 `http://schemas.microsoft.com/windows/2004/02/mit/task`，不得通过字符串拼接
+或模板替换组装 XML。所有动态值在进入构造器前已由现有路径合同验证；用户主体必须
+解析为当前活动 WTS 身份的 SID，action 只能来自已经验证的单个
+`New-OperationsTaskAction` 对象。XML 节点 API 负责转义 action 参数，不允许 XML
+片段、任意 task name、额外 action 或调用方提供的 principal/settings 文本。
+
+XML 的固定语义为：schema version `1.4`；根路径任务；一个 `CalendarTrigger`，其
+`StartBoundary` 为安装当日本地 04:00:00、`Enabled=true`，并包含一个
+`ScheduleByMonthDayOfWeek`：`Weeks/Week=1`、`DaysOfWeek/Sunday`、January 至
+December 各一次。一个 principal 使用当前 WTS SID、`InteractiveToken` 和
+`HighestAvailable`。一个 `Exec` action 使用 `powershell.exe`，参数与验证后的 action
+完全一致并含且仅含一个 `-WindowStyle Hidden`。settings 必须表达
+`MultipleInstancesPolicy=IgnoreNew`、`StartWhenAvailable=true`、`WakeToRun=true`、
+`Enabled=true`、`Hidden=false`、`AllowStartOnDemand=true`、`ExecutionTimeLimit=PT72H`
+和 `Priority=7`；同时固定
+`DisallowStartIfOnBatteries=true`、`StopIfGoingOnBatteries=true`、
+`AllowHardTerminate=true`、`RunOnlyIfIdle=false`、
+`RunOnlyIfNetworkAvailable=false`、`DisallowStartOnRemoteAppSession=false`、
+`UseUnifiedSchedulingEngine=true`，以及 IdleSettings 的 `Duration=PT10M`、
+`WaitTimeout=PT1H`、`StopOnIdleEnd=true`、`RestartOnIdle=false`。不写空的过期删除、
+重启间隔或维护设置。
+`Hidden=false` 保持任务可审计；窗口隐藏仅由 action 参数实现。
+
+注册调用只有这一种形式：
+
+```powershell
+$result = @(Register-ScheduledTask `
+  -TaskName 'PythonSelfAgent-MonthlyRestoreDrill' `
+  -TaskPath '\' -Xml $monthlyXml -Force -ErrorAction Stop)
+```
+
+调用必须返回恰好一个非空对象，且其名称和根路径精确匹配。随后立即使用
+`Get-ScheduledTask`、`Export-ScheduledTask` 和 `schtasks /Query /XML` 三路重查。
+两份持久化 XML 按语义而非字节比较：首个星期日、04:00、全年月份、SID、
+InteractiveToken、HighestAvailable、单一 action、隐藏窗口参数、Enabled 和全部
+settings 必须相同。provider 的 task-level `Settings.Enabled` 也必须为 true。
+任何 native stderr、非零退出码、空/多输出、缺失节点、重复节点或值漂移都提升为
+安装失败；不得仅因 `Register-ScheduledTask` 返回而宣布成功。
+
+生产安装仍然先构造并验证四个内存任务定义，再开始任何系统写入。月度 XML 也必须在
+该写边界前构造、重新解析并完成同一组语义断言。注册后复用最终四任务/一规则/精确
+ACL 断言；从当前两个禁用任务状态幂等收敛，失败时保留可诊断的部分状态，不删除已
+存在的有效任务、防火墙或 ACL。包装器只有在连续两次安装均返回 0 且独立 postflight
+验证四个已启用任务后才能写 `success`。
+
+TDD 至少覆盖：XML 构造器正确生成全部固定节点；特殊字符仅作为转义后的 action
+参数文本；缺失/重复月份、错误星期/周次/时间、非当前 SID、错误 LogonType/RunLevel、
+额外 action、缺失或重复 `-WindowStyle Hidden`、`Enabled=false`、错误 WakeToRun 或
+MultipleInstances 均在写前/重查时失败；月度仅调用 `-Xml` 而其他三个仅调用
+`-InputObject`；provider 非终止错误被提升；零/多输出失败；从零、两个禁用、三个或
+四个合法部分状态收敛为四个已启用任务；第二次安装不产生重复。禁止 COM、
+`schtasks /Create`、每周近似、一次性自重排和任何新的 canary 重试。
+
 ## 9. 备份、保留与恢复演练
 
 ### 9.1 Windows 冷备份
