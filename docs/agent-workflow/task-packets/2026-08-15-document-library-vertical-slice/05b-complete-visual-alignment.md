@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-05b"
 title: "Align completed document imports to the Penpot complete state"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-05a"]
 base-commit: "4f0ea78"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Corrective Task Packet: Align completed imports to the complete state
@@ -44,6 +44,16 @@ Task 6 generated all six focused visual candidates successfully, then human comp
 ## Handoff
 
 Record RED/GREEN, changed paths, visual comparison, full gates and commit; leave only the pre-existing Task 6 E2E changes dirty.
+
+## Completion record
+
+- RED: succeeded-only and cancelled-only batches rendered the superseded terminal summary; the focused run failed the three expected assertions.
+- GREEN: terminal-only batches now render no DOM, while active, retry and failed/mixed coverage remains green.
+- Changed production paths: `ImportBatchPanel.tsx` and removal of its unused terminal CSS; tests updated only within the packet boundary.
+- Visual contract: Complete states now proceed directly from toolbar/filter to the document list, matching the desktop, tablet and mobile Penpot boards.
+- Gates: frontend `102/102`, typecheck, lint, build, component map `6/6`, design-token check and `git diff --check` all pass.
+- Implementation commit: `e9707ee`.
+- Task 6 E2E files were preserved unstaged for the resumed visual-acceptance task.
 
 ## Reality-conflict report
 
