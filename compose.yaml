@@ -1,5 +1,6 @@
 services:
   app:
+    image: python_self_agent-app:local
     build:
       context: .
       dockerfile: Dockerfile
@@ -22,8 +23,14 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   qdrant:
+    image: python_self_agent-qdrant:local
     build:
       context: .
       dockerfile: deploy/qdrant.Dockerfile
@@ -42,11 +49,16 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
   neo4j:
     profiles:
       - graph
-    image: neo4j:5.26.28-community
+    image: neo4j:5.26.28-community@sha256:ff32db30b2baff97971e441b46bfd9c832c1b62c970398ef579244c06b21d357
     env_file:
       - ${DEPLOY_ENV_FILE:-deploy/.env}
     environment:
@@ -67,6 +79,11 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 networks:
   app_net:

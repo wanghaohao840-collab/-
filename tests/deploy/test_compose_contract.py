@@ -17,8 +17,16 @@ def test_compose_contains_default_app_and_qdrant_and_optional_graph():
     qdrant_image = (
         ROOT / "deploy" / "qdrant.Dockerfile"
     ).read_text(encoding="utf-8")
-    assert "qdrant/qdrant:v1.18.2" in qdrant_image
-    assert "neo4j:5.26.28-community" in source
+    assert (
+        "qdrant/qdrant:v1.18.3@sha256:"
+        "0bd98fa7977f1e75694779359ca4e212822e5a71334e28421182f72f209d5286"
+        in qdrant_image
+    )
+    assert (
+        "neo4j:5.26.28-community@sha256:"
+        "ff32db30b2baff97971e441b46bfd9c832c1b62c970398ef579244c06b21d357"
+        in source
+    )
 
 
 def test_only_app_publishes_a_host_port():
@@ -31,6 +39,18 @@ def test_only_app_publishes_a_host_port():
     assert "ports:" in app_block
     assert "ports:" not in qdrant_block
     assert "ports:" not in neo4j_block
+    assert 'expose:\n      - "6333"' in qdrant_block
+    assert "http://127.0.0.1:6333/readyz" in qdrant_block
+
+
+def test_services_use_stable_local_images_and_bounded_logs():
+    source = COMPOSE.read_text(encoding="utf-8")
+
+    assert "image: python_self_agent-app:local" in source
+    assert "image: python_self_agent-qdrant:local" in source
+    assert source.count("driver: local") == 3
+    assert source.count('max-size: "10m"') == 3
+    assert source.count('max-file: "5"') == 3
 
 
 def test_app_runs_as_the_deployment_account():
@@ -68,3 +88,11 @@ def test_environment_template_contains_no_real_secret():
     assert "NEO4J_PASSWORD=" in source
     assert "replace" in source.lower()
     assert "sk-" not in source
+
+
+def test_environment_template_contains_operations_roots_and_cooldown():
+    source = ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    assert "DEPLOY_STATE_ROOT=./deploy-state" in source
+    assert "DEPLOY_BACKUP_ROOT=D:/python_self_agent_backups" in source
+    assert "OPERATIONS_NOTIFY_COOLDOWN_MINUTES=30" in source
