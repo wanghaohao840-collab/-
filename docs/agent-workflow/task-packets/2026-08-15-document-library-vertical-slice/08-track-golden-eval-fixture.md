@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-08"
 title: "Track the multi-document golden evaluation fixture"
-status: "ready"
+status: "done"
 parallel-safe: true
 depends-on: []
 base-commit: "14a990ed6e5260760411b2d7fad0c2ead7dda342"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Corrective Task Packet: Track the multi-document golden evaluation fixture
@@ -111,4 +111,14 @@ Stop if the main fixture differs from the four documented case IDs, contains sen
 
 ## Implementation handoff
 
-Replace with the workflow handoff template, including fixture provenance, focused result, scope and commit.
+- Packet: `document-library-vertical-slice-08`
+- Status: `done`
+- Delivered: the authoritative four-case synthetic golden JSON is tracked with a narrow ignore exception.
+- Files changed: `.gitignore`; `evals/data/multi_document_qa.json`.
+- Interfaces added or changed: repository test fixture availability only.
+- Acceptance evidence: golden test PASS `1 passed`; fixture ignore exit `1`; unrelated `data/example.json` remains ignored with exit `0`.
+- Verification: focused golden evaluation and `git diff --check` PASS.
+- Scope confirmation: changed only allowed files: yes; forbidden areas untouched: yes.
+- Deviations: `none`.
+- Residual risks/follow-ups: rerun final repository integration suite.
+- Commit: `50d0ee6`.

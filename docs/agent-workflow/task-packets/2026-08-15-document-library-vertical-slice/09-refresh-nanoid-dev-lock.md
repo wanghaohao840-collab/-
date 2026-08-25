@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-09"
 title: "Refresh the patched nanoid development lock"
-status: "ready"
+status: "done"
 parallel-safe: true
 depends-on: []
 base-commit: "14a990ed6e5260760411b2d7fad0c2ead7dda342"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Corrective Task Packet: Refresh the patched nanoid development lock
@@ -115,4 +115,14 @@ Stop if the fix requires a top-level version change, unrelated lock churn, sourc
 
 ## Implementation handoff
 
-Replace with the workflow handoff template, including before/after audit counts, exact lock change, gates and commit.
+- Packet: `document-library-vertical-slice-09`
+- Status: `done`
+- Delivered: lock-only compatible refresh from dev-only `nanoid 3.3.17` to `3.3.18`.
+- Files changed: `web/package-lock.json` only.
+- Interfaces added or changed: none; top-level package versions unchanged.
+- Acceptance evidence: full and production-only npm audits both report zero vulnerabilities.
+- Verification: `npm ci`, frontend `102/102`, typecheck, lint and build PASS; lock diff is one version/resolved/integrity entry.
+- Scope confirmation: changed only allowed files: yes; forbidden areas untouched: yes.
+- Deviations: `none`.
+- Residual risks/follow-ups: rerun final repository integration suite.
+- Commit: `7f385f4`.

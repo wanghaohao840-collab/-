@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-07"
 title: "Track atomic committing transitions in import acceptance"
-status: "ready"
+status: "done"
 parallel-safe: true
 depends-on: ["document-library-vertical-slice-03"]
 base-commit: "14a990ed6e5260760411b2d7fad0c2ead7dda342"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Corrective Task Packet: Track atomic committing transitions in import acceptance
@@ -107,4 +107,14 @@ Stop on any changed production signature, need to relax stage order, or required
 
 ## Implementation handoff
 
-Replace with the workflow handoff template, including focused counts, scope and commit.
+- Packet: `document-library-vertical-slice-07`
+- Status: `done`
+- Delivered: the integration tracking repository delegates to the real atomic gate and records `committing` only after a winning transition.
+- Files changed: `tests/integration/test_batch_import_acceptance.py` only.
+- Interfaces added or changed: test-only `TrackingImportTaskRepository.try_begin_committing(...)` override.
+- Acceptance evidence: exact six-stage suffix restored; false/exception paths remain unlogged because append follows successful delegation.
+- Verification: focused import acceptance — PASS, `6 passed`; `git diff --check` PASS.
+- Scope confirmation: changed only allowed files: yes; forbidden areas untouched: yes.
+- Deviations: `none`.
+- Residual risks/follow-ups: rerun final repository integration suite.
+- Commit: `f909bc2`.
