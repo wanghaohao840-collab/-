@@ -26,8 +26,27 @@ UPDATE = ROOT / "deploy" / "windows" / "Update-Deployment.ps1"
 def run_ps(
     script: str, *, timeout: float = 60, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
+    if len(script) > 8_000:
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$sourceText=[Console]::In.ReadToEnd(); "
+            "& ([scriptblock]::Create($sourceText))",
+        ]
+        script_input = script
+    else:
+        command = [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ]
+        script_input = None
     return subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        command,
         cwd=ROOT,
         encoding="utf-8",
         errors="replace",
@@ -35,6 +54,7 @@ def run_ps(
         check=False,
         timeout=timeout,
         env=env,
+        input=script_input,
     )
 
 
@@ -789,7 +809,10 @@ def test_operations_installer_has_private_intranet_and_exact_task_contracts():
     assert "RepetitionInterval (New-TimeSpan -Minutes 5)" in source
     assert "-Daily -At '03:00'" in source
     assert "New-ScheduledTaskAction -Execute 'powershell.exe'" in source
-    assert "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File" in source
+    assert (
+        "-NoProfile -NonInteractive -WindowStyle Hidden "
+        "-ExecutionPolicy Bypass -File"
+    ) in source
     assert "Register-ScheduledTask" in source
     assert "-Force" in source
     assert '"${currentUser}:(M)"' in source
@@ -824,9 +847,9 @@ def test_operations_installer_preflights_before_system_mutations():
         "icacls.exe",
         "Remove-NetFirewallRule",
         "New-NetFirewallRule",
-        "Register-ScheduledTask",
     ):
         assert source.index(mutation) > preflight_end
+    assert source.index("Register-OperationsTask -Task $task", preflight_end) > preflight_end
 
 
 def test_operations_uninstaller_removes_only_its_exact_tasks_and_rule():
@@ -1037,6 +1060,13 @@ def assert_installer_monthly_static_contracts(source: str) -> None:
         "Resolve-OperationsMonthlyTriggerSchema",
         "Assert-OperationsMonthlyRestoreDrillTrigger",
         "New-OperationsMonthlyRestoreDrillTrigger",
+        "Add-OperationsTaskXmlElement",
+        "Assert-OperationsMonthlyRestoreDrillXml",
+        "New-OperationsMonthlyRestoreDrillXml",
+        "Get-OperationsSchtasksXml",
+        "Register-OperationsTask",
+        "Assert-OperationsPersistedTask",
+        "Assert-OperationsInstalledState",
     ):
         assert helper_name in source
     for exact_contract in (
@@ -1044,9 +1074,485 @@ def assert_installer_monthly_static_contracts(source: str) -> None:
         "DaysOfWeek = [uint16]1",
         "WeeksOfMonth = [uint16]1",
         "$properties[$monthPropertyName] = [uint16]4095",
-        "-InputObject $task.Definition",
+        "-TaskPath '\\' -Xml $MonthlyXml -Force -ErrorAction Stop",
+        "-TaskPath '\\' -InputObject $Task.Definition -Force -ErrorAction Stop",
     ):
         assert exact_contract in source
+
+
+def test_installer_monthly_xml_has_static_registration_and_hidden_window_contracts():
+    source = INSTALL.read_text(encoding="utf-8")
+
+    assert "New-Object Xml.XmlDocument" in source
+    assert ".CreateElement(" in source
+    assert "[xml]$document = $XmlText" in source
+    assert "$document.OuterXml" in source
+    assert "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File" in source
+    assert source.count("-WindowStyle Hidden") == 1
+    assert "-LogonType S4U" not in source
+    assert "Schedule.Service" not in source
+    assert "schtasks.exe /Create" not in source
+    assert "RegisterByPrincipal" not in source
+
+    write_boundary = source.index(
+        "# All preflight checks and in-memory task validation are above this line."
+    )
+    xml_build = source.index("$monthlyXml = New-OperationsMonthlyRestoreDrillXml")
+    xml_validation = source.index(
+        "Assert-OperationsMonthlyRestoreDrillXml -XmlText $xmlText"
+    )
+    assert xml_build < write_boundary
+    assert xml_validation < write_boundary
+
+
+def test_installer_monthly_xml_escapes_action_text_and_validates_semantics():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+        + "$principal = [PSCustomObject]@{ UserId=$user }; "
+        + "$arguments = '-NoProfile -NonInteractive -WindowStyle Hidden "
+        + "-ExecutionPolicy Bypass -File \"C:\\A&B\\<drill>.ps1\"'; "
+        + "$task = [PSCustomObject]@{ Name='PythonSelfAgent-MonthlyRestoreDrill'; "
+        + "Action=[PSCustomObject]@{ Execute='powershell.exe'; Arguments=$arguments }; "
+        + "Trigger=[PSCustomObject]@{ StartBoundary='2026-08-02T04:00:00' } }; "
+        + "$xml = New-OperationsMonthlyRestoreDrillXml -Task $task -Principal $principal; "
+        + "if ($xml -notmatch '&amp;' -or $xml -notmatch '&lt;drill&gt;') { exit 101 }; "
+        + "[xml]$doc=$xml; $ns=New-Object Xml.XmlNamespaceManager($doc.NameTable); "
+        + "$ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task'); "
+        + "$actual=$doc.SelectSingleNode('/t:Task/t:Actions/t:Exec/t:Arguments',$ns).InnerText; "
+        + "if ($actual -cne $arguments) { exit 102 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "$months=$doc.SelectSingleNode('//t:Months',$ns); "
+        "$months.AppendChild($months.FirstChild.CloneNode($true)) | Out-Null",
+        "$days=$doc.SelectSingleNode('//t:DaysOfWeek',$ns); "
+        "$days.RemoveAll(); $days.AppendChild("
+        "$doc.CreateElement('Saturday',$days.NamespaceURI)) | Out-Null",
+        "$doc.SelectSingleNode('//t:CalendarTrigger/t:Enabled',$ns).InnerText='false'",
+        "$actions=$doc.SelectSingleNode('//t:Actions',$ns); "
+        "$actions.AppendChild($actions.FirstChild.CloneNode($true)) | Out-Null",
+        "$doc.SelectSingleNode('//t:Settings/t:WakeToRun',$ns).InnerText='false'",
+        "$doc.SelectSingleNode('//t:Actions/t:Exec/t:Arguments',$ns).InnerText="
+        "'-NoProfile -NonInteractive -ExecutionPolicy Bypass -File x'",
+    ),
+)
+def test_installer_monthly_xml_rejects_semantic_drift(mutation: str):
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $user=[Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+        + "$sid=([Security.Principal.NTAccount]$user).Translate("
+        + "[Security.Principal.SecurityIdentifier]).Value; "
+        + "$principal=[PSCustomObject]@{ UserId=$user }; "
+        + "$task=[PSCustomObject]@{ Name='PythonSelfAgent-MonthlyRestoreDrill'; "
+        + "Action=[PSCustomObject]@{ Execute='powershell.exe'; Arguments="
+        + "'-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File x' }; "
+        + "Trigger=[PSCustomObject]@{ StartBoundary='2026-08-02T04:00:00' } }; "
+        + "$xml=New-OperationsMonthlyRestoreDrillXml -Task $task -Principal $principal; "
+        + "[xml]$doc=$xml; $ns=New-Object Xml.XmlNamespaceManager($doc.NameTable); "
+        + "$ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task'); "
+        + mutation
+        + "; try { Assert-OperationsMonthlyRestoreDrillXml -XmlText $doc.OuterXml "
+        + "-ExpectedTask $task -ExpectedSid $sid; exit 103 } catch { exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("output_count", [0, 2])
+def test_installer_registration_error_rejects_wrong_result_count(output_count: int):
+    objects = ",".join(
+        "[PSCustomObject]@{ TaskName='PythonSelfAgent-Health'; TaskPath='\\' }"
+        for _ in range(output_count)
+    )
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; function Register-ScheduledTask { [CmdletBinding()] param("
+        + "$TaskName,$TaskPath,$InputObject,$Xml,[switch]$Force); "
+        + (f"@({objects})" if objects else "@()")
+        + " }; $task=[PSCustomObject]@{ Name='PythonSelfAgent-Health'; Definition='d' }; "
+        + "try { Register-OperationsTask -Task $task -MonthlyXml $null | Out-Null; "
+        + "exit 104 } catch { if ($_.Exception.Message -notlike "
+        + "'*registration returned an invalid result*') { exit 105 }; exit 0 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_installer_registration_routes_only_monthly_xml_and_others_input_object():
+    result = run_ps(
+        "& { "
+        + installer_prelude()
+        + "; $script:calls=@(); function Register-ScheduledTask { [CmdletBinding()] param("
+        + "$TaskName,$TaskPath,$InputObject,$Xml,[switch]$Force); "
+        + "$script:calls += [PSCustomObject]@{ Name=$TaskName; Path=$TaskPath; "
+        + "HasInput=$PSBoundParameters.ContainsKey('InputObject'); "
+        + "HasXml=$PSBoundParameters.ContainsKey('Xml'); "
+        + "EA=[string]$PSBoundParameters['ErrorAction'] }; "
+        + "[PSCustomObject]@{ TaskName=$TaskName; TaskPath=$TaskPath } }; "
+        + "$normal=[PSCustomObject]@{ Name='PythonSelfAgent-Health'; Definition='d' }; "
+        + "$monthly=[PSCustomObject]@{ Name='PythonSelfAgent-MonthlyRestoreDrill'; Definition='d' }; "
+        + "Register-OperationsTask -Task $normal -MonthlyXml $null | Out-Null; "
+        + "Register-OperationsTask -Task $monthly -MonthlyXml '<Task />' | Out-Null; "
+        + "if ($script:calls.Count -ne 2 -or $script:calls[0].HasXml -or "
+        + "-not $script:calls[0].HasInput -or -not $script:calls[1].HasXml -or "
+        + "$script:calls[1].HasInput -or $script:calls[0].EA -ne 'Stop' -or "
+        + "$script:calls[1].EA -ne 'Stop' -or $script:calls[0].Path -ne '\\' -or "
+        + "$script:calls[1].Path -ne '\\') { exit 106 } }"
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def run_installer_fake_harness(
+    tmp_path: Path,
+    *,
+    scenario: str = "success",
+    initial_count: int = 0,
+    passes: int = 1,
+) -> subprocess.CompletedProcess[str]:
+    copied_windows = tmp_path / "fake-installer" / "deploy" / "windows"
+    copied_windows.mkdir(parents=True)
+    copied_installer = copied_windows / INSTALL.name
+    source = INSTALL.read_text(encoding="utf-8")
+    source = source.replace("#Requires -Version 5.1\n", "")
+    source = source.replace("#Requires -RunAsAdministrator\n", "")
+    source = source.replace("Import-Module $modulePath -Force", "")
+    source = source.replace(
+        "$currentUser = Get-OperationsInteractiveUserName",
+        "$currentUser = [Security.Principal.WindowsIdentity]::GetCurrent().Name",
+    )
+    source = source.replace(
+        "$monthlyTrigger = New-OperationsMonthlyRestoreDrillTrigger `\n"
+        "    -StartBoundary (Get-Date -Hour 4 -Minute 0 -Second 0)",
+        "$monthlyTrigger = [PSCustomObject]@{ StartBoundary = "
+        "(Get-Date -Hour 4 -Minute 0 -Second 0).ToString('s') }",
+    )
+    copied_installer.write_text(source, encoding="utf-8")
+    for script_name in (
+        "Start-Deployment.ps1",
+        "Test-DeploymentHealth.ps1",
+        "Backup-Deployment.ps1",
+        "Invoke-RestoreDrill.ps1",
+    ):
+        (copied_windows / script_name).write_text("# fake\n", encoding="utf-8")
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    env_file = repository / "deploy.env"
+    env_file.write_text("DEPLOY_DATA_ROOT=data\n", encoding="utf-8")
+    state = tmp_path / "state"
+    backup = tmp_path / "backup"
+    script = (
+        f"$global:harnessScenario='{scenario}'; "
+        f"$global:initialCount={initial_count}; "
+        + r"""
+$global:harnessUser=[Security.Principal.WindowsIdentity]::GetCurrent().Name
+$global:harnessSid=([Security.Principal.NTAccount]$global:harnessUser).Translate(
+  [Security.Principal.SecurityIdentifier]).Value
+$global:taskStore=@{}
+$global:registerCalls=@()
+$global:firewallRule=$null
+$global:monthlyXml=$null
+$names=@(
+  'PythonSelfAgent-LoginRecovery','PythonSelfAgent-Health',
+  'PythonSelfAgent-DailyBackup','PythonSelfAgent-MonthlyRestoreDrill'
+)
+for($i=0; $i -lt $global:initialCount; $i++) {
+  $global:taskStore[$names[$i]]=[PSCustomObject]@{
+    TaskName=$names[$i]; TaskPath='\';
+    Settings=[PSCustomObject]@{ Enabled=($global:initialCount -ne 2) }
+  }
+}
+if($global:harnessScenario -eq 'extra_task') {
+  $global:taskStore['PythonSelfAgent-Unexpected']=[PSCustomObject]@{
+    TaskName='PythonSelfAgent-Unexpected'; TaskPath='\';
+    Settings=[PSCustomObject]@{ Enabled=$true }
+  }
+}
+function global:Get-OperationsConfig {
+  param($RepositoryRoot,$EnvFile,$StateRoot,$BackupRoot)
+  [PSCustomObject]@{
+    RepositoryRoot=$RepositoryRoot; EnvFile=$EnvFile; StateRoot=$StateRoot;
+    BackupRoot=$BackupRoot; ComposeFile=(Join-Path $RepositoryRoot 'compose.yaml')
+  }
+}
+function global:Get-Command { param($Name,$CommandType) [PSCustomObject]@{ Name=$Name } }
+function global:Invoke-External { param($FilePath,$ArgumentList) @() }
+function global:Get-NetConnectionProfile { @() }
+function global:Get-NetTCPConnection { @() }
+function global:New-ScheduledTaskPrincipal {
+  param($UserId,$LogonType,$RunLevel)
+  [PSCustomObject]@{ UserId=$UserId; LogonType=[string]$LogonType; RunLevel=[string]$RunLevel }
+}
+function global:New-ScheduledTaskAction {
+  param($Execute,$Argument)
+  [PSCustomObject]@{ Execute=$Execute; Arguments=$Argument }
+}
+function global:New-ScheduledTaskSettingsSet {
+  param([switch]$StartWhenAvailable,$MultipleInstances)
+  [PSCustomObject]@{ Enabled=$true; StartWhenAvailable=$true;
+    MultipleInstances='IgnoreNew'; WakeToRun=$false }
+}
+function global:New-ScheduledTaskTrigger {
+  param([switch]$AtLogOn,[switch]$Daily,[switch]$Once,$At,
+    $RepetitionInterval,$RepetitionDuration)
+  $className=if($AtLogOn){'MSFT_TaskLogonTrigger'}elseif($Daily){'MSFT_TaskDailyTrigger'}else{'MSFT_TaskTimeTrigger'}
+  [PSCustomObject]@{ Enabled=$true;
+    StartBoundary=if($At){([datetime]$At).ToString('s')}else{''};
+    DaysInterval=if($Daily){1}else{$null};
+    UserId=$null; Delay=$null;
+    Repetition=if($Once){[PSCustomObject]@{ Interval='PT5M'; Duration='P1D';
+      StopAtDurationEnd=$true }}else{$null};
+    CimClass=[PSCustomObject]@{ CimClassName=$className } }
+}
+function global:New-ScheduledTask {
+  [CmdletBinding()] param($Action,$Trigger,$Settings,$Principal)
+  [PSCustomObject]@{ Actions=@($Action); Triggers=@($Trigger);
+    Settings=$Settings; Principal=$Principal }
+}
+function global:Register-ScheduledTask {
+  [CmdletBinding()] param($TaskName,$TaskPath,$InputObject,$Xml,[switch]$Force)
+  $global:registerCalls += [PSCustomObject]@{
+    Name=$TaskName; HasInput=$PSBoundParameters.ContainsKey('InputObject');
+    HasXml=$PSBoundParameters.ContainsKey('Xml');
+    ErrorAction=[string]$PSBoundParameters['ErrorAction']
+  }
+  if($global:harnessScenario -eq 'provider_error') {
+    Write-Error 'synthetic provider failure'
+  }
+  if($global:harnessScenario -eq 'zero_output') { return @() }
+  if($PSBoundParameters.ContainsKey('Xml')) {
+    [xml]$xmlDocument=$Xml
+    $manager=New-Object Xml.XmlNamespaceManager($xmlDocument.NameTable)
+    $manager.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+    $command=$xmlDocument.SelectSingleNode('//t:Exec/t:Command',$manager).InnerText
+    $arguments=$xmlDocument.SelectSingleNode('//t:Exec/t:Arguments',$manager).InnerText
+    $wake=$true
+    $global:monthlyXml=$Xml
+  } else {
+    $command=[string]$InputObject.Actions[0].Execute
+    $arguments=[string]$InputObject.Actions[0].Arguments
+    $wake=[bool]$InputObject.Settings.WakeToRun
+  }
+  $enabled=($global:harnessScenario -ne 'provider_disabled')
+  $actual=[PSCustomObject]@{
+    TaskName=$TaskName; TaskPath=$TaskPath;
+    Principal=[PSCustomObject]@{ UserId=$global:harnessUser;
+      LogonType='Interactive'; RunLevel='Highest' };
+    Actions=@([PSCustomObject]@{ Execute=$command; Arguments=$arguments });
+    Triggers=if($PSBoundParameters.ContainsKey('InputObject')){@($InputObject.Triggers)}else{@([PSCustomObject]@{ Kind='monthly' })};
+    Settings=[PSCustomObject]@{ Enabled=$enabled; StartWhenAvailable=$true;
+      MultipleInstances='IgnoreNew'; WakeToRun=$wake;
+      Hidden=($global:harnessScenario -eq 'provider_hidden') }
+  }
+  if($global:harnessScenario -eq 'wrong_trigger' -and
+     $TaskName -eq 'PythonSelfAgent-Health') {
+    $actual.Triggers=@([PSCustomObject]@{ Enabled=$true;
+      StartBoundary='2026-08-02T12:00:00'; DaysInterval=$null; Repetition=$null;
+      CimClass=[PSCustomObject]@{ CimClassName='MSFT_TaskTimeTrigger' } })
+  }
+  $global:taskStore[$TaskName]=$actual
+  if($global:harnessScenario -eq 'two_output') { return @($actual,$actual.PSObject.Copy()) }
+  if($global:harnessScenario -eq 'wrong_result_identity') {
+    return [PSCustomObject]@{ TaskName='Wrong'; TaskPath='\' }
+  }
+  return $actual
+}
+function global:Get-ScheduledTask {
+  [CmdletBinding()] param([string]$TaskName)
+  if($PSBoundParameters.ContainsKey('TaskName')) {
+    if($global:harnessScenario -eq 'missing_monthly' -and
+       $TaskName -eq 'PythonSelfAgent-MonthlyRestoreDrill') { return @() }
+    if($global:taskStore.ContainsKey($TaskName)) { return $global:taskStore[$TaskName] }
+    return @()
+  }
+  return @($global:taskStore.Values)
+}
+function global:Export-ScheduledTask {
+  [CmdletBinding()] param($TaskName,$TaskPath)
+  if($TaskName -eq 'PythonSelfAgent-MonthlyRestoreDrill') {
+    $text=[string]$global:monthlyXml
+  } else {
+    $text='<?xml version="1.0"?><Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Settings><Enabled>true</Enabled></Settings></Task>'
+  }
+  if($global:harnessScenario -eq 'export_disabled') {
+    $text=$text.Replace('<Enabled>true</Enabled>','<Enabled>false</Enabled>')
+  }
+  return $text
+}
+function global:schtasks.exe {
+  param([Parameter(ValueFromRemainingArguments=$true)]$Arguments)
+  if($global:harnessScenario -eq 'schtasks_nonzero') {
+    $global:LASTEXITCODE=1; return @()
+  }
+  $global:LASTEXITCODE=0
+  if($global:harnessScenario -eq 'schtasks_stderr') {
+    Write-Error 'synthetic native stderr' -ErrorAction Continue
+  }
+  $text=[string]$global:monthlyXml
+  if($global:harnessScenario -eq 'schtasks_wrong_xml') {
+    $text=$text.Replace('<Sunday />','<Saturday />')
+  }
+  return $text
+}
+function global:Get-NetFirewallRule {
+  [CmdletBinding()] param($DisplayName)
+  if($null -ne $global:firewallRule) { return $global:firewallRule }
+  return @()
+}
+function global:Remove-NetFirewallRule {
+  [CmdletBinding()] param([Parameter(ValueFromPipeline=$true)]$InputObject)
+  process { $global:firewallRule=$null }
+}
+function global:New-NetFirewallRule {
+  [CmdletBinding()] param($DisplayName,$Direction,$Action,$Protocol,$LocalPort,$Profile,$RemoteAddress)
+  $global:firewallRule=[PSCustomObject]@{ DisplayName=$DisplayName; Enabled='True';
+    Direction=[string]$Direction; Action=[string]$Action; Profile=[string]$Profile;
+    Protocol=[string]$Protocol; LocalPort=if($global:harnessScenario -eq 'wrong_firewall'){'9999'}else{[string]$LocalPort};
+    RemoteAddress=[string]$RemoteAddress }
+  return $global:firewallRule
+}
+function global:Get-NetFirewallPortFilter {
+  [CmdletBinding()] param([Parameter(ValueFromPipeline=$true)]$InputObject)
+  process { [PSCustomObject]@{ Protocol=$InputObject.Protocol; LocalPort=$InputObject.LocalPort } }
+}
+function global:Get-NetFirewallAddressFilter {
+  [CmdletBinding()] param([Parameter(ValueFromPipeline=$true)]$InputObject)
+  process { [PSCustomObject]@{ RemoteAddress=$InputObject.RemoteAddress } }
+}
+function global:Get-Acl {
+  [CmdletBinding()] param($LiteralPath)
+  $userSid=[Security.Principal.SecurityIdentifier]$global:harnessSid
+  $systemSid=[Security.Principal.SecurityIdentifier]'S-1-5-18'
+  $adminSid=[Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+  $modify=[Security.AccessControl.FileSystemRights]::Modify
+  $modifyProvider=$modify -bor [Security.AccessControl.FileSystemRights]::Synchronize
+  $full=[Security.AccessControl.FileSystemRights]::FullControl
+  $userRights=if($global:harnessScenario -eq 'acl_excess_rights'){$full}else{$modifyProvider}
+  $userType=if($global:harnessScenario -eq 'acl_deny'){'Deny'}else{'Allow'}
+  $rules=@(
+    [PSCustomObject]@{ IdentityReference=$userSid; IsInherited=$false;
+      AccessControlType=$userType; FileSystemRights=$userRights },
+    [PSCustomObject]@{ IdentityReference=$systemSid; IsInherited=$false;
+      AccessControlType='Allow'; FileSystemRights=$full },
+    [PSCustomObject]@{ IdentityReference=$adminSid; IsInherited=$false;
+      AccessControlType='Allow'; FileSystemRights=$full }
+  )
+  [PSCustomObject]@{ AreAccessRulesProtected=($global:harnessScenario -ne 'wrong_acl'); Access=$rules }
+}
+"""
+        + f"\n$scriptPath='{ps_quote(copied_installer)}'\n"
+        + f"$repo='{ps_quote(repository)}'\n"
+        + f"$envFile='{ps_quote(env_file)}'\n"
+        + f"$state='{ps_quote(state)}'\n"
+        + f"$backup='{ps_quote(backup)}'\n"
+        + r"""
+try {
+  $allOutput=@(& $scriptPath -RepositoryRoot $repo -EnvFile $envFile `
+    -StateRoot $state -BackupRoot $backup -Confirm:$false)
+"""
+        + (
+            r"""
+  $allOutput += @(& $scriptPath -RepositoryRoot $repo -EnvFile $envFile `
+    -StateRoot $state -BackupRoot $backup -Confirm:$false)
+"""
+            if passes == 2
+            else ""
+        )
+        + r"""
+  $payload=[ordered]@{
+    TaskCount=$global:taskStore.Count
+    EnabledCount=@($global:taskStore.Values | Where-Object { $_.Settings.Enabled }).Count
+    RegisterCount=$global:registerCalls.Count
+    XmlRegisterCount=@($global:registerCalls | Where-Object HasXml).Count
+    InputRegisterCount=@($global:registerCalls | Where-Object HasInput).Count
+    CompletionCount=@($allOutput | Where-Object {
+      $_ -eq 'Windows deployment operations installation completed.' }).Count
+  }
+  Write-Output ('HARNESS:' + ($payload | ConvertTo-Json -Compress))
+} catch {
+  [Console]::Error.WriteLine('HARNESS_ERROR:' + $_.Exception.Message)
+  exit 91
+}
+"""
+    )
+    return run_ps(script, timeout=90)
+
+
+@pytest.mark.parametrize("initial_count", [0, 2, 3, 4])
+def test_installer_partial_state_converges_to_four_enabled_tasks(
+    tmp_path: Path, initial_count: int
+):
+    result = run_installer_fake_harness(tmp_path, initial_count=initial_count)
+
+    assert result.returncode == 0, result.stderr
+    marker = next(line for line in result.stdout.splitlines() if line.startswith("HARNESS:"))
+    payload = json.loads(marker.removeprefix("HARNESS:"))
+    assert payload == {
+        "TaskCount": 4,
+        "EnabledCount": 4,
+        "RegisterCount": 4,
+        "XmlRegisterCount": 1,
+        "InputRegisterCount": 3,
+        "CompletionCount": 1,
+    }
+
+
+def test_installer_partial_state_second_pass_remains_exact_and_idempotent(tmp_path: Path):
+    result = run_installer_fake_harness(tmp_path, initial_count=2, passes=2)
+
+    assert result.returncode == 0, result.stderr
+    marker = next(line for line in result.stdout.splitlines() if line.startswith("HARNESS:"))
+    payload = json.loads(marker.removeprefix("HARNESS:"))
+    assert payload == {
+        "TaskCount": 4,
+        "EnabledCount": 4,
+        "RegisterCount": 8,
+        "XmlRegisterCount": 2,
+        "InputRegisterCount": 6,
+        "CompletionCount": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario", "message"),
+    (
+        ("provider_error", "synthetic provider failure"),
+        ("zero_output", "registration returned an invalid result"),
+        ("two_output", "registration returned an invalid result"),
+        ("wrong_result_identity", "registration returned an invalid result"),
+        ("missing_monthly", "Persisted task count is invalid"),
+        ("schtasks_nonzero", "schtasks XML query failed"),
+        ("schtasks_stderr", "schtasks XML query failed"),
+        ("schtasks_wrong_xml", "Monthly XML schedule is invalid"),
+        ("provider_disabled", "Persisted settings are invalid"),
+        ("provider_hidden", "Persisted settings are invalid"),
+        ("export_disabled", "Persisted task is disabled"),
+        ("wrong_trigger", "Persisted trigger is invalid"),
+        ("extra_task", "Persisted operations task set is invalid"),
+        ("wrong_firewall", "Persisted firewall rule is invalid"),
+        ("wrong_acl", "Persisted environment ACL is invalid"),
+        ("acl_deny", "Persisted environment ACL rights are invalid"),
+        ("acl_excess_rights", "Persisted environment ACL rights are invalid"),
+    ),
+)
+def test_installer_persisted_postcondition_failure_is_fatal(
+    tmp_path: Path, scenario: str, message: str
+):
+    result = run_installer_fake_harness(tmp_path, scenario=scenario)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert "Windows deployment operations installation completed." not in result.stdout
 
 
 def fake_monthly_cim_class(
@@ -1257,9 +1763,7 @@ def test_operations_installer_builds_all_task_definitions_before_system_mutation
     write_boundary = source.index(
         "# All preflight checks and in-memory task validation are above this line."
     )
-    registration = source.index(
-        "Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition"
-    )
+    registration = source.index("Register-OperationsTask -Task $task", write_boundary)
 
     assert definition_start < validation < write_boundary < registration
     for mutation in (
@@ -1267,7 +1771,6 @@ def test_operations_installer_builds_all_task_definitions_before_system_mutation
         "icacls.exe",
         "Remove-NetFirewallRule",
         "New-NetFirewallRule",
-        "Register-ScheduledTask",
     ):
         assert source.index(mutation) > write_boundary
     assert "-Action $task.Action -Trigger $task.Trigger" not in source[registration:]
