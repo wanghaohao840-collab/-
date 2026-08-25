@@ -67,6 +67,9 @@
 | `04-document-library-api.md` | 03 | no | document service, Assistant/session/bootstrap/API and API tests | authenticated JSON contracts |
 | `05-react-document-library.md` | 01, 04 | no | React feature/components/styles/App mapping and unit tests | responsive product route |
 | `06-e2e-acceptance.md` | 05 | no | document E2E, document snapshots, accessibility/visual additions, contract extension | real-server acceptance evidence |
+| `07-commit-gate-integration-tracking.md` | 03 | yes | import acceptance tracking test only | full-suite coverage observes the atomic committing transition |
+| `08-track-golden-eval-fixture.md` | none | yes | `.gitignore` and one golden JSON fixture | clean clones/worktrees can run the golden evaluation test |
+| `09-refresh-nanoid-dev-lock.md` | none | yes | frontend lockfile only | full npm audit has zero findings without changing production dependencies |
 
 ## Packet readiness audit
 
@@ -78,6 +81,9 @@
 | `04-document-library-api.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `05-react-document-library.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `06-e2e-acceptance.md` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `07-commit-gate-integration-tracking.md` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `08-track-golden-eval-fixture.md` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `09-refresh-nanoid-dev-lock.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 
 No packet may have `status: ready` while any readiness column is `no`.
 
