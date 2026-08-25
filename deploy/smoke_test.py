@@ -17,6 +17,7 @@ from urllib.request import urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_SERVICES = ("app", "qdrant")
+PROJECT_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
 
 class SmokeFailure(RuntimeError):
@@ -62,19 +63,22 @@ def parse_compose_status(raw: str) -> dict[str, tuple[str, str]]:
     return status
 
 
-def _compose_command(env_file: Path, *args: str) -> list[str]:
-    return [
-        "docker",
-        "compose",
-        "--env-file",
-        str(env_file),
-        *args,
-    ]
+def _compose_command(
+    env_file: Path, project_name: str | None = None, *args: str
+) -> list[str]:
+    command = ["docker", "compose"]
+    if project_name is not None:
+        command.extend(["--project-name", project_name])
+    command.extend(["--env-file", str(env_file), *args])
+    return command
 
 
-def _deep_command(env_file: Path) -> list[str]:
+def _deep_command(
+    env_file: Path, project_name: str | None = None
+) -> list[str]:
     return _compose_command(
         env_file,
+        project_name,
         "exec",
         "-T",
         "-e",
@@ -104,19 +108,25 @@ def _run_command(command: list[str], label: str) -> subprocess.CompletedProcess[
     return result
 
 
-def _service_status(env_file: Path) -> dict[str, tuple[str, str]]:
+def _service_status(
+    env_file: Path, project_name: str | None = None
+) -> dict[str, tuple[str, str]]:
     result = _run_command(
-        _compose_command(env_file, "ps", "--format", "json"),
+        _compose_command(env_file, project_name, "ps", "--format", "json"),
         "compose status",
     )
     return parse_compose_status(result.stdout)
 
 
-def _wait_for_services(env_file: Path, timeout: float = 180.0) -> None:
+def _wait_for_services(
+    env_file: Path,
+    project_name: str | None = None,
+    timeout: float = 180.0,
+) -> None:
     deadline = time.monotonic() + timeout
     last_status: dict[str, tuple[str, str]] = {}
     while time.monotonic() < deadline:
-        last_status = _service_status(env_file)
+        last_status = _service_status(env_file, project_name)
         if all(
             last_status.get(service) == ("running", "healthy")
             for service in REQUIRED_SERVICES
@@ -169,7 +179,9 @@ def _check_app_http(bind_address: str, port: str) -> None:
             ) from exc
 
 
-def _check_inside_container(env_file: Path) -> None:
+def _check_inside_container(
+    env_file: Path, project_name: str | None = None
+) -> None:
     code = """
 from pathlib import Path
 from urllib.request import urlopen
@@ -192,6 +204,7 @@ print(source)
     result = _run_command(
         _compose_command(
             env_file,
+            project_name,
             "exec",
             "-T",
             "app",
@@ -292,9 +305,18 @@ def _sanitize(text: str, env: dict[str, str]) -> str:
     return sanitized[:2000]
 
 
+def _project_name(value: str) -> str:
+    if PROJECT_NAME_PATTERN.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "project name must match ^[a-z0-9][a-z0-9_-]{0,62}$"
+        )
+    return value
+
+
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate the Docker deployment")
     parser.add_argument("--env-file", default="deploy/.env")
+    parser.add_argument("--project-name", type=_project_name)
     parser.add_argument("--deep", action="store_true")
     parser.add_argument("--inside-deep", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
@@ -318,21 +340,21 @@ def main(argv: list[str] | None = None) -> int:
         if not env_file.is_file():
             raise SmokeFailure(f"environment file not found: {env_file}")
         env = parse_env_file(env_file)
-        _wait_for_services(env_file)
+        _wait_for_services(env_file, args.project_name)
         print("PASS: app and qdrant are running and healthy")
 
         _check_app_http(
             env.get("APP_BIND_ADDRESS", "0.0.0.0"),
             env.get("APP_PORT", "7860"),
         )
-        print("PASS: Gradio HTTP endpoint")
+        print("PASS: FastAPI health and legacy-config endpoints")
 
-        _check_inside_container(env_file)
+        _check_inside_container(env_file, args.project_name)
         print("PASS: Qdrant readiness, data write, and local import")
 
         if args.deep:
             _run_command(
-                _deep_command(env_file),
+                _deep_command(env_file, args.project_name),
                 "deep smoke",
             )
             print("PASS: temporary document import, retrieval, and LLM answer")
