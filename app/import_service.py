@@ -154,6 +154,84 @@ class ImportTaskService:
             self.worker_pool.notify()
         return summary
 
+    def pause_task(
+        self, session_token: str, task_id: str
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            task = self.repository.request_pause(user_id, task_id)
+            summary = self.repository.get_batch(user_id, task.batch_id)
+        if summary is None:  # pragma: no cover - guarded by the task foreign key
+            raise KeyError("import batch was not found")
+        self.worker_pool.notify()
+        return summary
+
+    def resume_task(
+        self, session_token: str, task_id: str
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            task = self.repository.resume_task(user_id, task_id)
+            summary = self.repository.get_batch(user_id, task.batch_id)
+        if summary is None:  # pragma: no cover - guarded by the task foreign key
+            raise KeyError("import batch was not found")
+        self.worker_pool.notify()
+        return summary
+
+    def cancel_task(
+        self, session_token: str, task_id: str
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            task = self.repository.request_cancel(user_id, task_id)
+            summary = self.repository.get_batch(user_id, task.batch_id)
+        if summary is None:  # pragma: no cover - guarded by the task foreign key
+            raise KeyError("import batch was not found")
+        self.worker_pool.notify()
+        return summary
+
+    def pause_batch(
+        self, session_token: str, batch_id: str
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            before = self.repository.get_batch(user_id, batch_id)
+            summary = self.repository.request_pause_batch(user_id, batch_id)
+            changed = summary != before
+        if changed:
+            self.worker_pool.notify()
+        return summary
+
+    def resume_batch(
+        self, session_token: str, batch_id: str
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            before = self.repository.get_batch(user_id, batch_id)
+            summary = self.repository.resume_batch(user_id, batch_id)
+            changed = summary != before
+        if changed:
+            self.worker_pool.notify()
+        return summary
+
+    def cancel_batch(
+        self, session_token: str, batch_id: str
+    ) -> ImportBatchSummary:
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            before = self.repository.get_batch(user_id, batch_id)
+            summary = self.repository.request_cancel_batch(user_id, batch_id)
+            changed = summary != before
+        if changed:
+            self.worker_pool.notify()
+        return summary
+
     def has_active_tasks(self, user_id: str) -> bool:
         return self.repository.has_active_tasks(user_id)
 

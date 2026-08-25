@@ -1,6 +1,14 @@
+from datetime import timedelta
+import uuid
+
+import pytest
+
+from app.import_models import ImportTaskCreate
+from app.import_repository import ImportTaskRepository
+from app.import_service import ImportTaskService
 from app.database import initialize_database
 from app.runtime import UserRuntimeRegistry
-from app.session import SessionRegistry
+from app.session import InvalidSessionError, SessionRegistry
 from app.storage import UserStorage
 
 
@@ -90,3 +98,60 @@ def test_import_service_injection_updates_existing_and_future_runtimes(tmp_path)
     assert registry.get_or_create("user-b").import_task_service is service
     registry.set_import_task_service(service)
     assert existing.import_task_service is service
+
+
+def test_expired_session_cannot_control_import_or_retain_runtime_lease(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    storage = UserStorage(tmp_path / "data")
+    sessions = SessionRegistry(db_path, storage)
+    token = sessions.register("control-user", "correct horse battery")
+    session = sessions.get_session(token)
+    user_id = session.user_id
+    task_id = str(uuid.uuid4())
+    batch_id = str(uuid.uuid4())
+    staged = storage.staged_import_path(user_id, batch_id, task_id, ".md")
+    staged.write_bytes(b"staged")
+    repository = ImportTaskRepository(db_path)
+    repository.create_batch(
+        user_id,
+        [
+            ImportTaskCreate(
+                task_id=task_id,
+                batch_id=batch_id,
+                user_id=user_id,
+                document_id=str(uuid.uuid4()),
+                original_name="expired.md",
+                file_suffix=".md",
+                size_bytes=6,
+                staged_relative_path=str(
+                    staged.relative_to(storage.user_paths(user_id).root)
+                ),
+            )
+        ],
+    )
+    notifications = []
+    service = ImportTaskService(
+        sessions,
+        repository,
+        storage,
+        SimpleWorkerPool(notifications),
+    )
+    before = repository.get_task(user_id, task_id)
+    sessions.idle_timeout = timedelta(seconds=-1)
+
+    with pytest.raises(InvalidSessionError, match="expired"):
+        service.cancel_task(token, task_id)
+
+    assert repository.get_task(user_id, task_id) == before
+    assert staged.read_bytes() == b"staged"
+    assert notifications == []
+    assert sessions.runtime_registry.has_runtime(user_id) is False
+
+
+class SimpleWorkerPool:
+    def __init__(self, notifications):
+        self.notifications = notifications
+
+    def notify(self):
+        self.notifications.append("notified")

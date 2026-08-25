@@ -261,6 +261,47 @@ def test_retry_requeue_holds_runtime_lock(tmp_path, method_name):
     assert clear_entered.is_set()
 
 
+def test_control_notifies_only_after_releasing_runtime_lock(tmp_path):
+    service, repository, _, worker, user_id, _ = make_import_service(tmp_path)
+    result = service.submit_batch(
+        "valid-token", [uploaded_file(tmp_path, "cancel.md", b"body")]
+    )
+
+    class OwnershipLock:
+        def __init__(self):
+            self.lock = threading.RLock()
+            self.owned = False
+
+        def __enter__(self):
+            self.lock.acquire()
+            self.owned = True
+            return self
+
+        def __exit__(self, *_args):
+            self.owned = False
+            self.lock.release()
+
+    runtime_lock = OwnershipLock()
+    service.session_registry.sessions["valid-token"] = SimpleNamespace(
+        user_id=user_id, runtime=SimpleNamespace(lock=runtime_lock)
+    )
+    worker.notify_count = 0
+
+    def notify_after_unlock():
+        assert runtime_lock.owned is False
+        worker.notify_count += 1
+
+    worker.notify = notify_after_unlock
+
+    summary = service.cancel_task("valid-token", result.tasks[0].task_id)
+
+    assert summary.cancel_requested == 1
+    assert repository.get_task(user_id, result.tasks[0].task_id).status == (
+        "cancel_requested"
+    )
+    assert worker.notify_count == 1
+
+
 def _capture_error(errors, call, *args):
     try:
         call(*args)
