@@ -20,6 +20,8 @@ web/test-results/
 
 .runtime/
 data/
+!evals/data/
+!evals/data/multi_document_qa.json
 
 *.db
 memory_data/
