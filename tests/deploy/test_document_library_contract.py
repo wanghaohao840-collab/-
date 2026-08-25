@@ -6,6 +6,7 @@ from PIL import Image
 
 ROOT = Path(__file__).parents[2]
 REFERENCE_DIR = ROOT / "docs" / "product-ui" / "reference" / "penpot"
+SNAPSHOT_DIR = ROOT / "web" / "e2e" / "visual.spec.ts-snapshots"
 HANDOFF = ROOT / "docs" / "product-ui" / "penpot-handoff.md"
 
 EXPECTED_EXPORTS = {
@@ -27,6 +28,15 @@ EXPECTED_BOARDS = (
     "State / Documents / Partial failure",
     "Mobile / Documents / Import sheet",
 )
+
+EXPECTED_BROWSER_SNAPSHOTS = {
+    "documents-empty-desktop.png": (1440, 1024),
+    "documents-complete-desktop.png": (1440, 1024),
+    "documents-empty-tablet.png": (1024, 768),
+    "documents-complete-tablet.png": (1024, 768),
+    "documents-empty-mobile.png": (390, 844),
+    "documents-complete-mobile.png": (390, 844),
+}
 
 
 def _png_dimensions(path: Path) -> tuple[int, int]:
@@ -62,6 +72,21 @@ def test_document_library_reference_export_set_is_exact():
 def test_document_library_reference_exports_are_real_original_size_pngs():
     for filename, dimensions in EXPECTED_EXPORTS.items():
         path = REFERENCE_DIR / filename
+        assert path.stat().st_size > 1000
+        assert _png_dimensions(path) == dimensions
+
+
+def test_document_library_browser_snapshot_set_is_exact():
+    browser_snapshots = {
+        path.name for path in SNAPSHOT_DIR.glob("documents-*.png")
+    }
+
+    assert browser_snapshots == set(EXPECTED_BROWSER_SNAPSHOTS)
+
+
+def test_document_library_browser_snapshots_are_real_viewport_size_pngs():
+    for filename, dimensions in EXPECTED_BROWSER_SNAPSHOTS.items():
+        path = SNAPSHOT_DIR / filename
         assert path.stat().st_size > 1000
         assert _png_dimensions(path) == dimensions
 

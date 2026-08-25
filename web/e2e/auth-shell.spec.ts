@@ -76,7 +76,7 @@ test("redirects the exact legacy path and opens legacy from the migration CTA", 
   await expect(page).toHaveURL(`${appUrl}/legacy/`);
 
   await registerUser(page, appUrl, uniqueUsername(`legacy_${testInfo.project.name}`));
-  await page.goto(`${appUrl}/documents`);
+  await page.goto(`${appUrl}/qa`);
   const legacyAction = page.getByRole("link", { name: "前往旧版" });
   await expect(legacyAction).toHaveAttribute("href", "/legacy/");
   await legacyAction.click();

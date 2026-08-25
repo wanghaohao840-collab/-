@@ -13,12 +13,18 @@ describe("visual acceptance contract", () => {
     expect(visualSpec).not.toMatch(/\bhistory\.(?:pushState|replaceState)\s*\(/);
   });
 
-  it("keeps exactly the closure brief's sixteen reviewed baselines", () => {
+  it("keeps exactly the twenty-two reviewed baselines", () => {
     const snapshots = readdirSync(resolve(e2eRoot, "visual.spec.ts-snapshots"))
       .filter((name) => name.endsWith(".png"))
       .sort();
 
     expect(snapshots).toEqual([
+      "documents-complete-desktop.png",
+      "documents-complete-mobile.png",
+      "documents-complete-tablet.png",
+      "documents-empty-desktop.png",
+      "documents-empty-mobile.png",
+      "documents-empty-tablet.png",
       "login-desktop.png",
       "login-mobile.png",
       "login-tablet.png",

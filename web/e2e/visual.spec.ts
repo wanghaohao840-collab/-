@@ -1,4 +1,11 @@
-import { expect, openMore, registerUser, settleVisuals, test } from "./fixtures";
+import {
+  expect,
+  openMore,
+  registerUser,
+  settleVisuals,
+  test,
+  uniqueUsername,
+} from "./fixtures";
 
 async function fillLogin(
   page: Parameters<typeof settleVisuals>[0],
@@ -20,6 +27,55 @@ test("authenticated shell baseline", async ({ appUrl, page }, testInfo) => {
   await registerUser(page, appUrl, `visual_shell_${testInfo.project.name}`);
   await settleVisuals(page);
   await expect(page).toHaveScreenshot("shell.png");
+});
+
+test("documents empty baseline", async ({ appUrl, page }, testInfo) => {
+  await registerUser(page, appUrl, uniqueUsername(`visual_empty_${testInfo.project.name}`));
+  await page.goto(`${appUrl}/documents`);
+  await expect(page.getByRole("heading", { level: 2, name: "还没有文档" })).toBeVisible();
+  await settleVisuals(page);
+  await expect(page).toHaveScreenshot("documents-empty.png");
+});
+
+test("documents complete baseline", async ({ appUrl, page }, testInfo) => {
+  test.slow();
+  const filename = `visual-${testInfo.project.name}.md`;
+  await registerUser(page, appUrl, uniqueUsername(`visual_complete_${testInfo.project.name}`));
+  await page.goto(`${appUrl}/documents`);
+  await page
+    .locator(".document-toolbar")
+    .getByRole("button", { name: "导入文档" })
+    .click();
+  await page.getByLabel("选择文档").setInputFiles({
+    name: filename,
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# Visual acceptance\nA real imported document."),
+  });
+  const submission = page.waitForResponse(
+    (response) =>
+      response.url() === `${appUrl}/api/v1/imports` &&
+      response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "开始导入" }).click();
+  expect((await submission).status()).toBe(202);
+  const documentRow = page.locator("li.document-row").filter({ hasText: filename });
+  await expect(documentRow).toBeVisible({
+    timeout: 30_000,
+  });
+  // The real server stamps the import completion minute. Normalize only that
+  // volatile text so the no-update baseline remains exact across future runs.
+  await documentRow
+    .locator(".document-row__body > span:not(.document-row__mobile-status)")
+    .evaluate((metadata) => {
+      metadata.textContent =
+        metadata.textContent?.replace(
+          / · [^·]+$/,
+          " · 2026年8月15日 09:32",
+        ) ?? "";
+    });
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await settleVisuals(page);
+  await expect(page).toHaveScreenshot("documents-complete.png");
 });
 
 test("mobile More drawer baseline", async ({ appUrl, page }, testInfo) => {
