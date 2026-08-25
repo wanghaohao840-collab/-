@@ -1,11 +1,11 @@
 ---
 id: "document-library-vertical-slice-06"
 title: "Verify the real vertical slice in three viewports"
-status: "waiting"
+status: "done"
 parallel-safe: false
 depends-on: ["document-library-vertical-slice-05b"]
 base-commit: "f90883e71d2fa73a7cb981b11478b68519d8ce80"
-owner: "unassigned"
+owner: "Codex"
 ---
 
 # Task Packet: Verify the real vertical slice in three viewports
@@ -58,9 +58,11 @@ All product behavior exists after Packet 05. Current Playwright fixture launches
 - Modify: `web/e2e/accessibility.spec.ts`
 - Modify: `web/e2e/visual.spec.ts`
 - Modify: `web/e2e/auth-shell.spec.ts`
+- Modify: `web/tests/visual-acceptance-contract.test.ts`
 - Create: six `documents-empty|complete-{desktop|tablet|mobile}.png` files under `web/e2e/visual.spec.ts-snapshots/`
 - Modify: `tests/deploy/test_document_library_contract.py`
 - Modify: this packet for handoff.
+- Modify: `.superpowers/sdd/progress.md` for packet status only.
 
 ### Allowed behavior changes
 
@@ -108,11 +110,11 @@ Follow Task 6 in the plan. Create legitimate in-memory files with Playwright `se
 
 ## Acceptance criteria
 
-- [ ] Real functional and cross-user scenarios pass in desktop/tablet/mobile.
-- [ ] Document axe/focus/mobile-target checks pass with no serious/critical violation.
-- [ ] Exactly six new snapshots pass no-update and human Penpot comparison.
-- [ ] Design contract remains strict and all feature/full gates pass.
-- [ ] Final process/runtime/generated/secret/path scans are clean.
+- [x] Real functional and cross-user scenarios pass in desktop/tablet/mobile.
+- [x] Document axe/focus/mobile-target checks pass with no serious/critical violation.
+- [x] Exactly six new snapshots pass no-update and human Penpot comparison.
+- [x] Design contract remains strict and all feature/full gates pass.
+- [x] Final process/runtime/generated/secret/path scans are clean.
 
 ## Test and verification commands
 
@@ -139,7 +141,20 @@ Stop on any standard reality conflict, incomplete Packet 05, need for production
 
 ## Implementation handoff
 
-Replace with template handoff, including exact totals per command/project, six snapshot names/dimensions, human comparison notes, process/runtime cleanup evidence, scope confirmation, deviations/risks and commit.
+- Status: done.
+- Implementation commit: `af469ba`.
+- Functional evidence: real register/upload/list/delete/restore and cross-user batch/task/document isolation pass in desktop, tablet and mobile without request interception, session/history injection or test-only routes.
+- Accessibility evidence: empty/import and populated/delete states pass axe serious/critical zero, visible 2 px focus, focus trap/return, scroll restoration and mobile 44 px target assertions.
+- Visual evidence: focused no-update run passes `6/6`; full E2E passes `46`, with the two existing non-mobile More-drawer conditional skips.
+- Accepted snapshots:
+  - `documents-empty-desktop.png` and `documents-complete-desktop.png` — `1440 × 1024`.
+  - `documents-empty-tablet.png` and `documents-complete-tablet.png` — `1024 × 768`.
+  - `documents-empty-mobile.png` and `documents-complete-mobile.png` — `390 × 844`.
+- Human comparison: the Empty card/copy/action/limit-note structure matches the authoritative Empty board in all breakpoints; Complete is list-first with no terminal-success panel and matches toolbar/filter/panel/row geometry. The browser shows only its one real imported record instead of Penpot's illustrative samples, as required; documented browser font rasterization remains the only rendering distinction. The volatile real-server completion minute is normalized only inside the visual test after the real import succeeds so future no-update pixels stay deterministic.
+- Gates: `pip check` clean; Python `227 passed`; frontend `102 passed`; typecheck, lint and production build pass; document design/browser PNG contract `6 passed`; component map `6 passed`; token and diff checks pass.
+- Cleanup: `zhiyan-playwright-*` runtime roots `0`, owned runtime files `0`, owned Python/Uvicorn processes `0`; no generated runtime output is tracked.
+- Scope: only Task 6 acceptance files, the six exact PNGs, the reconciled exact-baseline contract and packet/progress ledgers changed. No production, fixture, configuration, dependency, Penpot source/reference or unrelated snapshot file changed.
+- Deviations/risks: none. The packet is ready for final integration review.
 
 ## Reality-conflict resolution
 
@@ -148,3 +163,5 @@ Replace with template handoff, including exact totals per command/project, six s
 - Scope impact: `web/e2e/auth-shell.spec.ts` is added to the allowed files; production, fixtures, configuration and acceptance criteria are unchanged.
 - Visual conflict: the first desktop empty actual exposed unapproved structural differences from `documents-empty.png`. Corrective Packet `document-library-vertical-slice-05a` owns the production alignment; Task 6 resumes only after that packet is independently approved.
 - Complete-state conflict: focused visual generation exposed an extra terminal-success summary above the document list in all three viewports. Corrective Packet `document-library-vertical-slice-05b` removes that unapproved visual/semantic block while preserving active and failed imports.
+- Snapshot-contract conflict: the existing visual acceptance unit test fixes the pre-slice baseline set at sixteen files, so the six required and reviewed document-library snapshots make the full frontend suite fail by design. Task 6 owns the acceptance-only update from the exact sixteen-file set to the exact twenty-two-file set; network/history prohibitions and every existing baseline remain unchanged.
+- Empty-state accessibility conflict: corrective Packet 05a intentionally removes the filename filter when the document list is truly empty, but Task 6's mobile 44 px assertion still queried it in that state. The assertion moves to the populated-document scenario, where the filter exists; empty import targets, populated filter/delete targets and all dialog targets remain covered.

@@ -9,5 +9,5 @@
 - Task 5: complete (implementation `9571ee9`; corrections through `3b22198`; final independent re-review approved with no findings; focused GREEN `36 passed`; final frontend `101 passed`; typecheck/lint/build, component map `6/6`, token and diff checks PASS)
 - Task 5a: complete (commits `67132d2`, `a291e79`; independent review approved; desktop card/halo pixel geometry matches Penpot; frontend `101/101`)
 - Task 5b: complete (implementation `e9707ee`; terminal-only import batches render no DOM; frontend `102/102`; typecheck/lint/build, component map `6/6`, token and diff checks PASS)
-- Task 6: resumed after Task 5b; functional `6/6`, accessibility `6/6`, and focused visual generation `6/6` pass; regenerate and accept six corrected snapshots next
+- Task 6: complete (implementation `af469ba`; Python `227/227`, frontend `102/102`, E2E `46 passed` with 2 existing conditional skips; six reviewed no-update snapshots; process/runtime cleanup clean)
 - Final integration review: pending
