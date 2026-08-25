@@ -12,7 +12,7 @@ import pytest
 from app.auth import AuthService
 from app.database import initialize_database
 from app.import_models import ImportTaskCreate
-from app.import_repository import ImportTaskRepository
+from app.import_repository import ImportTaskRepository, InvalidImportTransition
 from app.import_worker import ImportTaskRunner, ImportWorkerPool
 from app.storage import UserStorage
 from hello_agents.memory.rag.errors import RAGConnectionError
@@ -72,6 +72,8 @@ class ControlledAssistant:
         if self.state.target_stage == "post_load":
             self.state.reached.set()
             assert self.state.release.wait(timeout=3)
+        if self.state.load_failure is not None:
+            raise self.state.load_failure
         return "ok"
 
     def compensate_import(self, document_id, import_task_id):
@@ -363,6 +365,83 @@ def test_cancel_between_final_checkpoint_and_success_transition_is_compensated(
         (harness.document_id, harness.task_id)
     ]
     assert not harness.staged.exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "transition_name", "action", "expected_status"),
+    [
+        (
+            RAGConnectionError("retryable failure"),
+            "mark_retry_wait",
+            "pause",
+            "paused",
+        ),
+        (RuntimeError("nonretryable failure"), "mark_failed", "cancel", "cancelled"),
+    ],
+)
+def test_control_requested_between_failure_reload_and_ordinary_transition(
+    tmp_path,
+    monkeypatch,
+    error,
+    transition_name,
+    action,
+    expected_status,
+):
+    state = AssistantState(load_failure=error)
+    harness = make_runner(tmp_path, state)
+    claimed = harness.repository.claim_next(set())
+    original_transition = getattr(harness.repository, transition_name)
+    transition_calls = []
+
+    def request_control_then_transition(user_id, task_id, *args, **kwargs):
+        transition_calls.append((user_id, task_id))
+        getattr(harness.repository, f"request_{action}")(user_id, task_id)
+        return original_transition(user_id, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(
+        harness.repository,
+        transition_name,
+        request_control_then_transition,
+    )
+
+    harness.runner.run(claimed)
+
+    current = harness.repository.get_task(harness.user_id, harness.task_id)
+    assert current.status == expected_status
+    assert current.error_code is None
+    assert current.auto_retry_count == 0
+    assert transition_calls == [(harness.user_id, harness.task_id)]
+    assert state.compensation_calls == [(harness.document_id, harness.task_id)]
+    assert harness.staged.exists() is (action == "pause")
+    assert harness.runtimes.acquired == harness.runtimes.released == [harness.user_id]
+    assert all(
+        event.event_type != "failed"
+        for event in harness.repository.list_task_events(
+            harness.user_id,
+            harness.task_id,
+        )
+    )
+
+
+def test_unrelated_ordinary_transition_conflict_is_not_swallowed(tmp_path, monkeypatch):
+    state = AssistantState(load_failure=RuntimeError("nonretryable failure"))
+    harness = make_runner(tmp_path, state)
+    claimed = harness.repository.claim_next(set())
+    monkeypatch.setattr(
+        harness.repository,
+        "mark_failed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            InvalidImportTransition("unrelated transition conflict")
+        ),
+    )
+
+    with pytest.raises(InvalidImportTransition, match="unrelated transition conflict"):
+        harness.runner.run(claimed)
+
+    current = harness.repository.get_task(harness.user_id, harness.task_id)
+    assert current.status == "running"
+    assert state.compensation_calls == []
+    assert harness.runtimes.acquired == harness.runtimes.released == [harness.user_id]
 
 
 def test_cancel_after_cleanup_failure_is_cleanup_only_and_never_reimports(tmp_path):

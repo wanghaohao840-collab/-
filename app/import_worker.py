@@ -252,22 +252,44 @@ class ImportTaskRunner:
                     min(task.auto_retry_count, len(_RETRY_DELAYS) - 1)
                 ]
                 next_attempt = self.clock() + timedelta(seconds=delay)
-                self.repository.mark_retry_wait(
-                    task.user_id,
-                    task.task_id,
-                    next_attempt_at=_as_utc_iso(next_attempt),
-                    error_code=error_code,
-                    error_summary=summary,
-                    now=self._now_iso(),
-                )
+                try:
+                    self.repository.mark_retry_wait(
+                        task.user_id,
+                        task.task_id,
+                        next_attempt_at=_as_utc_iso(next_attempt),
+                        error_code=error_code,
+                        error_summary=summary,
+                        now=self._now_iso(),
+                    )
+                except InvalidImportTransition:
+                    if self._finish_control_after_transition_conflict(
+                        task,
+                        assistant,
+                        staged_path,
+                        temporary_path,
+                        formal_path,
+                    ):
+                        return
+                    raise
             else:
-                self.repository.mark_failed(
-                    task.user_id,
-                    task.task_id,
-                    error_code,
-                    summary,
-                    now=self._now_iso(),
-                )
+                try:
+                    self.repository.mark_failed(
+                        task.user_id,
+                        task.task_id,
+                        error_code,
+                        summary,
+                        now=self._now_iso(),
+                    )
+                except InvalidImportTransition:
+                    if self._finish_control_after_transition_conflict(
+                        task,
+                        assistant,
+                        staged_path,
+                        temporary_path,
+                        formal_path,
+                    ):
+                        return
+                    raise
         finally:
             if assistant is not None:
                 try:
@@ -316,6 +338,25 @@ class ImportTaskRunner:
         if current is None:
             return None
         return self._control_action(current.status)
+
+    def _finish_control_after_transition_conflict(
+        self,
+        task: ImportTaskRecord,
+        assistant: Any,
+        staged_path: Path | None,
+        temporary_path: Path | None,
+        formal_path: Path | None,
+    ) -> bool:
+        if self._current_control_action(task) is None:
+            return False
+        self._finish_control(
+            task,
+            assistant,
+            staged_path,
+            temporary_path,
+            formal_path,
+        )
+        return True
 
     @staticmethod
     def _control_action(status: str) -> str | None:
