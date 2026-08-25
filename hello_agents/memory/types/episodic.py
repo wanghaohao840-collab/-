@@ -181,6 +181,31 @@ class EpisodicMemory:
         self.sessions.clear()
         self._episodes.clear()
 
+    def delete_ids(self, episode_ids: List[str]) -> int:
+        """Delete exact episodes, updating memory only after durable cleanup."""
+
+        existing_ids = list(
+            dict.fromkeys(
+                episode_id
+                for episode_id in episode_ids
+                if episode_id in self._episodes
+            )
+        )
+        if not existing_ids:
+            return 0
+
+        self._delete_episode_ids(existing_ids)
+        removed = set(existing_ids)
+        for episode_id in existing_ids:
+            self._episodes.pop(episode_id, None)
+        for session_id, session_episode_ids in list(self.sessions.items()):
+            self.sessions[session_id] = [
+                episode_id
+                for episode_id in session_episode_ids
+                if episode_id not in removed
+            ]
+        return len(existing_ids)
+
     def _delete_episode_ids(self, episode_ids: List[str]) -> None:
         """Delete both durable copies, restoring SQLite if cleanup is interrupted."""
 

@@ -345,6 +345,35 @@ class PDFLearningAssistant:
 
         return result
 
+    def compensate_import(self, document_id: str, import_task_id: str) -> None:
+        """Remove only artifacts owned by one background import task."""
+
+        if not document_id or not import_task_id:
+            raise ValueError("document_id and import_task_id are required")
+
+        with self._write_lock:
+            latest = self.history_repository.load()
+            matching_documents = [
+                item
+                for item in latest["documents"]
+                if str(item.get("document_id", "")) == document_id
+            ]
+            if any(
+                str(item.get("import_task_id", "")) != import_task_id
+                for item in matching_documents
+            ):
+                raise ValueError("document is owned by another import task")
+
+            rag_result = self.rag_tool.execute(
+                "delete_document", document_id=document_id
+            )
+            if isinstance(rag_result, str) and rag_result.lstrip().startswith("❌"):
+                raise RuntimeError("RAG import compensation failed")
+
+            self.history_repository.delete_document(document_id)
+            self.memory_tool.remove_import_event(import_task_id)
+            self.history = self.history_repository.load()
+
     def ask(
         self,
         question: str,

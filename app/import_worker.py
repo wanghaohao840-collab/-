@@ -14,6 +14,7 @@ from app.import_models import ImportTaskRecord
 from app.import_repository import ImportTaskRepository, InvalidImportTransition
 from app.storage import UserStorage
 from assistants.pdf_learning_assistant import PDFLearningAssistant
+from hello_agents.memory.rag.contracts import ImportControlSignal
 from hello_agents.memory.rag.errors import (
     RAGAuthenticationError,
     RAGCollectionError,
@@ -47,6 +48,8 @@ _SAFE_STRUCTURED_ERROR_CODES = {
     "staged_cleanup_failed",
     "staged_file_missing",
     "process_interrupted",
+    "pause_cleanup_failed",
+    "cancel_cleanup_failed",
     "unexpected_error",
 }
 _STAGE_RANGES = {
@@ -116,18 +119,64 @@ class ImportTaskRunner:
         formal_path: Path | None = None
         temporary_path: Path | None = None
         staged_path: Path | None = None
+        current = self.repository.get_task(task.user_id, task.task_id)
+        if current is None or current.status in {
+            "paused",
+            "cancelled",
+            "succeeded",
+            "failed",
+        }:
+            return
+        requested_action = {
+            "pause_requested": "pause",
+            "cancel_requested": "cancel",
+        }.get(current.status)
         try:
             staged_path = self._resolve_staged_path(task)
+            if requested_action is not None:
+                runtime = self.runtime_registry.acquire_background(task.user_id)
+                formal_path = self.storage.document_path(
+                    task.user_id, task.document_id, task.file_suffix
+                )
+                temporary_path = self.storage.temporary_document_path(
+                    task.user_id, task.document_id, task.file_suffix
+                )
+                assistant = self.assistant_factory(
+                    user_id=task.user_id,
+                    runtime_dir=runtime.paths.root,
+                    runtime=runtime,
+                )
+                self._finish_control(
+                    task,
+                    requested_action,
+                    assistant,
+                    staged_path,
+                    temporary_path,
+                    formal_path,
+                )
+                return
+
             if not staged_path.is_file():
                 raise FileNotFoundError("Staged import file is missing")
 
             runtime = self.runtime_registry.acquire_background(task.user_id)
+            assistant = self.assistant_factory(
+                user_id=task.user_id,
+                runtime_dir=runtime.paths.root,
+                runtime=runtime,
+            )
+            control_checkpoint = self._control_checkpoint(task)
+            control_checkpoint("staged")
             # Record that the durable staged copy is ready before any formal
             # document copy or parsing begins.  The progress callback starts
             # from this value and never reports a lower percentage.
-            self.repository.update_progress(
-                task.user_id, task.task_id, "staged", 10, now=self._now_iso()
-            )
+            try:
+                self.repository.update_progress(
+                    task.user_id, task.task_id, "staged", 10, now=self._now_iso()
+                )
+            except InvalidImportTransition:
+                control_checkpoint("staged")
+                raise
             formal_path = self.storage.document_path(
                 task.user_id, task.document_id, task.file_suffix
             )
@@ -137,26 +186,31 @@ class ImportTaskRunner:
             shutil.copyfile(staged_path, temporary_path)
             temporary_path.replace(formal_path)
 
-            assistant = self.assistant_factory(
-                user_id=task.user_id,
-                runtime_dir=runtime.paths.root,
-                runtime=runtime,
-            )
             result = assistant.load_document(
                 str(formal_path),
                 document_id=task.document_id,
                 original_name=task.original_name,
                 import_task_id=task.task_id,
                 progress_callback=self._progress_callback(task),
+                control_checkpoint=control_checkpoint,
             )
             if isinstance(result, str) and result.lstrip().startswith("❌"):
                 raise ValueError(result)
-            self.repository.update_progress(
-                task.user_id, task.task_id, "committing", 99, now=self._now_iso()
-            )
-            self.repository.mark_succeeded(
-                task.user_id, task.task_id, now=self._now_iso()
-            )
+            control_checkpoint("committing")
+            try:
+                self.repository.update_progress(
+                    task.user_id,
+                    task.task_id,
+                    "committing",
+                    99,
+                    now=self._now_iso(),
+                )
+                self.repository.mark_succeeded(
+                    task.user_id, task.task_id, now=self._now_iso()
+                )
+            except InvalidImportTransition:
+                control_checkpoint("committing")
+                raise
             try:
                 self._cleanup_staged_file(staged_path)
             except OSError:
@@ -168,8 +222,20 @@ class ImportTaskRunner:
                 )
             else:
                 self._remove_empty_batch_dir(staged_path.parent)
+        except ImportControlSignal as signal:
+            self._finish_control(
+                task,
+                signal.action,
+                assistant,
+                staged_path,
+                temporary_path,
+                formal_path,
+            )
         except Exception as error:
             self._remove_attempt_files(temporary_path, formal_path)
+            if requested_action is not None:
+                self._mark_control_failed(task, requested_action, error)
+                return
             error_code, retryable, summary = classify_import_failure(error)
             if retryable and task.auto_retry_count < task.max_auto_retries:
                 delay = _RETRY_DELAYS[
@@ -203,6 +269,60 @@ class ImportTaskRunner:
             if runtime is not None:
                 self.runtime_registry.release_background(task.user_id)
 
+    def _finish_control(
+        self,
+        task: ImportTaskRecord,
+        action: str,
+        assistant: Any,
+        staged_path: Path | None,
+        temporary_path: Path | None,
+        formal_path: Path | None,
+    ) -> None:
+        try:
+            if assistant is None:
+                raise RuntimeError("Import assistant is unavailable for cleanup")
+            assistant.compensate_import(task.document_id, task.task_id)
+            self._remove_attempt_files(temporary_path, formal_path)
+            if action == "cancel" and staged_path is not None:
+                self._cleanup_staged_file(staged_path)
+                self._remove_empty_batch_dir(staged_path.parent)
+            terminal = (
+                self.repository.mark_paused
+                if action == "pause"
+                else self.repository.mark_cancelled
+            )
+            terminal(task.user_id, task.task_id, now=self._now_iso())
+        except Exception as error:
+            self._remove_attempt_files(temporary_path, formal_path)
+            self._mark_control_failed(task, action, error)
+
+    def _mark_control_failed(
+        self,
+        task: ImportTaskRecord,
+        action: str,
+        error: BaseException,
+    ) -> None:
+        summary = sanitize_error_message(error)[:500] or error.__class__.__name__
+        self.repository.mark_control_failed(
+            task.user_id,
+            task.task_id,
+            f"{action}_cleanup_failed",
+            summary,
+            now=self._now_iso(),
+        )
+
+    def _control_checkpoint(self, task: ImportTaskRecord):
+        def check(_stage: str) -> None:
+            current = self.repository.get_task(task.user_id, task.task_id)
+            if current is None:
+                raise ImportControlSignal("cancel")
+            if current.status == "pause_requested":
+                raise ImportControlSignal("pause")
+            if current.status == "cancel_requested":
+                raise ImportControlSignal("cancel")
+
+        return check
+
     def _resolve_staged_path(self, task: ImportTaskRecord) -> Path:
         return self.storage.resolve_staged_import_path(
             task.user_id,
@@ -230,9 +350,11 @@ class ImportTaskRunner:
     def _progress_callback(self, task: ImportTaskRecord):
         last_progress = 10
         last_state: tuple[str, int, str] | None = None
+        check_control = self._control_checkpoint(task)
 
         def update(stage: str, completed: int, total: int, message: str) -> None:
             nonlocal last_progress, last_state
+            check_control(stage)
             if stage not in _STAGE_RANGES:
                 return
             start, end = _STAGE_RANGES[stage]
@@ -241,13 +363,17 @@ class ImportTaskRunner:
             state = (stage, progress, str(message))
             if state == last_state:
                 return
-            self.repository.update_progress(
-                task.user_id,
-                task.task_id,
-                stage,
-                progress,
-                now=self._now_iso(),
-            )
+            try:
+                self.repository.update_progress(
+                    task.user_id,
+                    task.task_id,
+                    stage,
+                    progress,
+                    now=self._now_iso(),
+                )
+            except InvalidImportTransition:
+                check_control(stage)
+                raise
             last_progress = progress
             last_state = state
 
@@ -376,7 +502,12 @@ class ImportWorkerPool:
                         self._task_queue.put(task)
                 if release_claim:
                     try:
-                        self.repository.release_claim(task.user_id, task.task_id)
+                        release = (
+                            self.repository.release_control_claim
+                            if task.control_claimed_at is not None
+                            else self.repository.release_claim
+                        )
+                        release(task.user_id, task.task_id)
                     except Exception:
                         logger.exception(
                             "import scheduler could not release a shutdown claim"
@@ -408,19 +539,32 @@ class ImportWorkerPool:
                 self._task_queue.task_done()
 
     def _record_runner_failure(self, task: ImportTaskRecord) -> None:
-        """Finish a task only when its runner left it in ``running``."""
+        """Record a crash without overwriting a task that already finished."""
 
         for delay in (*_RUNNER_FAILURE_RETRY_DELAYS, None):
             try:
                 current = self.repository.get_task(task.user_id, task.task_id)
-                if current is None or current.status != "running":
+                if current is None:
                     return
-                self.repository.mark_failed(
-                    task.user_id,
-                    task.task_id,
-                    "unexpected_error",
-                    "Import worker failed unexpectedly",
-                )
+                if current.status == "running":
+                    self.repository.mark_failed(
+                        task.user_id,
+                        task.task_id,
+                        "unexpected_error",
+                        "Import worker failed unexpectedly",
+                    )
+                elif current.status in {"pause_requested", "cancel_requested"}:
+                    action = (
+                        "pause" if current.status == "pause_requested" else "cancel"
+                    )
+                    self.repository.mark_control_failed(
+                        task.user_id,
+                        task.task_id,
+                        f"{action}_cleanup_failed",
+                        "Import control cleanup failed unexpectedly",
+                    )
+                else:
+                    return
                 return
             except sqlite3.OperationalError as error:
                 if not _is_sqlite_busy(error):
@@ -435,14 +579,21 @@ class ImportWorkerPool:
                 return
 
         # If a transient writer lock survives all failure writes, release the
-        # claim so a later worker can process it rather than stranding it in
-        # ``running`` until an application restart.
+        # appropriate claim so a later worker can process it.
         for delay in (*_RUNNER_FAILURE_RETRY_DELAYS, None):
             try:
                 current = self.repository.get_task(task.user_id, task.task_id)
-                if current is None or current.status != "running":
+                if current is None:
                     return
-                self.repository.release_claim(task.user_id, task.task_id)
+                if current.status == "running":
+                    self.repository.release_claim(task.user_id, task.task_id)
+                elif current.status in {"pause_requested", "cancel_requested"}:
+                    if current.control_claimed_at is not None:
+                        self.repository.release_control_claim(
+                            task.user_id, task.task_id
+                        )
+                else:
+                    return
                 return
             except sqlite3.OperationalError as error:
                 if not _is_sqlite_busy(error):
@@ -455,7 +606,7 @@ class ImportWorkerPool:
             except Exception:
                 logger.exception("could not release crashed import task")
                 return
-        logger.error("import task remains running after worker failure")
+        logger.error("import task claim remains after worker failure")
 
 
 def _as_utc_iso(value: datetime) -> str:

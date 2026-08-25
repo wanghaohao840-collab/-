@@ -179,6 +179,32 @@ class MemoryTool(Tool):
                 import_task_id, content, metadata, session_id
             )
 
+    def remove_import_event(self, import_task_id: str) -> bool:
+        lock = getattr(self, "coordination_lock", None)
+        if lock is None:
+            return self._remove_import_event_unlocked(import_task_id)
+        with lock:
+            return self._remove_import_event_unlocked(import_task_id)
+
+    def _remove_import_event_unlocked(self, import_task_id: str) -> bool:
+        if not import_task_id:
+            raise ValueError("import_task_id is required")
+        episodic = self.memory_manager.memory_types.get("episodic")
+        if episodic is None:
+            return False
+        removed = episodic.delete_ids([self._import_event_id(import_task_id)])
+        if removed:
+            self.memory_manager._save_snapshot()
+        return bool(removed)
+
+    def _import_event_id(self, import_task_id: str) -> str:
+        return "import-" + str(
+            uuid.uuid5(
+                PROJECT_POINT_NAMESPACE_UUID,
+                f"{self.user_id}:{import_task_id}",
+            )
+        )
+
     def _ensure_import_event_unlocked(
         self,
         import_task_id: str,
@@ -192,16 +218,7 @@ class MemoryTool(Tool):
         if episodic is None:
             raise ValueError("episodic memory is not enabled")
 
-        for episode in episodic._episodes.values():
-            if str(episode.context.get("import_task_id", "")) == import_task_id:
-                return episode.episode_id
-
-        memory_id = "import-" + str(
-            uuid.uuid5(
-                PROJECT_POINT_NAMESPACE_UUID,
-                f"{self.user_id}:{import_task_id}",
-            )
-        )
+        memory_id = self._import_event_id(import_task_id)
         event_metadata = dict(metadata or {})
         event_metadata.update(
             {
