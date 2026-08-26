@@ -1,0 +1,381 @@
+from __future__ import annotations
+
+import re
+import secrets
+import time
+from typing import Sequence
+
+from app.qa_answer_engine import (
+    QaAnswerEngine,
+    QaAnswerRequest,
+    QaEngineError,
+)
+from app.qa_context import QaContextBuilder
+from app.qa_models import (
+    PendingTurn,
+    QaConflictError,
+    QaConversationAggregate,
+    QaConversationPage,
+    QaDocumentCandidate,
+    QaMessage,
+    QaMessagePage,
+    validate_mode,
+)
+from app.qa_observability import QaTelemetry
+from app.qa_repository import QaRepository
+
+
+RETRYABLE_ERROR_CODES = frozenset(
+    {
+        "QA_ENGINE_UNAVAILABLE",
+        "QA_RAG_CONNECTION",
+        "QA_RAG_TRANSIENT",
+        "RAG_CONNECTION_FAILED",
+        "RAG_EMBEDDING_FAILED",
+        "RAG_OPERATION_FAILED",
+        "RAG_COLLECTION_FAILED",
+    }
+)
+SAFE_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+
+class QaNotFoundError(LookupError):
+    pass
+
+
+class QaBusyError(RuntimeError):
+    code = "QA_CONVERSATION_BUSY"
+
+
+class QaRetryNotAllowedError(RuntimeError):
+    code = "QA_RETRY_NOT_ALLOWED"
+
+
+class QaEngineUnavailableError(RuntimeError):
+    def __init__(
+        self,
+        trace_id: str,
+        *,
+        code: str = "QA_ENGINE_UNAVAILABLE",
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(code)
+        self.code = code
+        self.trace_id = trace_id
+        self.retryable = retryable
+
+
+class QaService:
+    def __init__(
+        self,
+        session_registry,
+        document_library,
+        repository: QaRepository,
+        answer_engine: QaAnswerEngine,
+        context_builder: QaContextBuilder,
+        telemetry: QaTelemetry,
+    ) -> None:
+        self.session_registry = session_registry
+        self.document_library = document_library
+        self.repository = repository
+        self.answer_engine = answer_engine
+        self.context_builder = context_builder
+        self.telemetry = telemetry
+
+    def create_conversation(
+        self,
+        session_token: str,
+        document_ids: Sequence[str],
+        *,
+        origin: str = "product",
+    ) -> QaConversationAggregate:
+        session = self.session_registry.get_session(session_token)
+        available = {
+            item.document_id: item
+            for item in self.document_library.list_documents(session_token)
+        }
+        candidates: list[QaDocumentCandidate] = []
+        for document_id in document_ids:
+            item = available.get(str(document_id))
+            if item is None or item.status != "ready":
+                raise QaNotFoundError(str(document_id))
+            candidates.append(
+                QaDocumentCandidate(
+                    item.document_id,
+                    item.name,
+                    str(session.user_id),
+                    item.status,
+                )
+            )
+        return self.repository.create_conversation(
+            str(session.user_id), tuple(candidates), origin=origin
+        )
+
+    def list_conversations(
+        self,
+        session_token: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 20,
+    ) -> QaConversationPage:
+        session = self.session_registry.get_session(session_token)
+        return self.repository.list_conversations(
+            str(session.user_id), cursor=cursor, limit=limit
+        )
+
+    def get_conversation(
+        self, session_token: str, conversation_id: str
+    ) -> QaConversationAggregate:
+        session = self.session_registry.get_session(session_token)
+        conversation = self.repository.get_conversation(
+            str(session.user_id), conversation_id
+        )
+        if conversation is None:
+            raise QaNotFoundError(conversation_id)
+        return conversation
+
+    def list_messages(
+        self,
+        session_token: str,
+        conversation_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> QaMessagePage:
+        session = self.session_registry.get_session(session_token)
+        self._require_conversation(str(session.user_id), conversation_id)
+        return self.repository.list_messages(
+            str(session.user_id), conversation_id, cursor=cursor, limit=limit
+        )
+
+    def ask(
+        self,
+        session_token: str,
+        conversation_id: str,
+        question: str,
+        mode: str,
+        client_request_id: str,
+    ) -> QaMessage:
+        session = self.session_registry.get_session(session_token)
+        user_id = str(session.user_id)
+        conversation = self._require_conversation(user_id, conversation_id)
+        self._require_scope_available(session_token, conversation)
+        normalized_mode = validate_mode(mode, conversation.documents)
+        try:
+            pending = self.repository.create_pending_turn(
+                user_id,
+                conversation_id,
+                question,
+                normalized_mode,
+                client_request_id,
+            )
+        except QaConflictError as error:
+            self.telemetry.record("qa_busy", conversation_id=conversation_id)
+            raise QaBusyError() from error
+        if pending.duplicate:
+            self.telemetry.record(
+                "qa_idempotent_hit",
+                conversation_id=conversation_id,
+                message_id=pending.assistant_message.id,
+            )
+            return self._require_message(user_id, pending.assistant_message.id)
+        return self._execute_pending(
+            session,
+            conversation,
+            pending,
+            pending.user_message.content,
+            normalized_mode,
+        )
+
+    def retry(
+        self,
+        session_token: str,
+        failed_assistant_message_id: str,
+        client_request_id: str,
+    ) -> QaMessage:
+        session = self.session_registry.get_session(session_token)
+        user_id = str(session.user_id)
+        failed = self.repository.get_message(user_id, failed_assistant_message_id)
+        if (
+            failed is None
+            or failed.role != "assistant"
+            or failed.status != "failed"
+            or failed.safe_error_code not in RETRYABLE_ERROR_CODES
+        ):
+            raise QaRetryNotAllowedError()
+        conversation = self._require_conversation(user_id, failed.conversation_id)
+        self._require_scope_available(session_token, conversation)
+        paired_user = next(
+            (
+                item
+                for item in self._all_messages(user_id, conversation.id)
+                if item.turn_id == failed.turn_id and item.role == "user"
+            ),
+            None,
+        )
+        if paired_user is None:
+            raise QaRetryNotAllowedError()
+        mode = failed.mode or "auto"
+        try:
+            pending = self.repository.create_pending_turn(
+                user_id,
+                conversation.id,
+                paired_user.content,
+                mode,
+                client_request_id,
+                retry_of_message_id=failed.id,
+            )
+        except QaConflictError as error:
+            self.telemetry.record("qa_busy", conversation_id=conversation.id)
+            raise QaBusyError() from error
+        if pending.duplicate:
+            self.telemetry.record(
+                "qa_idempotent_hit",
+                conversation_id=conversation.id,
+                message_id=pending.assistant_message.id,
+            )
+            return self._require_message(user_id, pending.assistant_message.id)
+        self.telemetry.record(
+            "qa_retry",
+            conversation_id=conversation.id,
+            message_id=pending.assistant_message.id,
+        )
+        return self._execute_pending(
+            session,
+            conversation,
+            pending,
+            paired_user.content,
+            mode,
+        )
+
+    def _execute_pending(
+        self,
+        session,
+        conversation: QaConversationAggregate,
+        pending: PendingTurn,
+        question: str,
+        mode: str,
+    ) -> QaMessage:
+        started = time.perf_counter()
+        user_id = str(session.user_id)
+        context = self.context_builder.build(
+            rolling_summary=conversation.conversation.rolling_summary,
+            summary_through_message_id=(
+                conversation.conversation.summary_through_message_id
+            ),
+            messages=self._all_messages(user_id, conversation.id),
+            current_question=question,
+        )
+        try:
+            result = self.answer_engine.answer(
+                session.runtime,
+                QaAnswerRequest(
+                    question=question,
+                    conversation_context=context.rendered,
+                    document_ids=tuple(
+                        item.document_id for item in conversation.documents
+                    ),
+                    mode=mode,
+                    structured_output=mode == "compare",
+                ),
+            )
+        except Exception as error:
+            code, retryable = self._safe_engine_failure(error)
+            trace_id = secrets.token_urlsafe(12)
+            persisted = self.repository.fail_turn(
+                user_id,
+                pending.assistant_message.id,
+                pending.assistant_message.version,
+                code,
+                trace_id,
+            )
+            if not persisted:
+                raise QaNotFoundError(conversation.id) from error
+            self.telemetry.record(
+                "qa_ask_failure",
+                duration_ms=(time.perf_counter() - started) * 1000,
+                error_code=code,
+                conversation_id=conversation.id,
+                message_id=pending.assistant_message.id,
+            )
+            raise QaEngineUnavailableError(
+                trace_id, code=code, retryable=retryable
+            ) from error
+
+        committed = self.repository.complete_turn(
+            user_id,
+            pending.assistant_message.id,
+            pending.assistant_message.version,
+            result.answer,
+            result.sources,
+            "available" if result.sources else "none",
+            None,
+        )
+        if not committed:
+            raise QaNotFoundError(conversation.id)
+        self.telemetry.record(
+            "qa_ask_success",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            conversation_id=conversation.id,
+            message_id=pending.assistant_message.id,
+        )
+        return self._require_message(user_id, pending.assistant_message.id)
+
+    def _all_messages(
+        self, user_id: str, conversation_id: str
+    ) -> tuple[QaMessage, ...]:
+        items: list[QaMessage] = []
+        cursor: str | None = None
+        while True:
+            page = self.repository.list_messages(
+                user_id, conversation_id, cursor=cursor, limit=200
+            )
+            items.extend(page.items)
+            if page.next_cursor is None:
+                return tuple(items)
+            cursor = page.next_cursor
+
+    def _require_scope_available(
+        self, session_token: str, conversation: QaConversationAggregate
+    ) -> None:
+        available = {
+            item.document_id
+            for item in self.document_library.list_documents(session_token)
+            if item.status == "ready"
+        }
+        if any(item.document_id not in available for item in conversation.documents):
+            raise QaNotFoundError(conversation.id)
+
+    def _require_conversation(
+        self, user_id: str, conversation_id: str
+    ) -> QaConversationAggregate:
+        conversation = self.repository.get_conversation(user_id, conversation_id)
+        if conversation is None:
+            raise QaNotFoundError(conversation_id)
+        return conversation
+
+    def _require_message(self, user_id: str, message_id: str) -> QaMessage:
+        message = self.repository.get_message(user_id, message_id)
+        if message is None:
+            raise QaNotFoundError(message_id)
+        return message
+
+    @staticmethod
+    def _safe_engine_failure(error: Exception) -> tuple[str, bool]:
+        if isinstance(error, QaEngineError):
+            raw_code = str(error.code or "")
+            retryable = bool(error.retryable)
+            if retryable:
+                mapped = {
+                    "rag_connection": "QA_RAG_CONNECTION",
+                    "rag_operation": "QA_RAG_TRANSIENT",
+                }.get(raw_code)
+                if mapped:
+                    return mapped, True
+                if raw_code in RETRYABLE_ERROR_CODES:
+                    return raw_code, True
+                return "QA_ENGINE_UNAVAILABLE", True
+            if SAFE_ERROR_CODE.fullmatch(raw_code) and raw_code not in RETRYABLE_ERROR_CODES:
+                return raw_code, False
+            return "QA_ENGINE_FAILED", False
+        return "QA_ENGINE_UNAVAILABLE", True
