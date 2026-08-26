@@ -351,10 +351,18 @@ December 各一次。一个 principal 使用当前 WTS SID、`InteractiveToken` 
 `DisallowStartIfOnBatteries=true`、`StopIfGoingOnBatteries=true`、
 `AllowHardTerminate=true`、`RunOnlyIfIdle=false`、
 `RunOnlyIfNetworkAvailable=false`、`DisallowStartOnRemoteAppSession=false`、
-`UseUnifiedSchedulingEngine=true`，以及 IdleSettings 的 `Duration=PT10M`、
+`UseUnifiedSchedulingEngine=false`，以及 IdleSettings 的 `Duration=PT10M`、
 `WaitTimeout=PT1H`、`StopOnIdleEnd=true`、`RestartOnIdle=false`。不写空的过期删除、
 重启间隔或维护设置。
 `Hidden=false` 保持任务可审计；窗口隐藏仅由 action 参数实现。
+
+月度任务必须显式写入 `UseUnifiedSchedulingEngine=false`，不得省略后仅依赖 schema
+默认值，也不得沿用其他三个任务的 `true`。微软 Task Scheduler 合同明确将 Monthly 与
+Monthly day-of-week trigger 列为 unified scheduling engine 不支持的功能；不兼容组合
+会在注册时被拒绝（[What’s New in Task Scheduler](https://learn.microsoft.com/en-us/windows/win32/taskschd/what-s-new-in-task-scheduler)、
+[UseUnifiedSchedulingEngine](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskschedulerschema-useunifiedschedulingengine-settingstype-element)）。
+该兼容性例外只属于月度 XML，不改变 LoginRecovery、Health 和
+DailyBackup 的既有 setting。
 
 注册调用只有这一种形式：
 
@@ -372,6 +380,25 @@ settings 必须相同。provider 的 task-level `Settings.Enabled` 也必须为 
 任何 native stderr、非零退出码、空/多输出、缺失节点、重复节点或值漂移都提升为
 安装失败；不得仅因 `Register-ScheduledTask` 返回而宣布成功。
 
+语义比较必须同时验证命名空间和精确子节点集合，不能只比较 `LocalName`。月度
+`CalendarTrigger` 只能包含 `StartBoundary`、`Enabled` 与
+`ScheduleByMonthDayOfWeek`；后者只能包含一个 Weeks、DaysOfWeek 和 Months，且各自
+只能含规定的 Week/Sunday/十二个月节点。必须拒绝错误 namespace、`EndBoundary`、
+`RandomDelay`、`Repetition`、trigger-level `ExecutionTimeLimit` 或任何未知 trigger
+子项。Principal 只能包含 `UserId`、`LogonType`、`RunLevel`，不得出现
+`RequiredPrivileges`、`ProcessTokenSidType` 或未知子项。单一 Exec 只能包含 Command
+与 Arguments，不得出现 `WorkingDirectory` 或额外 action 节点。Settings 与
+IdleSettings 同样必须是本节固定节点集合；缺失、重复和额外节点都失败。
+
+三个非月度任务的 provider 与导出 XML 也必须按各自定义验证完整有效语义，而非只看
+trigger 类型或少数字段。共同 settings 包括 Enabled、Hidden、StartWhenAvailable、
+MultipleInstances、battery、idle、network、on-demand、ExecutionTimeLimit、Priority、
+remote-app 与 unified-engine；XML 省略 schema 默认节点时先按微软文档默认值归一化，
+再与期望对象比较。LoginRecovery 精确验证单一 LogonTrigger 及 UserId/Delay，并拒绝
+EndBoundary、RandomDelay、ExecutionTimeLimit 等额外语义；Health 精确验证单一每日
+CalendarTrigger、00:00、PT5M/P1D repetition；DailyBackup 精确验证单一每日 03:00
+CalendarTrigger。每种任务都要有独立的 trigger/settings 漂移负例。
+
 生产安装仍然先构造并验证四个内存任务定义，再开始任何系统写入。月度 XML 也必须在
 该写边界前构造、重新解析并完成同一组语义断言。注册后复用最终四任务/一规则/精确
 ACL 断言；从当前两个禁用任务状态幂等收敛，失败时保留可诊断的部分状态，不删除已
@@ -385,6 +412,10 @@ MultipleInstances 均在写前/重查时失败；月度仅调用 `-Xml` 而其�
 `-InputObject`；provider 非终止错误被提升；零/多输出失败；从零、两个禁用、三个或
 四个合法部分状态收敛为四个已启用任务；第二次安装不产生重复。禁止 COM、
 `schtasks /Create`、每周近似、一次性自重排和任何新的 canary 重试。
+另须覆盖月度 `UseUnifiedSchedulingEngine=true`、省略该节点、错误 namespace、额外
+EndBoundary/RandomDelay/Repetition/WorkingDirectory/principal 子项，以及三个非月度
+任务各自的完整 trigger/settings 漂移；这些用例都必须在 fake provider 中可执行地
+失败，而不是只做源码字符串断言。
 
 ## 9. 备份、保留与恢复演练
 
