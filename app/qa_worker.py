@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+import logging
+import queue
+import threading
+from dataclasses import dataclass
+from typing import Protocol, Sequence
+from uuid import uuid4
+
+from app.qa_answer_engine import QaAnswerEngine, QaAnswerRequest, QaEngineError
+from app.qa_context import QaContextBuilder
+from app.qa_job_repository import QaJobRepository
+from app.qa_models import QaJob, QaMessage
+from app.qa_observability import QaTelemetry
+from app.qa_repository import QaRepository
+from app.qa_service import QaService
+
+
+logger = logging.getLogger(__name__)
+
+
+class QaConversationSummarizer(Protocol):
+    def summarize(
+        self,
+        runtime: object,
+        previous_summary: str,
+        completed_turns: Sequence[QaMessage],
+    ) -> str: ...
+
+
+class LlmQaConversationSummarizer:
+    def summarize(
+        self,
+        runtime: object,
+        previous_summary: str,
+        completed_turns: Sequence[QaMessage],
+    ) -> str:
+        parts = ["请压缩以下学习问答，保留结论、分歧与未解决问题。"]
+        if previous_summary:
+            parts.append(f"已有摘要：\n{previous_summary}")
+        parts.append(
+            "\n".join(
+                f"{'用户' if item.role == 'user' else '助手'}：{item.content}"
+                for item in completed_turns
+            )
+        )
+        return str(runtime.rag_tool.llm.generate("\n\n".join(parts))).strip()
+
+
+class _LeaseLost(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class _Refresh:
+    user_id: str
+    conversation_id: str
+
+
+class QaWorkerPool:
+    def __init__(
+        self,
+        job_repository: QaJobRepository,
+        qa_repository: QaRepository,
+        runtime_registry,
+        answer_engine: QaAnswerEngine,
+        context_builder: QaContextBuilder,
+        telemetry: QaTelemetry,
+        *,
+        summarizer: QaConversationSummarizer | None = None,
+        worker_count: int = 2,
+        lease_seconds: int = 60,
+        poll_interval: float = 0.5,
+    ) -> None:
+        if worker_count < 1 or lease_seconds < 1 or poll_interval <= 0:
+            raise ValueError("invalid QA worker configuration")
+        self.job_repository = job_repository
+        self.qa_repository = qa_repository
+        self.runtime_registry = runtime_registry
+        self.answer_engine = answer_engine
+        self.context_builder = context_builder
+        self.telemetry = telemetry
+        self.summarizer = summarizer or LlmQaConversationSummarizer()
+        self.worker_count = worker_count
+        self.lease_seconds = lease_seconds
+        self.poll_interval = poll_interval
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._refresh_queue: queue.Queue[_Refresh] = queue.Queue()
+        self._refresh_keys: set[tuple[str, str]] = set()
+        self._refresh_lock = threading.Lock()
+
+    def start(self) -> None:
+        if any(thread.is_alive() for thread in self._threads):
+            return
+        self.job_repository.recover_expired()
+        self._stop.clear()
+        self._threads = [
+            threading.Thread(
+                target=self._loop,
+                args=(f"qa-worker-{index + 1}-{uuid4()}" ,),
+                name=f"qa-worker-{index + 1}",
+                daemon=False,
+            )
+            for index in range(self.worker_count)
+        ]
+        for thread in self._threads:
+            thread.start()
+        self.notify()
+
+    def stop(self, wait: bool = True) -> None:
+        self._stop.set()
+        self._wake.set()
+        if wait:
+            for thread in self._threads:
+                thread.join()
+
+    def notify(self) -> None:
+        self._wake.set()
+
+    def schedule_summary_refresh(self, user_id: str, conversation_id: str) -> None:
+        key = (user_id, conversation_id)
+        with self._refresh_lock:
+            if key in self._refresh_keys:
+                return
+            self._refresh_keys.add(key)
+            self._refresh_queue.put(_Refresh(*key))
+        self.notify()
+
+    def _loop(self, worker_id: str) -> None:
+        while not self._stop.is_set():
+            try:
+                job = self.job_repository.claim_next(
+                    worker_id, lease_seconds=self.lease_seconds
+                )
+                if job is not None:
+                    self._run_job(worker_id, job)
+                    continue
+                try:
+                    refresh = self._refresh_queue.get_nowait()
+                except queue.Empty:
+                    self._wake.wait(self.poll_interval)
+                    self._wake.clear()
+                    continue
+                try:
+                    self._run_refresh(refresh)
+                finally:
+                    self._refresh_queue.task_done()
+            except Exception:
+                logger.exception("QA worker iteration failed")
+
+    def _run_job(self, worker_id: str, job: QaJob) -> None:
+        runtime = None
+        try:
+            conversation = self.qa_repository.get_conversation(
+                job.user_id, job.conversation_id
+            )
+            input_message = self.qa_repository.get_message(
+                job.user_id, job.input_message_id
+            )
+            assistant = self.qa_repository.get_message(
+                job.user_id, job.assistant_message_id
+            )
+            if conversation is None or input_message is None or assistant is None:
+                return
+            runtime = self.runtime_registry.acquire_background(job.user_id)
+            result = self.answer_engine.answer(
+                runtime,
+                QaAnswerRequest(
+                    question=input_message.content,
+                    conversation_context="",
+                    document_ids=tuple(
+                        item.document_id for item in conversation.documents
+                    ),
+                    mode="summary",
+                ),
+                progress_callback=self._progress_callback(worker_id, job),
+                cancel_event=self._stop,
+            )
+            self.job_repository.commit_answer(
+                job.id,
+                worker_id,
+                assistant.version,
+                result.answer,
+                result.sources,
+                "available" if result.sources else "none",
+            )
+        except _LeaseLost:
+            # A cancellation request deliberately makes heartbeat return false.
+            # ``complete`` converts that still-owned cancelled lease into the
+            # terminal cancelled job/message; a genuinely stale owner remains
+            # a no-op.
+            self.job_repository.complete(job.id, worker_id)
+            return
+        except Exception as error:
+            code, retryable = QaService._safe_engine_failure(error)
+            try:
+                self.job_repository.fail_or_retry(
+                    job.id,
+                    worker_id,
+                    code,
+                    str(uuid4()),
+                    retryable=retryable,
+                )
+            except Exception:
+                logger.warning("QA job failure transition lost", exc_info=True)
+        finally:
+            if runtime is not None:
+                self.runtime_registry.release_background(job.user_id)
+
+    def _progress_callback(self, worker_id: str, job: QaJob):
+        def update(stage: str, completed: int, total: int, message: str) -> None:
+            ratio = 0.0 if total <= 0 else min(1.0, max(0.0, completed / total))
+            progress = min(95, max(1, int(ratio * 95)))
+            if not self.job_repository.heartbeat(
+                job.id,
+                worker_id,
+                progress=progress,
+                stage=str(stage or "generating")[:100],
+            ):
+                raise _LeaseLost()
+
+        return update
+
+    def _run_refresh(self, refresh: _Refresh) -> None:
+        key = (refresh.user_id, refresh.conversation_id)
+        runtime = None
+        try:
+            conversation = self.qa_repository.get_conversation(*key)
+            if conversation is None:
+                return
+            messages = self._all_messages(*key)
+            turns = self.context_builder._complete_turns(
+                messages,
+                conversation.conversation.summary_through_message_id,
+            )
+            flattened = tuple(item for turn in turns for item in turn)
+            if not flattened:
+                return
+            runtime = self.runtime_registry.acquire_background(refresh.user_id)
+            summary = self.summarizer.summarize(
+                runtime,
+                conversation.conversation.rolling_summary,
+                flattened,
+            )
+            self.qa_repository.update_rolling_summary(
+                refresh.user_id,
+                refresh.conversation_id,
+                conversation.conversation.version,
+                conversation.conversation.summary_version,
+                summary,
+                flattened[-1].id,
+            )
+        except Exception:
+            self.telemetry.record(
+                "qa_summary_fallback", conversation_id=refresh.conversation_id
+            )
+        finally:
+            if runtime is not None:
+                self.runtime_registry.release_background(refresh.user_id)
+            with self._refresh_lock:
+                self._refresh_keys.discard(key)
+
+    def _all_messages(self, user_id: str, conversation_id: str) -> tuple[QaMessage, ...]:
+        items: list[QaMessage] = []
+        cursor = None
+        while True:
+            page = self.qa_repository.list_messages(
+                user_id, conversation_id, cursor=cursor, limit=200
+            )
+            items.extend(page.items)
+            if page.next_cursor is None:
+                return tuple(items)
+            cursor = page.next_cursor

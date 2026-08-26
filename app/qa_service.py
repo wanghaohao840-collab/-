@@ -74,6 +74,9 @@ class QaService:
         answer_engine: QaAnswerEngine,
         context_builder: QaContextBuilder,
         telemetry: QaTelemetry,
+        *,
+        job_repository=None,
+        worker_pool=None,
     ) -> None:
         self.session_registry = session_registry
         self.document_library = document_library
@@ -81,6 +84,8 @@ class QaService:
         self.answer_engine = answer_engine
         self.context_builder = context_builder
         self.telemetry = telemetry
+        self.job_repository = job_repository
+        self.worker_pool = worker_pool
 
     def create_conversation(
         self,
@@ -248,6 +253,44 @@ class QaService:
             mode,
         )
 
+    def start_summary(
+        self,
+        session_token: str,
+        conversation_id: str,
+        instruction: str,
+        client_request_id: str,
+    ):
+        if self.job_repository is None or self.worker_pool is None:
+            raise RuntimeError("QA summary workers are not configured")
+        session = self.session_registry.get_session(session_token)
+        user_id = str(session.user_id)
+        conversation = self._require_conversation(user_id, conversation_id)
+        self._require_scope_available(session_token, conversation)
+        enqueue = self.job_repository.create_summary_turn_and_job(
+            user_id,
+            conversation_id,
+            str(instruction or "").strip()
+            or "总结这些文档的核心内容、共识、分歧与证据。",
+            client_request_id,
+        )
+        self.worker_pool.notify()
+        return enqueue.job
+
+    def get_job(self, session_token: str, job_id: str):
+        if self.job_repository is None:
+            raise RuntimeError("QA summary workers are not configured")
+        session = self.session_registry.get_session(session_token)
+        return self.job_repository.get(str(session.user_id), job_id)
+
+    def cancel_job(self, session_token: str, job_id: str):
+        if self.job_repository is None or self.worker_pool is None:
+            raise RuntimeError("QA summary workers are not configured")
+        session = self.session_registry.get_session(session_token)
+        job = self.job_repository.request_cancel(str(session.user_id), job_id)
+        if job is not None:
+            self.worker_pool.notify()
+        return job
+
     def _execute_pending(
         self,
         session,
@@ -319,6 +362,15 @@ class QaService:
             conversation_id=conversation.id,
             message_id=pending.assistant_message.id,
         )
+        if self.worker_pool is not None:
+            messages = self._all_messages(user_id, conversation.id)
+            if self.context_builder.needs_refresh(
+                messages=messages,
+                summary_through_message_id=(
+                    conversation.conversation.summary_through_message_id
+                ),
+            ):
+                self.worker_pool.schedule_summary_refresh(user_id, conversation.id)
         return self._require_message(user_id, pending.assistant_message.id)
 
     def _all_messages(

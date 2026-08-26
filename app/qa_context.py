@@ -64,6 +64,18 @@ class QaContextBuilder:
             truncated=truncated,
         )
 
+    def needs_refresh(
+        self,
+        *,
+        messages: Sequence[QaMessage],
+        summary_through_message_id: str | None,
+    ) -> bool:
+        turns = self._complete_turns(messages, summary_through_message_id)
+        rendered = "\n".join(
+            item.content for turn in turns for item in turn
+        )
+        return self._estimate(rendered) >= max(1, int(self.max_input_tokens * 0.75))
+
     @staticmethod
     def _complete_turns(
         messages: Sequence[QaMessage], boundary_id: str | None

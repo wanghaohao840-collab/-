@@ -3,12 +3,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Sequence
 from uuid import uuid4
 
 from app.database import connect
 from app.qa_models import (
     QaConflictError,
     QaJob,
+    QaSourceDraft,
     QaValidationError,
     SummaryEnqueueResult,
 )
@@ -327,6 +329,129 @@ class QaJobRepository:
         finally:
             conn.close()
 
+    def commit_answer(
+        self,
+        job_id: str,
+        worker_id: str,
+        expected_message_version: int,
+        answer: str,
+        sources: Sequence[QaSourceDraft],
+        source_state: str,
+        *,
+        now: str | None = None,
+    ) -> bool:
+        """Atomically commit a summary answer and its owning durable job."""
+
+        if source_state not in {"available", "none", "legacy_unavailable"}:
+            raise QaValidationError("QA_SOURCE_STATE_INVALID", "invalid source state")
+        timestamp = now or _utc_now()
+        source_list = tuple(sources)
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
+            job = conn.execute(
+                "select * from qa_jobs where id = ?", (job_id,)
+            ).fetchone()
+            if not self._owns_live_lease(job, worker_id, timestamp):
+                conn.commit()
+                return False
+            if job["cancel_requested_at"] is not None:
+                self._cancel_running(conn, job, timestamp)
+                conn.commit()
+                return False
+            message = conn.execute(
+                """
+                select * from qa_messages
+                where id = ? and user_id = ? and conversation_id = ?
+                  and role = 'assistant' and status = 'pending' and version = ?
+                """,
+                (
+                    job["assistant_message_id"],
+                    job["user_id"],
+                    job["conversation_id"],
+                    expected_message_version,
+                ),
+            ).fetchone()
+            if message is None:
+                conn.commit()
+                return False
+            self.qa_repository._validate_source_scope(
+                conn, job["user_id"], job["conversation_id"], source_list
+            )
+            conn.execute(
+                """
+                update qa_messages
+                set status = 'completed', content = ?, source_state = ?,
+                    memory_sync_status = 'pending', version = version + 1,
+                    updated_at = ?, completed_at = ?
+                where id = ? and user_id = ? and status = 'pending'
+                  and version = ?
+                """,
+                (
+                    str(answer),
+                    source_state,
+                    timestamp,
+                    timestamp,
+                    message["id"],
+                    job["user_id"],
+                    expected_message_version,
+                ),
+            )
+            conn.executemany(
+                """
+                insert into qa_message_sources (
+                    id, assistant_message_id, conversation_id, user_id,
+                    position, citation_id, document_id, document_name,
+                    page_number, section, excerpt, reference, truncated,
+                    source_type
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(uuid4()),
+                        message["id"],
+                        job["conversation_id"],
+                        job["user_id"],
+                        position,
+                        source.citation_id,
+                        source.document_id,
+                        source.document_name,
+                        source.page_number,
+                        source.section,
+                        source.excerpt,
+                        source.reference,
+                        int(source.truncated),
+                        source.source_type,
+                    )
+                    for position, source in enumerate(source_list)
+                ],
+            )
+            self.qa_repository._touch_conversation(
+                conn, job["user_id"], job["conversation_id"], timestamp
+            )
+            completed = conn.execute(
+                """
+                update qa_jobs
+                set status = 'completed', stage = 'completed', progress = 100,
+                    lease_owner = null, lease_expires_at = null,
+                    lease_duration_seconds = null, finished_at = ?, updated_at = ?,
+                    version = version + 1
+                where id = ? and status = 'running' and lease_owner = ?
+                  and lease_expires_at > ? and cancel_requested_at is null
+                """,
+                (timestamp, timestamp, job_id, worker_id, timestamp),
+            )
+            if not completed.rowcount:
+                conn.rollback()
+                return False
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def fail_or_retry(
         self,
         job_id: str,
@@ -334,6 +459,7 @@ class QaJobRepository:
         error_code: str,
         trace_id: str | None,
         *,
+        retryable: bool = True,
         now: str | None = None,
     ) -> QaJob:
         timestamp = now or _utc_now()
@@ -347,7 +473,7 @@ class QaJobRepository:
                 raise QaConflictError("QA_JOB_LEASE_LOST")
             if row["cancel_requested_at"] is not None:
                 self._cancel_running(conn, row, timestamp)
-            elif row["attempt_count"] < row["max_attempts"]:
+            elif retryable and row["attempt_count"] < row["max_attempts"]:
                 conn.execute(
                     """
                     update qa_jobs

@@ -106,6 +106,35 @@ def make_service(parts, engine=None):
     )
 
 
+class Jobs:
+    def __init__(self, result=None):
+        self.result = result
+        self.calls = []
+
+    def create_summary_turn_and_job(self, *args, **kwargs):
+        self.calls.append(("create", args, kwargs))
+        return self.result
+
+    def get(self, *args, **kwargs):
+        self.calls.append(("get", args, kwargs))
+        return self.result.job if self.result else None
+
+    def request_cancel(self, *args, **kwargs):
+        self.calls.append(("cancel", args, kwargs))
+        return self.result.job if self.result else None
+
+
+class Worker:
+    def __init__(self):
+        self.notifications = 0
+
+    def notify(self):
+        self.notifications += 1
+
+    def schedule_summary_refresh(self, user_id, conversation_id):
+        pass
+
+
 def test_create_conversation_preserves_verified_scope_and_is_user_scoped(
     service_parts,
 ) -> None:
@@ -220,3 +249,30 @@ def test_engine_runs_after_pending_transaction_has_committed(service_parts) -> N
     assert service.ask(
         TOKEN, conversation.id, "问题", "joint", "client-1"
     ).status == "completed"
+
+
+def test_summary_service_methods_are_user_scoped_and_notify_worker(
+    service_parts,
+) -> None:
+    from app.qa_job_repository import QaJobRepository
+
+    db_path, repository, sessions, library, telemetry = service_parts
+    real_jobs = QaJobRepository(db_path)
+    worker = Worker()
+    service = QaService(
+        sessions,
+        library,
+        repository,
+        Engine(),
+        QaContextBuilder(2000),
+        telemetry,
+        job_repository=real_jobs,
+        worker_pool=worker,
+    )
+    conversation = service.create_conversation(TOKEN, ("doc-1",))
+    job = service.start_summary(TOKEN, conversation.id, "", "summary-1")
+    assert job.status == "queued"
+    assert worker.notifications == 1
+    assert service.get_job(TOKEN, job.id).id == job.id
+    assert service.get_job("other-token", job.id) is None
+    assert service.cancel_job(TOKEN, job.id).status == "cancelled"
