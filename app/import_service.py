@@ -9,10 +9,13 @@ from typing import Any, Callable, Iterable
 
 from app.import_models import (
     ImportBatchSummary,
+    ImportHistoryFilters,
+    ImportHistoryPage,
     ImportLimits,
     ImportTaskCreate,
     validate_batch_sizes,
 )
+from app.import_maintenance import ImportHistoryMaintenance
 from app.import_repository import ImportTaskRepository
 from app.storage import UserStorage
 
@@ -41,12 +44,14 @@ class ImportTaskService:
         storage: UserStorage,
         worker_pool: Any,
         limits: ImportLimits = ImportLimits(),
+        maintenance: ImportHistoryMaintenance | None = None,
     ) -> None:
         self.session_registry = session_registry
         self.repository = repository
         self.storage = storage
         self.worker_pool = worker_pool
         self.limits = limits
+        self.maintenance = maintenance or ImportHistoryMaintenance(repository, storage)
 
     def submit_batch(
         self,
@@ -114,9 +119,39 @@ class ImportTaskService:
 
     def get_batch(self, session_token: str, batch_id: str) -> ImportBatchSummary:
         summary = self.repository.get_batch(self._user_id(session_token), batch_id)
-        if summary is None:
+        if summary is None or summary.lifecycle_state != "active":
             raise KeyError("import batch was not found")
         return summary
+
+    def list_task_history(
+        self,
+        session_token: str,
+        filters: ImportHistoryFilters | dict[str, Any] | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> ImportHistoryPage:
+        parsed = self._parse_history_filters(filters)
+        return self.repository.list_history(
+            self._user_id(session_token), parsed, cursor, limit
+        )
+
+    def list_task_events(
+        self, session_token: str, task_id: str, limit: int = 200
+    ):
+        if not isinstance(task_id, str) or not task_id:
+            raise ValueError("task_id is required")
+        return self.repository.list_task_events(
+            self._user_id(session_token), task_id, limit=limit
+        )
+
+    def delete_batch_history(self, session_token: str, batch_id: str) -> None:
+        if not isinstance(batch_id, str) or not batch_id:
+            raise ValueError("batch_id is required")
+        session = self._session(session_token)
+        user_id = str(session.user_id)
+        with self._runtime_lock(session):
+            summary = self.repository.mark_batch_deleting(user_id, batch_id)
+        self.maintenance._finish_marked_batch(user_id, summary)
 
     def retry_task(
         self,
@@ -146,7 +181,8 @@ class ImportTaskService:
         session = self._session(session_token)
         user_id = str(session.user_id)
         with self._runtime_lock(session):
-            if self.repository.get_batch(user_id, batch_id) is None:
+            current = self.repository.get_batch(user_id, batch_id)
+            if current is None or current.lifecycle_state != "active":
                 raise KeyError("import batch was not found")
             changed = self.repository.retry_failed_in_batch(user_id, batch_id)
             summary = self.repository.get_batch(user_id, batch_id)
@@ -255,6 +291,72 @@ class ImportTaskService:
             size_bytes=size_bytes,
             task_id=str(uuid.uuid4()),
             document_id=str(uuid.uuid4()),
+        )
+
+    @staticmethod
+    def _parse_history_filters(
+        values: ImportHistoryFilters | dict[str, Any] | None,
+    ) -> ImportHistoryFilters:
+        if values is None:
+            values = {}
+        if isinstance(values, ImportHistoryFilters):
+            values = {
+                "statuses": values.statuses,
+                "filename_query": values.filename_query,
+                "created_from": values.created_from,
+                "created_to": values.created_to,
+                "batch_id": values.batch_id,
+            }
+        if not isinstance(values, dict):
+            raise ValueError("history filters are invalid")
+        allowed = {
+            "statuses",
+            "filename_query",
+            "created_from",
+            "created_to",
+            "batch_id",
+        }
+        if set(values) - allowed:
+            raise ValueError("history filters are invalid")
+
+        raw_statuses = values.get("statuses", ())
+        if raw_statuses is None:
+            raw_statuses = ()
+        elif isinstance(raw_statuses, str):
+            raw_statuses = (raw_statuses,) if raw_statuses else ()
+        elif isinstance(raw_statuses, (list, tuple)):
+            raw_statuses = tuple(raw_statuses)
+        else:
+            raise ValueError("history status filter is invalid")
+        if any(not isinstance(status, str) for status in raw_statuses):
+            raise ValueError("history status filter is invalid")
+
+        filename_query = values.get("filename_query", "")
+        if filename_query is None:
+            filename_query = ""
+        if not isinstance(filename_query, str):
+            raise ValueError("history filename filter is invalid")
+
+        parsed_dates: dict[str, str | None] = {}
+        for name in ("created_from", "created_to"):
+            value = values.get(name)
+            if value in (None, ""):
+                parsed_dates[name] = None
+            elif isinstance(value, str):
+                parsed_dates[name] = value
+            else:
+                raise ValueError("history date filter is invalid")
+        batch_id = values.get("batch_id")
+        if batch_id == "":
+            batch_id = None
+        if batch_id is not None and not isinstance(batch_id, str):
+            raise ValueError("history batch filter is invalid")
+        return ImportHistoryFilters(
+            statuses=tuple(raw_statuses),
+            filename_query=filename_query,
+            created_from=parsed_dates["created_from"],
+            created_to=parsed_dates["created_to"],
+            batch_id=batch_id,
         )
 
     def _user_id(self, session_token: str) -> str:

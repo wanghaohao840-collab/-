@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import re
 import shutil
 import sqlite3
 import threading
@@ -10,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from app.import_maintenance import ImportHistoryMaintenance
 from app.import_models import ImportTaskRecord
 from app.import_repository import ImportTaskRepository, InvalidImportTransition
 from app.storage import UserStorage
@@ -31,6 +34,9 @@ logger = logging.getLogger(__name__)
 _RETRY_DELAYS = (2, 10, 30)
 _RUNNER_FAILURE_RETRY_DELAYS = (0.02, 0.05, 0.1)
 _STOP = object()
+_RETENTION_ENV = "IMPORT_TASK_RETENTION_DAYS"
+_RETENTION_ERROR = "IMPORT_TASK_RETENTION_DAYS must be a non-negative integer"
+_RETENTION_INTERVAL_SECONDS = 60 * 60
 _SAFE_STRUCTURED_ERROR_CODES = {
     "document_invalid",
     "rag_connection",
@@ -59,6 +65,18 @@ _STAGE_RANGES = {
     "persisting": (80, 92),
     "committing": (92, 99),
 }
+
+
+def parse_import_task_retention_days(value: str | None = None) -> int:
+    raw = os.environ.get(_RETENTION_ENV) if value is None else value
+    if raw in (None, ""):
+        return 0
+    if not isinstance(raw, str) or re.fullmatch(r"[0-9]+", raw) is None:
+        raise ValueError(_RETENTION_ERROR)
+    try:
+        return int(raw, 10)
+    except ValueError as error:
+        raise ValueError(_RETENTION_ERROR) from error
 
 
 def classify_import_failure(error: BaseException) -> tuple[str, bool, str]:
@@ -474,15 +492,27 @@ class ImportWorkerPool:
         *,
         runner: Any = None,
         worker_count: int = 4,
+        maintenance: ImportHistoryMaintenance | None = None,
+        retention_days: int | None = None,
     ) -> None:
         if worker_count < 1:
             raise ValueError("worker_count must be at least 1")
+        if retention_days is None:
+            retention_days = parse_import_task_retention_days()
+        elif (
+            isinstance(retention_days, bool)
+            or not isinstance(retention_days, int)
+            or retention_days < 0
+        ):
+            raise ValueError(_RETENTION_ERROR)
         self.repository = repository
         self.storage = storage
         self.runner = runner or ImportTaskRunner(
             repository, runtime_registry, storage
         )
         self.worker_count = worker_count
+        self.maintenance = maintenance or ImportHistoryMaintenance(repository, storage)
+        self.retention_days = retention_days
         self._condition = threading.Condition()
         self._stop_event = threading.Event()
         self._blocked_user_ids: set[str] = set()
@@ -491,6 +521,7 @@ class ImportWorkerPool:
         self._task_queue: queue.Queue[ImportTaskRecord | object] = queue.Queue()
         self._active_count = 0
         self._notify_generation = 0
+        self._last_retention_at: float | None = None
 
     def start(self) -> None:
         with self._condition:
@@ -499,12 +530,17 @@ class ImportWorkerPool:
                 and self._scheduler_thread.is_alive()
             ):
                 return
+            try:
+                self.maintenance.recover_deleting(limit=20)
+            except Exception:
+                logger.error("import history deletion recovery failed")
             self.repository.recover_running(self.storage)
             self.repository.cleanup_succeeded_staging(self.storage)
             self._stop_event.clear()
             self._blocked_user_ids.clear()
             self._active_count = 0
             self._notify_generation = 0
+            self._last_retention_at = None
             self._task_queue = queue.Queue()
             self._worker_threads = [
                 threading.Thread(
@@ -561,11 +597,18 @@ class ImportWorkerPool:
                     task = None
                 if task is None:
                     with self._condition:
-                        self._condition.wait_for(
+                        awakened = self._condition.wait_for(
                             lambda: self._stop_event.is_set()
                             or self._notify_generation != observed_generation,
                             timeout=1.0,
                         )
+                        idle = (
+                            not awakened
+                            and not self._stop_event.is_set()
+                            and self._active_count == 0
+                        )
+                    if idle:
+                        self._run_idle_retention()
                     continue
                 with self._condition:
                     if self._stop_event.is_set():
@@ -591,6 +634,21 @@ class ImportWorkerPool:
         finally:
             for _ in self._worker_threads:
                 self._task_queue.put(_STOP)
+
+    def _run_idle_retention(self) -> None:
+        if self.retention_days == 0:
+            return
+        current = time.monotonic()
+        if (
+            self._last_retention_at is not None
+            and current - self._last_retention_at < _RETENTION_INTERVAL_SECONDS
+        ):
+            return
+        self._last_retention_at = current
+        try:
+            self.maintenance.run_retention(self.retention_days, limit=10)
+        except Exception:
+            logger.error("import history retention maintenance failed")
 
     def _worker_loop(self) -> None:
         while True:

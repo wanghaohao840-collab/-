@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -9,6 +12,8 @@ from typing import Iterable
 from app.database import connect, transaction
 from app.import_models import (
     ImportBatchSummary,
+    ImportHistoryFilters,
+    ImportHistoryPage,
     ImportStage,
     ImportStatus,
     ImportTaskCreate,
@@ -31,6 +36,10 @@ ACTIVE_STATUSES = (
     "paused",
     "cancel_requested",
 )
+TERMINAL_STATUSES = ("cancelled", "succeeded", "failed")
+_IMPORT_STATUSES = frozenset((*ACTIVE_STATUSES, *TERMINAL_STATUSES))
+_HISTORY_CURSOR_KEYS = frozenset(("created_at", "batch_id"))
+_HISTORY_CURSOR_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 _URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s,;]+", re.IGNORECASE)
 _QUOTED_ABSOLUTE_PATH_RE = re.compile(
@@ -119,13 +128,87 @@ class ImportTaskRepository:
             rows = conn.execute(
                 """
                 select id from import_batches
-                where user_id = ?
+                where user_id = ? and lifecycle_state = 'active'
                 order by created_at desc, id desc
                 limit ?
                 """,
                 (user_id, limit),
             ).fetchall()
             return [self._get_batch(conn, user_id, row["id"]) for row in rows]
+
+    def list_history(
+        self,
+        user_id: str,
+        filters: ImportHistoryFilters,
+        cursor: str | None,
+        limit: int,
+    ) -> ImportHistoryPage:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("history limit must be between 1 and 100")
+        normalized = _validate_history_filters(filters)
+        cursor_values = _decode_history_cursor(cursor) if cursor is not None else None
+
+        clauses = ["b.user_id = ?", "b.lifecycle_state = 'active'"]
+        parameters: list[object] = [user_id]
+        if normalized.batch_id is not None:
+            clauses.append("b.id = ?")
+            parameters.append(normalized.batch_id)
+        if normalized.created_from is not None:
+            clauses.append("b.created_at >= ?")
+            parameters.append(normalized.created_from)
+        if normalized.created_to is not None:
+            clauses.append("b.created_at <= ?")
+            parameters.append(normalized.created_to)
+
+        task_filters: list[str] = []
+        if normalized.statuses:
+            placeholders = ", ".join("?" for _ in normalized.statuses)
+            task_filters.append(f"t.status in ({placeholders})")
+            parameters.extend(normalized.statuses)
+        if normalized.filename_query:
+            task_filters.append("t.original_name like ? escape '\\'")
+            parameters.append(
+                f"%{_escape_like(normalized.filename_query)}%"
+            )
+        if task_filters:
+            clauses.append(
+                "exists (select 1 from import_tasks t "
+                "where t.batch_id = b.id and t.user_id = b.user_id and "
+                + " and ".join(task_filters)
+                + ")"
+            )
+        if cursor_values is not None:
+            clauses.append(
+                "(b.created_at < ? or (b.created_at = ? and b.id < ?))"
+            )
+            parameters.extend(
+                (
+                    cursor_values["created_at"],
+                    cursor_values["created_at"],
+                    cursor_values["batch_id"],
+                )
+            )
+
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                select b.id, b.created_at from import_batches b
+                where {' and '.join(clauses)}
+                order by b.created_at desc, b.id desc
+                limit ?
+                """,
+                (*parameters, limit + 1),
+            ).fetchall()
+            page_rows = rows[:limit]
+            batches = tuple(
+                self._get_batch(conn, user_id, row["id"]) for row in page_rows
+            )
+
+        next_cursor = None
+        if len(rows) > limit and page_rows:
+            last = page_rows[-1]
+            next_cursor = _encode_history_cursor(last["created_at"], last["id"])
+        return ImportHistoryPage(batches=batches, next_cursor=next_cursor)
 
     def get_batch(self, user_id: str, batch_id: str) -> ImportBatchSummary | None:
         with connect(self.db_path) as conn:
@@ -303,6 +386,11 @@ class ImportTaskRepository:
                 select t.id, t.user_id, t.status from import_tasks t
                 where t.status in ('pause_requested', 'cancel_requested')
                   and t.control_claimed_at is null
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = t.batch_id and b.user_id = t.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                   {blocked_clause}
                   and not exists (
                       select 1 from import_tasks x
@@ -341,6 +429,11 @@ class ImportTaskRepository:
                 select t.id, t.user_id, t.status from import_tasks t
                 where t.status in ('queued', 'retry_wait')
                   and (t.next_attempt_at is null or t.next_attempt_at <= ?)
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = t.batch_id and b.user_id = t.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                   {blocked_clause}
                   and not exists (
                       select 1 from import_tasks pending
@@ -541,6 +634,12 @@ class ImportTaskRepository:
                     finished_at = ?, updated_at = ?
                 where id = ? and user_id = ?
                   and status in ('pause_requested', 'cancel_requested')
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_tasks.batch_id
+                        and b.user_id = import_tasks.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 """,
                 (
                     error_code,
@@ -568,12 +667,140 @@ class ImportTaskRepository:
                 """
                 select * from import_task_events
                 where user_id = ? and task_id = ?
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_task_events.batch_id
+                        and b.user_id = import_task_events.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 order by created_at, id
                 limit ?
                 """,
                 (user_id, task_id, min(limit, 200)),
             ).fetchall()
             return [_event_from_row(row) for row in rows]
+
+    def mark_batch_deleting(
+        self, user_id: str, batch_id: str, now: str | None = None
+    ) -> ImportBatchSummary:
+        timestamp = now or _utc_now()
+        with transaction(self.db_path) as conn:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                """
+                select lifecycle_state from import_batches
+                where id = ? and user_id = ?
+                """,
+                (batch_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError("import batch was not found")
+            if row["lifecycle_state"] != "active":
+                raise InvalidImportTransition("import batch is not active")
+            nonterminal = conn.execute(
+                """
+                select 1 from import_tasks
+                where batch_id = ? and user_id = ?
+                  and status not in ('cancelled', 'succeeded', 'failed')
+                limit 1
+                """,
+                (batch_id, user_id),
+            ).fetchone()
+            if nonterminal is not None:
+                raise InvalidImportTransition("import batch is not fully terminal")
+            updated = conn.execute(
+                """
+                update import_batches
+                set lifecycle_state = 'deleting', delete_requested_at = ?,
+                    cleanup_error_code = null, cleanup_error_summary = null,
+                    updated_at = ?
+                where id = ? and user_id = ? and lifecycle_state = 'active'
+                """,
+                (timestamp, timestamp, batch_id, user_id),
+            )
+            if updated.rowcount != 1:  # pragma: no cover - serialized by begin immediate
+                raise InvalidImportTransition("import batch is not active")
+            return self._get_batch(conn, user_id, batch_id)
+
+    def get_deleting_batch(
+        self, user_id: str, batch_id: str
+    ) -> ImportBatchSummary | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                select 1 from import_batches
+                where id = ? and user_id = ? and lifecycle_state = 'deleting'
+                """,
+                (batch_id, user_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._get_batch(conn, user_id, batch_id)
+
+    def list_deleting_batches(self, limit: int = 20) -> list[ImportBatchSummary]:
+        _validate_maintenance_limit(limit)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select id, user_id from import_batches
+                where lifecycle_state = 'deleting'
+                order by delete_requested_at, created_at, id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                self._get_batch(conn, row["user_id"], row["id"]) for row in rows
+            ]
+
+    def list_retention_candidates(
+        self, cutoff: str, limit: int = 10
+    ) -> list[ImportBatchSummary]:
+        normalized_cutoff = _validate_history_date(cutoff, "retention cutoff")
+        _validate_maintenance_limit(limit)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select b.id, b.user_id from import_batches b
+                where b.lifecycle_state = 'active' and b.created_at < ?
+                  and not exists (
+                      select 1 from import_tasks t
+                      where t.batch_id = b.id and t.user_id = b.user_id
+                        and t.status not in ('cancelled', 'succeeded', 'failed')
+                  )
+                order by b.created_at, b.id
+                limit ?
+                """,
+                (normalized_cutoff, limit),
+            ).fetchall()
+            return [
+                self._get_batch(conn, row["user_id"], row["id"]) for row in rows
+            ]
+
+    def finish_batch_deletion(self, user_id: str, batch_id: str) -> None:
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                """
+                delete from import_batches
+                where id = ? and user_id = ? and lifecycle_state = 'deleting'
+                """,
+                (batch_id, user_id),
+            )
+
+    def record_batch_cleanup_failure(
+        self, user_id: str, batch_id: str, error: object
+    ) -> None:
+        summary = _safe_import_error_summary(error)
+        with transaction(self.db_path) as conn:
+            conn.execute(
+                """
+                update import_batches
+                set cleanup_error_code = 'staged_cleanup_failed',
+                    cleanup_error_summary = ?
+                where id = ? and user_id = ? and lifecycle_state = 'deleting'
+                """,
+                (summary, batch_id, user_id),
+            )
 
     def retry_task(
         self, user_id: str, task_id: str, now: str | None = None
@@ -603,6 +830,12 @@ class ImportTaskRepository:
                     next_attempt_at = null, error_code = null, error_summary = null,
                     started_at = null, finished_at = null, updated_at = ?
                 where user_id = ? and batch_id = ? and status = 'failed'
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_tasks.batch_id
+                        and b.user_id = import_tasks.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 """,
                 (timestamp, user_id, batch_id),
             )
@@ -704,6 +937,12 @@ class ImportTaskRepository:
                 f"""
                 select 1 from import_tasks
                 where user_id = ? and status in ({placeholders})
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_tasks.batch_id
+                        and b.user_id = import_tasks.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 limit 1
                 """,
                 (user_id, *ACTIVE_STATUSES),
@@ -718,6 +957,12 @@ class ImportTaskRepository:
                 select 1 from import_tasks
                 where user_id = ? and document_id = ?
                   and status in ({placeholders})
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_tasks.batch_id
+                        and b.user_id = import_tasks.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 limit 1
                 """,
                 (user_id, document_id, *ACTIVE_STATUSES),
@@ -737,6 +982,12 @@ class ImportTaskRepository:
                 f"""
                 update import_tasks set {set_clause}
                 where id = ? and user_id = ? and {expected_condition}
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_tasks.batch_id
+                        and b.user_id = import_tasks.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 """,
                 (*values, task_id, user_id),
             )
@@ -775,6 +1026,12 @@ class ImportTaskRepository:
             set status = ?, control_requested_at = ?, control_claimed_at = null,
                 next_attempt_at = null, updated_at = ?
             where id = ? and user_id = ? and status in ({placeholders})
+              and exists (
+                  select 1 from import_batches b
+                  where b.id = import_tasks.batch_id
+                    and b.user_id = import_tasks.user_id
+                    and b.lifecycle_state = 'active'
+              )
             """,
             (target, timestamp, timestamp, task_id, user_id, *allowed),
         )
@@ -795,6 +1052,12 @@ class ImportTaskRepository:
                 control_requested_at = null, control_claimed_at = null,
                 started_at = null, finished_at = null, updated_at = ?
             where id = ? and user_id = ? and status = 'paused'
+              and exists (
+                  select 1 from import_batches b
+                  where b.id = import_tasks.batch_id
+                    and b.user_id = import_tasks.user_id
+                    and b.lifecycle_state = 'active'
+              )
             """,
             (timestamp, task_id, user_id),
         )
@@ -823,6 +1086,12 @@ class ImportTaskRepository:
                     control_requested_at = null, control_claimed_at = null,
                     finished_at = ?, updated_at = ?
                 where id = ? and user_id = ? and status = ?
+                  and exists (
+                      select 1 from import_batches b
+                      where b.id = import_tasks.batch_id
+                        and b.user_id = import_tasks.user_id
+                        and b.lifecycle_state = 'active'
+                  )
                 """,
                 (target, target, timestamp, timestamp, task_id, user_id, expected),
             )
@@ -878,7 +1147,10 @@ class ImportTaskRepository:
         self, conn: sqlite3.Connection, user_id: str, batch_id: str
     ) -> None:
         exists = conn.execute(
-            "select 1 from import_batches where id = ? and user_id = ?",
+            """
+            select 1 from import_batches
+            where id = ? and user_id = ? and lifecycle_state = 'active'
+            """,
             (batch_id, user_id),
         ).fetchone()
         if exists is None:
@@ -1028,6 +1300,103 @@ def _safe_import_error_summary(message: object) -> str:
     text = _UUID_RE.sub("[redacted-id]", text)
     text = re.sub(r"\s+", " ", text).strip()
     return (text or "Import processing failed")[:500]
+
+
+def _validate_history_filters(filters: ImportHistoryFilters) -> ImportHistoryFilters:
+    if not isinstance(filters, ImportHistoryFilters):
+        raise ValueError("history filters are invalid")
+    statuses = filters.statuses
+    if not isinstance(statuses, tuple) or any(
+        not isinstance(status, str) or status not in _IMPORT_STATUSES
+        for status in statuses
+    ):
+        raise ValueError("history status filter is invalid")
+    if not isinstance(filters.filename_query, str):
+        raise ValueError("history filename filter is invalid")
+    if filters.batch_id is not None and (
+        not isinstance(filters.batch_id, str) or not filters.batch_id
+    ):
+        raise ValueError("history batch filter is invalid")
+    created_from = (
+        _validate_history_date(filters.created_from, "created_from", end_of_day=False)
+        if filters.created_from is not None
+        else None
+    )
+    created_to = (
+        _validate_history_date(filters.created_to, "created_to", end_of_day=True)
+        if filters.created_to is not None
+        else None
+    )
+    if created_from is not None and created_to is not None and created_from > created_to:
+        raise ValueError("history date range is invalid")
+    return ImportHistoryFilters(
+        statuses=tuple(dict.fromkeys(statuses)),
+        filename_query=filters.filename_query,
+        created_from=created_from,
+        created_to=created_to,
+        batch_id=filters.batch_id,
+    )
+
+
+def _validate_history_date(
+    value: str, field_name: str, *, end_of_day: bool = False
+) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError(f"history {field_name} date is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"history {field_name} date is invalid") from error
+    if len(value) == 10:
+        if end_of_day:
+            parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    elif parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _encode_history_cursor(created_at: str, batch_id: str) -> str:
+    payload = json.dumps(
+        {"created_at": created_at, "batch_id": batch_id},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_history_cursor(cursor: str) -> dict[str, str]:
+    invalid = ValueError("invalid import history cursor")
+    if (
+        not isinstance(cursor, str)
+        or not cursor
+        or not _HISTORY_CURSOR_RE.fullmatch(cursor)
+    ):
+        raise invalid
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+        payload = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, ValueError, UnicodeError, json.JSONDecodeError) as error:
+        raise invalid from error
+    if not isinstance(payload, dict) or frozenset(payload) != _HISTORY_CURSOR_KEYS:
+        raise invalid
+    if any(not isinstance(payload[key], str) or not payload[key] for key in payload):
+        raise invalid
+    try:
+        _validate_history_date(payload["created_at"], "cursor")
+    except ValueError as error:
+        raise invalid from error
+    return payload
+
+
+def _validate_maintenance_limit(limit: int) -> None:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("maintenance limit must be between 1 and 100")
 
 
 def _blocked_user_clause(
