@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-03"
 title: "Build request-local QA service"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-02"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -136,5 +136,63 @@ Stop with a reality-conflict report if packet 02 is not done, result/source shap
 
 ## Implementation handoff
 
-Replace this section with the workflow-required packet ID/status, delivery, changed files/interfaces, acceptance evidence, exact verification, scope/deviation/risk confirmation and commit.
+**Packet:** `qa-vertical-slice-03` — `done`
 
+**Delivered result:** Added a request-local RAG result seam and the complete
+synchronous QA core. Retrieval receives only the current question; bounded
+conversation history is injected only into final ordinary/joint/compare prompts.
+Answers, stable vector/graph source snapshots and comparison metadata are
+returned through typed records. `QaService` now owns authenticated fixed-scope
+conversation creation, synchronous ask/idempotency, safe failure persistence,
+retry and content-free telemetry.
+
+**Files and interfaces:**
+
+- `hello_agents/tools/builtin/rag_tool.py` now stores action data/errors in
+  per-execution `ContextVar`s while preserving legacy accessors and output.
+- `assistants/pdf_learning_assistant.py` uses structured RAG execution and no
+  longer appends new ordinary/summary questions to flat JSON history; its
+  deprecated summary task methods remain callable.
+- `app/qa_answer_engine.py` adds `QaAnswerRequest`, `QaAnswerResult`,
+  `QaAnswerEngine`, `QaEngineError` and `RagQaAnswerEngine`.
+- `app/qa_context.py` adds complete-turn-only, summary-aware bounded context.
+- `app/qa_observability.py` adds an allowlisted content-free telemetry port and
+  lock-protected implementation.
+- `app/qa_service.py` adds user-scoped create/list/get/ask/retry operations,
+  fixed-scope readiness revalidation and safe error/trace mapping.
+- Four new QA test suites and the updated Assistant compatibility suite cover
+  concurrency, prompts, budgets, isolation, failure and retry behavior.
+
+**Acceptance evidence:**
+
+- RED: the new answer/context/service modules were absent and test collection
+  failed as expected.
+- Request-local RAG/Assistant increment: `84 passed`.
+- Exact final packet command: `98 passed in 54.51s`.
+- `python -m compileall -q` passed for every changed/new Python module.
+- `git diff --check` passed with only Windows line-ending normalization warnings.
+- Search confirms `PDFLearningAssistant.ask()` no longer appends to
+  `history["questions"]`; generic legacy repository helpers remain untouched.
+
+**Scope confirmation:** No worker, HTTP route, React UI, application lifecycle,
+alternate RAG stack or summary compatibility removal was introduced. Model work
+runs after the pending transaction commits. Telemetry accepts no content,
+prompt, excerpt or path parameter, and persisted failures contain only a stable
+domain code plus opaque trace ID.
+
+**Deviations:** Existing RAG failures use lowercase internal codes such as
+`rag_connection`; the service maps these to stable uppercase QA domain codes so
+retryability survives persistence without exposing internal/raw errors. The
+approved plan's `list_context_messages()` call was satisfied by cursor-paging the
+existing Packet 02 `list_messages()` API, avoiding an out-of-bound repository
+change.
+
+**Residual risks:** Durable summary workers, deletion fences, Memory linking,
+legacy migration, API/lifecycle wiring and React consumption remain assigned to
+later packets. Application composition must inject the model-aware token
+estimator when it wires `QaContextBuilder`.
+
+**Implementation commits:**
+
+- `1966956` — `refactor: isolate QA answer generation`
+- `15c8abe` — `feat: add synchronous QA service`
