@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-01"
 title: "Verify Penpot QA source"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: []
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -126,5 +126,48 @@ Stop and append the repository reality-conflict report if a prerequisite/interfa
 
 ## Implementation handoff
 
-Replace this section with packet ID/status, delivered boards, files changed, exact identifiers/interfaces, checked acceptance evidence, command results, scope confirmation, deviations, residual risks and commit hash (or `not committed`) in the format required by `docs/agent-workflow/README.md`.
-
+- Packet: `qa-vertical-slice-01`
+- Status: `done`
+- Delivered:
+  - Restored the explicit local Penpot MCP bridge, fresh-read the approved file, and created only the eight exact QA boards on the existing Desktop, Tablet and Mobile pages.
+  - Reused linked AppShell, Button, IconButton, Badge, Dialog, Drawer and Skeleton sources plus the existing Zhiyan semantic tokens.
+  - Direct-exported and visually inspected all eight original-size PNG references after final overlay, close-control and destructive-dialog cleanup.
+  - Added the focused repository contract for exact board/export names and decoded dimensions, and recorded the full responsive/state/accessibility handoff at final Penpot revision `136`.
+- Files changed:
+  - `docs/product-ui/penpot-handoff.md`
+  - `docs/product-ui/reference/penpot/desktop-qa.png`
+  - `docs/product-ui/reference/penpot/desktop-qa-summary.png`
+  - `docs/product-ui/reference/penpot/desktop-qa-delete.png`
+  - `docs/product-ui/reference/penpot/tablet-qa.png`
+  - `docs/product-ui/reference/penpot/tablet-qa-sources.png`
+  - `docs/product-ui/reference/penpot/mobile-qa.png`
+  - `docs/product-ui/reference/penpot/mobile-qa-sources.png`
+  - `docs/product-ui/reference/penpot/mobile-qa-failure.png`
+  - `tests/deploy/test_qa_product_contract.py`
+  - `docs/agent-workflow/task-packets/2026-08-25-qa-vertical-slice/01-penpot-qa-source.md`
+- Interfaces added or changed:
+  - Penpot boards and IDs: all eight exact names and final IDs are recorded in `docs/product-ui/penpot-handoff.md`.
+  - Responsive authority: desktop 1440 × 1024, tablet 1024 × 768, mobile 390 × 844, with fixed-scope, summary-running, delete-confirm, source-drawer/sheet and retry-failure semantics.
+  - Repository contract: `tests/deploy/test_qa_product_contract.py` owns the exact eight export names and dimensions.
+- Acceptance criteria:
+  - [x] Exact names/pages/dimensions — one final board exists for every required name at its specified viewport size.
+  - [x] Links and geometry — final readback found 8/10/11 linked roots on desktop, 7/10 on tablet and 6/9/6 on mobile, with zero broken component roots, zero text-bounds overflow and zero actual-bounds overflow.
+  - [x] Mobile targets — all named mobile actions are linked and at least 44 × 44; undersized count is zero.
+  - [x] Exports — eight non-empty PNGs decode at exact dimensions and passed visual inspection for clipping, hierarchy, glyphs and state clarity.
+  - [x] Handoff — revision, page/board/component IDs, token bindings, transitions, breakpoints, accessibility behavior, sample-data boundary and tooling provenance are recorded.
+- Verification:
+  - Penpot MCP final fresh read at revision `136` — PASS (8 unique boards, exact sizes, zero broken links/overflow/undersized mobile actions).
+  - Direct Penpot export plus visual inspection — PASS (8/8 references; final cleanup re-exported and rechecked).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_qa_product_contract.py --basetemp=.runtime/pytest-qa-penpot` before design write — expected RED (`2 failed`).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_qa_product_contract.py --basetemp=.runtime/pytest-qa-penpot` — PASS (`2 passed`).
+  - `node --test tests/design/test_penpot_handoff.mjs` — PASS (`3 passed`).
+  - `git diff --check` — PASS.
+- Scope confirmation:
+  - changed only allowed product-UI, export, contract and mandatory packet-handoff files: yes
+  - existing Penpot boards, shared component masters, application code and dependency manifests untouched: yes
+- Deviations:
+  - The local MCP plugin was version `2.17.0` while the Penpot web application was `2.17.2`; the patch-level warning is recorded in the handoff. Actual read, write, link, bounds and export operations all passed final verification.
+- Residual risks:
+  - The package registry did not yet expose a matching 2.17.2 plugin build. Replace the local compatibility shim when an official matching package is published; no design-source migration is expected.
+- Commit:
+  - `not committed`

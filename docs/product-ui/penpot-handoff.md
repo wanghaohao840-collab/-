@@ -172,3 +172,42 @@ The seven Penpot text styles preserve the approved size and line-height pairs. B
 Penpot tokens are published only through `Penpot → design/tokens/zhiyan.tokens.json → generated CSS`; code must not write values back to Penpot. Penpot 2.17.1 rejects `/` in native token names and does not accept a negative shadow spread, so native effect tokens are named `shadow.surface` and `shadow.overlay`. The Foundations page still presents the approved library labels `Shadow/Surface` and `Shadow/Overlay`; the normalized snapshot records the actual zero-spread native values.
 
 This UI handoff does not alter ApplicationServices, authentication/CSRF behavior, per-user UUID storage, `document_id`, citation, RAG, Memory, reporting, bulk-import, or storage boundaries. The legacy Gradio experience remains available only through `/legacy/`.
+
+## Intelligent QA vertical slice
+
+Validated on 2026-08-26 against Penpot 2.17.2 at final saved source revision `136`. The eight boards below are the implementation authority for the `/qa` product slice. Every visible filename, question, answer, excerpt, date and progress value is illustrative design sample data only; production must render records returned for the authenticated user.
+
+| Board | Page / page ID | Viewport | Penpot board ID | Direct export |
+|---|---|---:|---|---|
+| `Desktop / QA / Default` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `6aef877d-b595-80db-8008-8a8b5dd2bcc1` | [`desktop-qa.png`](reference/penpot/desktop-qa.png) |
+| `Desktop / QA / Summary running` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `6aef877d-b595-80db-8008-8a8b6c04169b` | [`desktop-qa-summary.png`](reference/penpot/desktop-qa-summary.png) |
+| `Desktop / QA / Delete confirm` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `6aef877d-b595-80db-8008-8a8b79ed4f86` | [`desktop-qa-delete.png`](reference/penpot/desktop-qa-delete.png) |
+| `Tablet / QA / Default` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `6aef877d-b595-80db-8008-8a8bc412e749` | [`tablet-qa.png`](reference/penpot/tablet-qa.png) |
+| `Tablet / QA / Sources drawer` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `6aef877d-b595-80db-8008-8a8bd1620cfb` | [`tablet-qa-sources.png`](reference/penpot/tablet-qa-sources.png) |
+| `Mobile / QA / Default` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `6aef877d-b595-80db-8008-8a8c1496ce7f` | [`mobile-qa.png`](reference/penpot/mobile-qa.png) |
+| `Mobile / QA / Sources sheet` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `6aef877d-b595-80db-8008-8a8c2183678f` | [`mobile-qa-sources.png`](reference/penpot/mobile-qa-sources.png) |
+| `Mobile / QA / Failure retry` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `6aef877d-b595-80db-8008-8a8c2ee748a5` | [`mobile-qa-failure.png`](reference/penpot/mobile-qa-failure.png) |
+
+### Linked design-system sources
+
+The QA boards reuse the existing linked library sources rather than detached copies. AppShell uses its native `viewport` variants: desktop `9b1e7a6b-703c-8060-8008-707574c1a629`, tablet `9b1e7a6b-703c-8060-8008-707593dd9adbe`, and mobile `9b1e7a6b-703c-8060-8008-7075b44513a2`. Controls use Button primary `9b1e7a6b-703c-8060-8008-70740e0b1a82`, secondary `9b1e7a6b-703c-8060-8008-70740e41c3da`, ghost `9b1e7a6b-703c-8060-8008-70740e67a9d5`, danger `9b1e7a6b-703c-8060-8008-70740e837ca2`, IconButton `9b1e7a6b-703c-8060-8008-7074e20c9b5a`, Badge `9b1e7a6b-703c-8060-8008-7074e35382d4`, Dialog `size=md` `9b1e7a6b-703c-8060-8008-7074ad832f95`, Drawer `9b1e7a6b-703c-8060-8008-70750e4567f4`, and Skeleton `9b1e7a6b-703c-8060-8008-7075416bddda`.
+
+QA-specific surfaces bind the existing semantic tokens `color.canvas`, `color.surface`, `color.brand.100`, `color.brand.600`, `color.brand.700`, `color.text.primary`, `color.border`, `color.danger`, `radius.md`, `radius.lg`, and `radius.pill`. Small ordinary copy deliberately continues to use `color.text.primary`; status meaning is always paired with text and is never color-only.
+
+### State, responsive and interaction contract
+
+- Desktop keeps the existing 248 px navigation and 64 px top bar. The content region exposes recent conversations, the primary chat and fixed document scope, and current-answer sources at the same time. The composer remains visible in default and summary-running states.
+- `Summary running` uses textual stage/progress, a linked Skeleton and an explicit cancel action. It represents durable job polling, not token streaming.
+- `Delete confirm` uses a scrim, linked Dialog, explicit Cancel and danger-styled Permanent delete actions. The copy names messages, sources, summary and QA Memory and states that deletion is irreversible.
+- Tablet keeps the existing 72 px rail. Conversation and source triggers are 44 px high; the source surface is a mutually exclusive right drawer. Opening moves focus into the drawer, `Escape` closes it, and focus returns to the `引用 2` trigger.
+- Mobile keeps one 342 px content column and the existing 64 px bottom navigation. Conversation and source surfaces are bottom sheets ending above that navigation. The source sheet close, copy and return-focus behavior follows the same drawer contract.
+- `Failure retry` pairs the danger treatment with the visible `回答失败` label, safe `QA_ENGINE_UNAVAILABLE` code, preserved-message explanation and a linked 44 px-high Retry action. No stack, path, prompt or provider response is shown.
+- Citation numbers map the answer chips to immutable source cards. Copy actions provide non-blocking feedback in implementation. The fixed-scope label is not an editable selector; changing document scope creates a new conversation.
+
+### Fresh-read and export evidence
+
+At revision `136`, final page-scoped readback found 8/10/11 linked QA component roots on the three desktop boards, 7/10 on the tablet boards and 6/9/6 on the mobile boards, with zero broken component-root links. The same audit found zero text-bounds overflow and zero actual-bounds overflow on all eight boards. Every named mobile interaction is 44 px or taller/wider as appropriate, with zero mobile targets below 44 × 44.
+
+All eight direct PNG exports fully verify and decode at their original board dimensions and were visually inspected for clipping, overlay order, missing glyphs, fixed-scope clarity, source readability, summary progress, destructive confirmation and retry recovery. No browser-only visual divergence is approved at this stage; packet 06 must compare the React implementation against these exact exports and record any necessary runtime-only difference.
+
+The local MCP bridge used plugin 2.17.0 against Penpot 2.17.2 and displayed a patch-level compatibility warning. Read, write, component-link, bounds and direct-export operations all succeeded and were fresh-read after the final visual cleanup; the warning is tooling provenance, not an approved product-design deviation.
