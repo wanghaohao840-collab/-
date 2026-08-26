@@ -8,7 +8,8 @@ param(
     [string]$BackupRoot = $null,
     [ValidateRange(1, 600)][int]$HealthTimeoutSeconds = 180,
     [scriptblock]$ExternalInvoker,
-    [scriptblock]$HealthProbe
+    [scriptblock]$HealthProbe,
+    [IO.FileStream]$InheritedOperationLock
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +17,44 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Common.psm1') -Force
+
+function Assert-InheritedOperationsLock {
+    param(
+        [Parameter(Mandatory)][IO.FileStream]$Lock,
+        [Parameter(Mandatory)][string]$StateRoot
+    )
+
+    $expectedPath = [IO.Path]::GetFullPath((Join-Path $StateRoot 'operations.lock'))
+    try {
+        $actualPath = [IO.Path]::GetFullPath($Lock.Name)
+    } catch {
+        throw 'The inherited lock must be a live exclusive operations lock'
+    }
+    if (-not $actualPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $Lock.CanRead -or
+        -not $Lock.CanWrite -or
+        $Lock.SafeFileHandle.IsClosed -or
+        $Lock.SafeFileHandle.IsInvalid) {
+        throw 'The inherited lock must be a live exclusive operations lock'
+    }
+
+    $probe = $null
+    try {
+        $probe = [IO.File]::Open(
+            $expectedPath,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None
+        )
+    } catch [IO.IOException] {
+        return
+    } finally {
+        if ($null -ne $probe) {
+            $probe.Dispose()
+        }
+    }
+    throw 'The inherited lock must be a live exclusive operations lock'
+}
 
 function Test-PathOverlap {
     param([Parameter(Mandatory)][string]$First, [Parameter(Mandatory)][string]$Second)
@@ -155,7 +194,13 @@ if (-not $preExtractionHash.Equals($checksumMatch.Groups['hash'].Value, [StringC
     throw 'Backup checksum changed during restore validation'
 }
 
-$operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
+$ownsOperationLock = $null -eq $InheritedOperationLock
+if ($ownsOperationLock) {
+    $operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
+} else {
+    Assert-InheritedOperationsLock -Lock $InheritedOperationLock -StateRoot $config.StateRoot | Out-Null
+    $operationLock = $InheritedOperationLock
+}
 try {
 $dataParent = [IO.Path]::GetDirectoryName($dataRoot)
 Assert-BackupTreeSafe -Path $dataRoot -AllowedRoot $dataParent | Out-Null
@@ -250,5 +295,7 @@ try {
 
 [PSCustomObject]@{ RestoredArchive = $archivePath; DataRoot = $dataRoot; Rollback = $rollbackPath }
 } finally {
-    Exit-OperationsLock -Lock $operationLock
+    if ($ownsOperationLock) {
+        Exit-OperationsLock -Lock $operationLock
+    }
 }

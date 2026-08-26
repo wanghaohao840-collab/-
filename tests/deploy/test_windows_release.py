@@ -67,6 +67,7 @@ def write_harness(
         f"$global:releaseArchive = '{ps_quote(archive)}'\n"
         f"$global:releaseFailure = '{failure}'\n"
         "$global:candidateUpFailed = $false\n"
+        "$global:candidateDeployed = $false\n"
         "$global:appExists = $true\n"
         "$global:qdrantExists = $true\n"
         "$global:appRunning = $true\n"
@@ -81,6 +82,7 @@ def write_harness(
         "  if ($FilePath -eq 'git') { ' M deploy/.env'; return }\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'ps') {\n"
         "    if ($global:releaseFailure -eq 'baseline') { 'app|running|unhealthy'; 'qdrant|running|healthy' }\n"
+        "    elseif (@('candidate-health','candidate-recreate') -contains $global:releaseFailure -and $global:candidateDeployed -and $global:appImage -eq 'candidate') { 'app|running|unhealthy'; 'qdrant|running|unhealthy' }\n"
         "    else {\n"
         "      if ($global:appExists) { if ($global:appRunning) { 'app|running|healthy' } else { 'app|exited|' } }\n"
         "      if ($global:qdrantExists) { if ($global:qdrantRunning) { 'qdrant|running|healthy' } else { 'qdrant|exited|' } }\n"
@@ -94,19 +96,19 @@ def write_harness(
         f"  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'tag' -and (($global:releaseFailure -eq 'retag-app' -and $ArgumentList[-1] -eq '{APP_IMAGE}') -or ($global:releaseFailure -eq 'retag-qdrant' -and $ArgumentList[-1] -eq '{QDRANT_IMAGE}'))) {{ throw 'LLM_API_KEY={SECRET} forced rollback retag failure' }}\n"
         "  if ($joined -match 'Restore-Deployment\\.ps1') {\n"
         "    if (-not $global:appExists -or -not $global:qdrantExists -or -not $global:appRunning -or -not $global:qdrantRunning) { throw 'restore invoked without running services' }\n"
+        "    if ($global:appImage -ne 'old' -or $global:qdrantImage -ne 'old') { throw 'restore invoked before old images were recreated' }\n"
         f"    if ($global:releaseFailure -eq 'restore') {{ throw 'LLM_API_KEY={SECRET} forced restore failure' }}\n"
         "    $global:appRunning = $true; $global:qdrantRunning = $true; $global:dataMutated = $false; return\n"
         "  }\n"
         f"  if ($global:releaseFailure -eq 'scan' -and $FilePath -eq 'docker' -and $ArgumentList -contains 'scout') {{ throw 'LLM_API_KEY={SECRET} forced scan failure' }}\n"
-        f"  if (@('candidate-up','candidate-prepare') -contains $global:releaseFailure -and $FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and -not $global:candidateUpFailed) {{ $global:candidateUpFailed=$true; $global:appExists=$true; $global:appRunning=$true; $global:appImage='candidate'; $global:qdrantExists=$false; $global:qdrantRunning=$false; $global:qdrantImage=$null; $global:dataMutated=$true; throw 'LLM_API_KEY={SECRET} forced candidate up failure' }}\n"
+        f"  if ($global:releaseFailure -eq 'candidate-up' -and $FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and -not $global:candidateUpFailed) {{ $global:candidateUpFailed=$true; $global:candidateDeployed=$true; $global:appExists=$true; $global:appRunning=$true; $global:appImage='candidate'; $global:qdrantExists=$false; $global:qdrantRunning=$false; $global:qdrantImage=$null; $global:dataMutated=$true; throw 'LLM_API_KEY={SECRET} forced candidate up failure' }}\n"
         f"  if (@('deep-smoke','retag-app','retag-qdrant','restore') -contains $global:releaseFailure -and $FilePath -like '*python.exe' -and $ArgumentList -contains '--deep') {{ throw 'LLM_API_KEY={SECRET} forced deep smoke failure' }}\n"
         "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'stop') { $global:appRunning = $false; $global:qdrantRunning = $false; return }\n"
-        f"  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and $ArgumentList -contains '--no-recreate') {{ if ($global:releaseFailure -eq 'candidate-prepare') {{ throw 'LLM_API_KEY={SECRET} forced service preparation failure' }}; if (-not $global:appExists) {{ $global:appExists=$true; $global:appImage='old' }}; if (-not $global:qdrantExists) {{ $global:qdrantExists=$true; $global:qdrantImage='old' }}; $global:appRunning=$true; $global:qdrantRunning=$true; return }}\n"
-        "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and $ArgumentList -contains '--force-recreate') { $global:appExists=$true; $global:qdrantExists=$true; $global:appRunning=$true; $global:qdrantRunning=$true; $global:appImage='old'; $global:qdrantImage='old'; return }\n"
-        "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up') { $global:appExists=$true; $global:qdrantExists=$true; $global:appRunning=$true; $global:qdrantRunning=$true; $global:appImage='candidate'; $global:qdrantImage='candidate'; return }\n"
+        f"  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up' -and $ArgumentList -contains '--force-recreate') {{ if ($global:releaseFailure -eq 'candidate-recreate') {{ throw 'LLM_API_KEY={SECRET} forced old-image recreation failure' }}; $global:appExists=$true; $global:qdrantExists=$true; $global:appRunning=$true; $global:qdrantRunning=$true; $global:appImage='old'; $global:qdrantImage='old'; return }}\n"
+        "  if ($FilePath -eq 'docker' -and $ArgumentList -contains 'up') { $global:candidateDeployed=$true; $global:appExists=$true; $global:qdrantExists=$true; $global:appRunning=$true; $global:qdrantRunning=$true; $global:appImage='candidate'; $global:qdrantImage='candidate'; $global:dataMutated=$true; return }\n"
         "}\n"
         "try {\n"
-        f"  & '{ps_quote(UPDATE)}' -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' -BackupRoot '{ps_quote(backups)}' -HealthTimeoutSeconds 5 -CommandRunner $runner -SkipNotification\n"
+        f"  & '{ps_quote(UPDATE)}' -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' -BackupRoot '{ps_quote(backups)}' -HealthTimeoutSeconds 1 -CommandRunner $runner -SkipNotification\n"
         "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 91 }\n",
         encoding="utf-8",
     )
@@ -191,6 +193,11 @@ def test_deployment_workflow_is_pinned_and_offline_from_secrets():
     assert workflow.count('- "web/**"') == 2
     assert workflow.count('- "server.py"') == 2
     assert workflow.count('- "api/**"') == 2
+    assert workflow.count('- ".dockerignore"') == 2
+    assert workflow.count('- "app/**"') == 2
+    assert workflow.count('- "assistants/**"') == 2
+    assert workflow.count('- "hello_agents/**"') == 2
+    assert workflow.count('- "ui/**"') == 2
     assert "name: Verify React application" in workflow
     assert "working-directory: web" in workflow
     assert "npm ci" in workflow
@@ -306,13 +313,13 @@ def test_partial_candidate_up_failure_runs_conservative_full_rollback(tmp_path: 
         QDRANT_IMAGE,
         start=app_tag + 1,
     )
-    prepare_running = find_action(
+    recreate = find_action(
         items,
         "docker compose",
         "up",
         "-d",
         "--no-build",
-        "--no-recreate",
+        "--force-recreate",
         "app",
         "qdrant",
         start=qdrant_tag + 1,
@@ -322,26 +329,17 @@ def test_partial_candidate_up_failure_runs_conservative_full_rollback(tmp_path: 
         "Restore-Deployment.ps1",
         "-Archive",
         str(archive),
-        start=prepare_running + 1,
+        start=recreate + 1,
     )
-    recreate = find_action(
-        items,
-        "docker compose",
-        "up",
-        "-d",
-        "--no-build",
-        "--force-recreate",
-        start=restore + 1,
-    )
-    smoke = find_action(items, "deploy\\smoke_test.py", start=recreate + 1)
-    assert candidate < app_tag < qdrant_tag < prepare_running < restore < recreate < smoke
-    assert calls[prepare_running]["AppExists"] is True
-    assert calls[prepare_running]["QdrantExists"] is False
+    smoke = find_action(items, "deploy\\smoke_test.py", start=restore + 1)
+    assert candidate < app_tag < qdrant_tag < recreate < restore < smoke
+    assert calls[recreate]["AppExists"] is True
+    assert calls[recreate]["QdrantExists"] is False
     assert calls[restore]["AppRunning"] is True
     assert calls[restore]["QdrantRunning"] is True
     assert calls[restore]["AppExists"] is True
     assert calls[restore]["QdrantExists"] is True
-    assert calls[restore]["AppImage"] == "candidate"
+    assert calls[restore]["AppImage"] == "old"
     assert calls[restore]["QdrantImage"] == "old"
     assert calls[restore]["DataMutated"] is True
     assert not any("docker compose" in item and " stop " in item for item in items)
@@ -358,27 +356,25 @@ def test_partial_candidate_up_failure_runs_conservative_full_rollback(tmp_path: 
     assert report["rollback_succeeded"] is True
 
 
-def test_partial_candidate_service_preparation_failure_stops_before_restore(
+def test_old_image_recreation_failure_stops_before_data_restore(
     tmp_path: Path,
 ):
-    result, calls, state, _ = run_update(tmp_path, "candidate-prepare")
+    result, calls, state, _ = run_update(tmp_path, "candidate-recreate")
 
     assert result.returncode != 0
     items = actions(calls)
     candidate = find_action(items, "docker compose", "up", "-d", "--no-build")
-    prepare_running = find_action(
+    recreate = find_action(
         items,
         "docker compose",
         "up",
-        "--no-recreate",
+        "--force-recreate",
         "app",
         "qdrant",
         start=candidate + 1,
     )
-    assert all("Restore-Deployment.ps1" not in item for item in items[prepare_running + 1 :])
-    assert not any(
-        "--force-recreate" in item for item in items[prepare_running + 1 :]
-    )
+    assert all("Restore-Deployment.ps1" not in item for item in items[recreate + 1 :])
+    assert not any("deploy\\smoke_test.py" in item for item in items[recreate + 1 :])
     report_text = next((state / "reports").glob("update-*.json")).read_text(
         encoding="utf-8-sig"
     )
@@ -386,6 +382,33 @@ def test_partial_candidate_service_preparation_failure_stops_before_restore(
     report = json.loads(report_text)
     assert report["rollback_succeeded"] is False
     assert report["rollback_failure_priority"] == "high"
+
+
+def test_candidate_health_failure_recreates_old_images_before_restoring_data(
+    tmp_path: Path,
+):
+    result, calls, state, archive = run_update(tmp_path, "candidate-health")
+
+    assert result.returncode != 0
+    items = actions(calls)
+    candidate = find_action(items, "docker compose", "up", "-d", "--no-build")
+    app_tag = find_action(items, "docker image tag", "sha256:aaaaaaaa", APP_IMAGE, start=candidate + 1)
+    qdrant_tag = find_action(items, "docker image tag", "sha256:bbbbbbbb", QDRANT_IMAGE, start=app_tag + 1)
+    recreate = find_action(items, "docker compose", "up", "--force-recreate", start=qdrant_tag + 1)
+    restore = find_action(items, "Restore-Deployment.ps1", "-Archive", str(archive), start=recreate + 1)
+    smoke = find_action(items, "deploy\\smoke_test.py", start=restore + 1)
+    assert candidate < app_tag < qdrant_tag < recreate < restore < smoke
+    assert calls[restore]["AppImage"] == "old"
+    assert calls[restore]["QdrantImage"] == "old"
+    assert calls[restore]["DataMutated"] is True
+    assert calls[smoke]["AppImage"] == "old"
+    assert calls[smoke]["QdrantImage"] == "old"
+    assert calls[smoke]["DataMutated"] is False
+    report = json.loads(
+        next((state / "reports").glob("update-*.json")).read_text(encoding="utf-8-sig")
+    )
+    assert report["failure_stage"] == "candidate-health"
+    assert report["rollback_succeeded"] is True
 
 
 def test_deep_smoke_failure_retages_restores_then_force_recreates(tmp_path: Path):
@@ -408,24 +431,17 @@ def test_deep_smoke_failure_retages_restores_then_force_recreates(tmp_path: Path
         QDRANT_IMAGE,
         start=app_tag + 1,
     )
-    restore = find_action(
-        items, "Restore-Deployment.ps1", "-Archive", str(archive), start=qdrant_tag + 1
-    )
     recreate = find_action(
-        items,
-        "docker compose",
-        "up",
-        "-d",
-        "--no-build",
-        "--force-recreate",
-        start=restore + 1,
+        items, "docker compose", "up", "--force-recreate", start=qdrant_tag + 1
     )
-    smoke = find_action(items, "deploy\\smoke_test.py", start=recreate + 1)
-    assert app_tag < qdrant_tag < restore < recreate < smoke
+    restore = find_action(
+        items, "Restore-Deployment.ps1", "-Archive", str(archive), start=recreate + 1
+    )
+    smoke = find_action(items, "deploy\\smoke_test.py", start=restore + 1)
+    assert app_tag < qdrant_tag < recreate < restore < smoke
     assert calls[restore]["AppRunning"] is True
     assert calls[restore]["QdrantRunning"] is True
     assert not any("docker compose" in item and " stop " in item for item in items)
-    assert not any("--no-recreate" in item for item in items)
     assert "--deep" not in items[smoke]
     report_text = next((state / "reports").glob("update-*.json")).read_text(
         encoding="utf-8-sig"
@@ -446,9 +462,11 @@ def test_failed_rollback_prerequisite_stops_compensation(
     after_failure = items[deep + 1 :]
     if failure.startswith("retag-"):
         assert all("Restore-Deployment.ps1" not in item for item in after_failure)
+        assert not any("--force-recreate" in item for item in after_failure)
     else:
-        assert any("Restore-Deployment.ps1" in item for item in after_failure)
-    assert not any("docker compose" in item and " up " in item for item in after_failure)
+        restore = find_action(items, "Restore-Deployment.ps1", start=deep + 1)
+        assert any("--force-recreate" in item for item in after_failure[:restore])
+        assert not any("docker compose" in item and " up " in item for item in items[restore + 1 :])
     assert not any("docker compose" in item and " stop " in item for item in after_failure)
     report_text = next((state / "reports").glob("update-*.json")).read_text(
         encoding="utf-8-sig"
@@ -469,6 +487,33 @@ def test_update_records_git_status_without_git_writes(tmp_path: Path):
     source = UPDATE.read_text(encoding="utf-8").lower()
     for forbidden in ("git pull", "git reset", "git checkout", "git clean"):
         assert forbidden not in source
+
+
+def test_overlapping_update_fails_closed_before_release_commands(tmp_path: Path):
+    repository, env_file, backups, _ = make_repository(tmp_path)
+    state = tmp_path / "state"
+    calls = tmp_path / "external-called"
+    operations = ROOT / "deploy" / "windows" / "Operations.Common.psm1"
+
+    result = run_ps(
+        f"Import-Module '{ps_quote(operations)}' -Force; "
+        f"$held = Enter-OperationsLock -StateRoot '{ps_quote(state)}'; "
+        "try { "
+        "$runner = { param($FilePath, $ArgumentList) "
+        f"Set-Content -LiteralPath '{ps_quote(calls)}' -Value called }}; "
+        "try { "
+        f"& '{ps_quote(UPDATE)}' -RepositoryRoot '{ps_quote(repository)}' "
+        f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' "
+        f"-BackupRoot '{ps_quote(backups)}' -CommandRunner $runner -SkipNotification; "
+        "exit 92 } catch { if ($_.Exception.Message -notmatch 'already in progress') "
+        "{ throw }; 'blocked' } "
+        "} finally { Exit-OperationsLock -Lock $held }"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "blocked"
+    assert not calls.exists()
+    assert not (state / "reports").exists()
 
 
 def test_update_has_powershell_51_parser_contract():

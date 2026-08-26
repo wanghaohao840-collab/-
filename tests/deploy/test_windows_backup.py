@@ -16,6 +16,8 @@ COMMON = WINDOWS / "Backup.Common.psm1"
 BACKUP = WINDOWS / "Backup-Deployment.ps1"
 RESTORE = WINDOWS / "Restore-Deployment.ps1"
 DRILL = WINDOWS / "Invoke-RestoreDrill.ps1"
+UPDATE = WINDOWS / "Update-Deployment.ps1"
+OPERATIONS = WINDOWS / "Operations.Common.psm1"
 
 
 def run_ps(script: str, *, timeout: float = 60) -> subprocess.CompletedProcess[str]:
@@ -242,13 +244,79 @@ def test_backup_and_restore_scripts_have_static_safety_contracts():
 
 
 def test_mutating_operation_entry_points_hold_the_shared_exclusive_lock():
-    for script in (BACKUP, RESTORE, DRILL):
+    for script in (BACKUP, RESTORE, DRILL, UPDATE):
         source = script.read_text(encoding="utf-8")
         assert "Enter-OperationsLock -StateRoot $config.StateRoot" in source
         assert "Exit-OperationsLock -Lock $operationLock" in source
 
+    for script in (BACKUP, RESTORE):
+        source = script.read_text(encoding="utf-8")
+        assert "InheritedOperationLock" in source
+        assert "Assert-InheritedOperationsLock" in source
+
     drill = DRILL.read_text(encoding="utf-8")
     assert "function Get-Acl" not in drill
+
+
+def test_backup_accepts_only_the_updates_live_exclusive_lock(tmp_path: Path):
+    if shutil.which("tar.exe") is None:
+        pytest.skip("tar.exe is unavailable")
+
+    repository, data, env_file = make_repository(tmp_path)
+    (data / "app" / "marker.txt").write_text("live", encoding="utf-8")
+    state = tmp_path / "state"
+    backups = tmp_path / "backups"
+    calls = tmp_path / "calls.jsonl"
+    harness = tmp_path / "inherited-lock.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f"Import-Module '{ps_quote(OPERATIONS)}' -Force\n"
+        "$runner = {\n"
+        "  param([string]$FilePath, [string[]]$ArgumentList)\n"
+        f"  [PSCustomObject]@{{FilePath=$FilePath;Args=@($ArgumentList)}} | ConvertTo-Json -Compress | Add-Content -LiteralPath '{ps_quote(calls)}'\n"
+        "  if ($FilePath -eq 'docker') { if ($ArgumentList -contains 'ps') { 'app'; 'qdrant' }; return }\n"
+        "  & $FilePath @ArgumentList\n"
+        "  if ($LASTEXITCODE -ne 0) { throw \"$FilePath failed: $LASTEXITCODE\" }\n"
+        "}\n"
+        f"$lock = Enter-OperationsLock -StateRoot '{ps_quote(state)}'\n"
+        "try {\n"
+        f"  & '{ps_quote(BACKUP)}' -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' -BackupRoot '{ps_quote(backups)}' -ExternalInvoker $runner -HealthProbe {{ $true }} -InheritedOperationLock $lock\n"
+        "} finally { Exit-OperationsLock -Lock $lock }\n",
+        encoding="utf-8",
+    )
+
+    result = run_ps(f"& '{ps_quote(harness)}'", timeout=90)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(list((backups / "daily").glob("assistant-*.tar.gz"))) == 1
+
+
+def test_backup_rejects_a_forged_inherited_lock(tmp_path: Path):
+    repository, _, env_file = make_repository(tmp_path)
+    state = tmp_path / "state"
+    backups = tmp_path / "backups"
+    foreign = tmp_path / "foreign.lock"
+    calls = tmp_path / "external-called"
+
+    result = run_ps(
+        "$foreign = [IO.File]::Open("
+        f"'{ps_quote(foreign)}', [IO.FileMode]::OpenOrCreate, "
+        "[IO.FileAccess]::ReadWrite, [IO.FileShare]::None); "
+        "try { "
+        "$runner = { param($FilePath, $ArgumentList) "
+        f"Set-Content -LiteralPath '{ps_quote(calls)}' -Value called }}; "
+        "try { "
+        f"& '{ps_quote(BACKUP)}' -RepositoryRoot '{ps_quote(repository)}' "
+        f"-EnvFile '{ps_quote(env_file)}' -StateRoot '{ps_quote(state)}' "
+        f"-BackupRoot '{ps_quote(backups)}' -ExternalInvoker $runner "
+        "-HealthProbe { $true } -InheritedOperationLock $foreign; exit 92 "
+        "} catch { if ($_.Exception.Message -notmatch 'live exclusive operations lock') "
+        "{ throw } } "
+        "} finally { $foreign.Dispose() }"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not calls.exists()
 
 
 def test_backup_restore_round_trip_uses_fake_docker_and_retains_rollback(tmp_path: Path):
