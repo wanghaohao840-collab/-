@@ -1877,7 +1877,7 @@ function Assert-OperationsMonthlyRestoreDrillXml {
     ExecutionTimeLimit = 'PT72H'
     Priority = '7'
     DisallowStartOnRemoteAppSession = 'false'
-    UseUnifiedSchedulingEngine = 'true'
+    UseUnifiedSchedulingEngine = 'false'
   }
   foreach ($entry in $expectedSettings.GetEnumerator()) {
     $node = & $one ("/t:Task/t:Settings/t:{0}" -f $entry.Key)
@@ -1941,7 +1941,7 @@ function New-OperationsMonthlyRestoreDrillXml {
     StopIfGoingOnBatteries='true'; AllowHardTerminate='true'; StartWhenAvailable='true'
     RunOnlyIfNetworkAvailable='false'; AllowStartOnDemand='true'; Enabled='true'
     Hidden='false'; RunOnlyIfIdle='false'; WakeToRun='true'; ExecutionTimeLimit='PT72H'
-    Priority='7'; DisallowStartOnRemoteAppSession='false'; UseUnifiedSchedulingEngine='true'
+    Priority='7'; DisallowStartOnRemoteAppSession='false'; UseUnifiedSchedulingEngine='false'
   }
   foreach ($entry in $settingValues.GetEnumerator()) {
     Add-OperationsTaskXmlElement $document $settings $namespace $entry.Key $entry.Value | Out-Null
@@ -2203,6 +2203,122 @@ git diff --cached --name-only
 git commit -m "fix: register monthly Windows task from XML"
 ```
 
+The first implementation commit `9e8b95e` is not review-approved. Before any
+UAC, add a review-correction TDD cycle in the same two files. The red matrix
+must contain executable fake-provider cases for:
+
+```text
+monthly UseUnifiedSchedulingEngine=true -> reject before registration
+monthly UseUnifiedSchedulingEngine omitted -> reject before registration
+wrong namespace on Sunday or any month -> reject
+CalendarTrigger adds EndBoundary, RandomDelay, Repetition, or ExecutionTimeLimit -> reject
+Principal adds RequiredPrivileges or ProcessTokenSidType -> reject
+Exec adds WorkingDirectory or Actions adds a second action -> reject
+Settings or IdleSettings has any missing, duplicate, or extra element -> reject
+LoginRecovery trigger drifts UserId, Delay, EndBoundary, RandomDelay, or ExecutionTimeLimit -> reject
+Health trigger drifts StartBoundary, DaysInterval, repetition interval/duration/
+  StopAtDurationEnd, EndBoundary, RandomDelay, or ExecutionTimeLimit -> reject
+DailyBackup trigger drifts StartBoundary, DaysInterval, repetition, EndBoundary,
+  RandomDelay, or ExecutionTimeLimit -> reject
+each nonmonthly task independently drifts every effective settings field -> reject
+exported XML omits a documented-default node -> normalize the default and compare
+exported XML explicitly supplies a wrong default-valued node -> reject
+```
+
+Add this exact-child helper and use it for Task, Triggers, CalendarTrigger,
+ScheduleByMonthDayOfWeek, Weeks, DaysOfWeek, Months, Principals, Principal,
+Settings, IdleSettings, Actions and Exec. It compares namespace plus an exact
+multiset, so wrong namespaces, duplicates and extra nodes fail:
+
+```powershell
+function Assert-OperationsXmlExactChildren {
+  param(
+    [Parameter(Mandatory)][Xml.XmlNode]$Parent,
+    [Parameter(Mandatory)][string]$Namespace,
+    [Parameter(Mandatory)][string[]]$ExpectedNames,
+    [Parameter(Mandatory)][string]$Context
+  )
+  $children = @($Parent.ChildNodes | Where-Object {
+    $_.NodeType -eq [Xml.XmlNodeType]::Element
+  })
+  if (@($children | Where-Object { $_.NamespaceURI -cne $Namespace }).Count -ne 0) {
+    throw "XML child namespace is invalid: $Context"
+  }
+  $actualNames = @($children | ForEach-Object LocalName | Sort-Object)
+  $expected = @($ExpectedNames | Sort-Object)
+  if ($actualNames.Count -ne $expected.Count -or
+      @(Compare-Object $expected $actualNames).Count -ne 0) {
+    throw "XML child set is invalid: $Context"
+  }
+}
+```
+
+The constructed monthly XML must contain the exact settings/idle sets already
+listed in `Assert-OperationsMonthlyRestoreDrillXml`, with
+`UseUnifiedSchedulingEngine=false`. There is no fallback to omission because
+the design requires the incompatibility choice to remain explicit and
+auditable. The three nonmonthly provider settings remain
+`UseUnifiedSchedulingEngine=true` from `New-ScheduledTaskSettingsSet`.
+
+For nonmonthly persisted objects, compare this complete effective settings
+contract against both provider properties and exported XML. When an optional
+XML node is absent, resolve only the documented default shown here; an explicit
+different value still fails:
+
+```powershell
+$expectedSettings = [ordered]@{
+  AllowDemandStart = $true
+  AllowHardTerminate = $true
+  DisallowStartIfOnBatteries = $true
+  Enabled = $true
+  ExecutionTimeLimit = 'PT72H'
+  Hidden = $false
+  MultipleInstances = 'IgnoreNew'
+  Priority = 7
+  RunOnlyIfIdle = $false
+  RunOnlyIfNetworkAvailable = $false
+  StartWhenAvailable = $true
+  StopIfGoingOnBatteries = $true
+  WakeToRun = [bool]$ExpectedTask.Settings.WakeToRun
+  DisallowStartOnRemoteAppSession = $false
+  UseUnifiedSchedulingEngine = $true
+  IdleDuration = 'PT10M'
+  IdleWaitTimeout = 'PT1H'
+  IdleStopOnIdleEnd = $true
+  IdleRestartOnIdle = $false
+}
+```
+
+Compare each nonmonthly trigger to its already validated in-memory trigger with
+an explicit allowlist of effective properties. Common fields are `Enabled`,
+`StartBoundary`, `EndBoundary`, `ExecutionTimeLimit`, `Id` and `RandomDelay`.
+LoginRecovery additionally compares `UserId` and `Delay` and forbids repetition.
+Health and DailyBackup compare `DaysInterval`; Health alone requires exactly
+`PT5M`/`P1D` repetition with `StopAtDurationEnd=false`, while DailyBackup
+forbids repetition. Normalize null/empty values before ordinal comparison, but
+never ignore a nonempty unexpected field.
+
+Run a fresh red selector containing `exact_children`, `unified_engine`,
+`nonmonthly_trigger` and `effective_settings`; record the expected failures.
+After the minimal correction, run fresh no-cache basetemps for that selector,
+the complete Step 7 focused selector, `test_windows_operations.py`, and
+`tests/deploy`. The implementer may report the already isolated 21 unchanged
+backup/release failures only with exact nodeids/first traceback and a baseline
+reproduction; do not claim the whole suite green. Run the PS5.1 parser and
+scoped diff checks, append the report, and commit only the same two files:
+
+```powershell
+git add -- deploy/windows/Install-Operations.ps1 `
+  tests/deploy/test_windows_operations.py
+git diff --cached --check
+git diff --cached --name-only
+git commit -m "fix: enforce exact Windows task semantics"
+```
+
+Generate a new review package from `27c81fc` through the corrective HEAD and
+return it to the same independent reviewer. Both `Spec compliance: PASS` and
+`Code quality: APPROVED` are mandatory before continuing.
+
 Only after all green gates and independent review PASS, continue with the
 existing visible two-pass installer procedure below. It must recover in place
 from the current two-task disabled partial state, produce exactly four enabled tasks, and pass
@@ -2451,6 +2567,8 @@ Request a user-controlled Windows restart. After the user logs back in, measure 
 - The canary derives one exact allowlisted name from 16 cryptographic bytes, never starts its action, and selects the registration path only after truthful provider/XML/schtasks evidence plus exact finally cleanup.
 - The canary compares against a fresh snapshot of the actual production task names/states/XML hashes and does not mistake an intentional partial baseline for installation success.
 - The rejected RegisterByPrincipal canary is never retried; only the monthly task uses the reviewed `XmlDocument`/`Register-ScheduledTask -Xml` fallback, while the other three retain `-InputObject`.
+- The monthly XML explicitly uses `UseUnifiedSchedulingEngine=false` because Monthly-DOW is unsupported by that engine; the other three retain their validated effective settings.
+- Persisted XML validation compares exact namespaces and child multisets, and all four tasks receive complete trigger/effective-settings verification rather than type-only checks.
 - Every provider write uses explicit `-ErrorAction Stop`, captures one output, re-queries persisted state, and cannot report success with fewer than four exact tasks, one exact firewall rule, or the exact protected env ACL.
 - All four persisted tasks must be enabled and use exactly one `-WindowStyle Hidden` while retaining the active WTS `Interactive`/`Highest` principal; S4U, saved credentials, service accounts, and task-visibility-only substitutes are forbidden.
 - No task authorizes touching the existing GraphRAG task-packet modifications or committing secrets/runtime data.
