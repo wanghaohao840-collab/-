@@ -69,6 +69,144 @@ on import_tasks(status, next_attempt_at, created_at);
 create index if not exists ix_import_tasks_user_created
 on import_tasks(user_id, created_at);
 
+create table if not exists qa_conversations (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    title text not null,
+    origin text not null check(origin in ('product','legacy_json','legacy_gradio')),
+    rolling_summary text not null default '',
+    summary_through_message_id text,
+    summary_version integer not null default 0,
+    version integer not null default 0,
+    created_at text not null,
+    updated_at text not null,
+    last_message_at text not null,
+    unique(user_id, id)
+);
+
+create table if not exists qa_conversation_documents (
+    conversation_id text not null,
+    user_id text not null,
+    document_id text not null,
+    document_name text not null,
+    position integer not null check(position >= 0),
+    primary key(conversation_id, document_id),
+    unique(conversation_id, position),
+    foreign key(conversation_id, user_id)
+        references qa_conversations(id, user_id) on delete cascade
+);
+
+create table if not exists qa_messages (
+    id text primary key,
+    conversation_id text not null,
+    user_id text not null,
+    turn_id text not null,
+    role text not null check(role in ('user','assistant')),
+    status text not null check(status in ('pending','completed','failed','cancelled')),
+    mode text check(mode is null or mode in ('auto','joint','compare','summary')),
+    content text not null default '',
+    source_state text not null default 'none'
+        check(source_state in ('available','none','legacy_unavailable')),
+    client_request_id text,
+    retry_of_message_id text,
+    memory_id text,
+    memory_sync_status text not null default 'not_required'
+        check(memory_sync_status in (
+            'pending','running','completed','failed','not_required'
+        )),
+    memory_sync_attempt_count integer not null default 0,
+    memory_sync_lease_owner text,
+    memory_sync_lease_expires_at text,
+    safe_error_code text,
+    trace_id text,
+    version integer not null default 0,
+    created_at text not null,
+    updated_at text not null,
+    completed_at text,
+    unique(user_id, conversation_id, id),
+    foreign key(conversation_id, user_id)
+        references qa_conversations(id, user_id) on delete cascade,
+    foreign key(retry_of_message_id, conversation_id, user_id)
+        references qa_messages(id, conversation_id, user_id),
+    check(role = 'user' or client_request_id is null)
+);
+
+create table if not exists qa_message_sources (
+    id text primary key,
+    assistant_message_id text not null,
+    conversation_id text not null,
+    user_id text not null,
+    position integer not null check(position >= 0),
+    citation_id text not null,
+    document_id text not null,
+    document_name text not null,
+    page_number integer,
+    section text,
+    excerpt text not null,
+    reference text not null,
+    truncated integer not null default 0 check(truncated in (0, 1)),
+    source_type text not null,
+    unique(assistant_message_id, position),
+    foreign key(assistant_message_id, conversation_id, user_id)
+        references qa_messages(id, conversation_id, user_id) on delete cascade
+);
+
+create table if not exists qa_jobs (
+    id text primary key,
+    conversation_id text not null,
+    user_id text not null,
+    input_message_id text not null,
+    assistant_message_id text not null,
+    status text not null check(status in (
+        'queued','running','completed','failed','cancelled'
+    )),
+    stage text not null,
+    progress integer not null check(progress between 0 and 100),
+    cancel_requested_at text,
+    attempt_count integer not null default 0,
+    max_attempts integer not null default 3 check(max_attempts > 0),
+    lease_owner text,
+    lease_expires_at text,
+    lease_duration_seconds integer,
+    safe_error_code text,
+    trace_id text,
+    version integer not null default 0,
+    created_at text not null,
+    started_at text,
+    finished_at text,
+    updated_at text not null,
+    unique(user_id, conversation_id, id),
+    unique(user_id, input_message_id),
+    unique(user_id, assistant_message_id),
+    foreign key(conversation_id, user_id)
+        references qa_conversations(id, user_id) on delete cascade,
+    foreign key(input_message_id, conversation_id, user_id)
+        references qa_messages(id, conversation_id, user_id) on delete cascade,
+    foreign key(assistant_message_id, conversation_id, user_id)
+        references qa_messages(id, conversation_id, user_id) on delete cascade
+);
+
+create index if not exists ix_qa_conversations_user_recent
+on qa_conversations(user_id, last_message_at desc, id desc);
+create index if not exists ix_qa_messages_conversation_created
+on qa_messages(user_id, conversation_id, created_at, id);
+create index if not exists ix_qa_messages_memory_sync
+on qa_messages(memory_sync_status, memory_sync_lease_expires_at, created_at)
+where role = 'assistant' and status = 'completed';
+create index if not exists ix_qa_message_sources_order
+on qa_message_sources(user_id, assistant_message_id, position);
+create unique index if not exists uq_qa_messages_pending_conversation
+on qa_messages(user_id, conversation_id)
+where role = 'assistant' and status = 'pending';
+create unique index if not exists uq_qa_messages_client_request
+on qa_messages(user_id, conversation_id, client_request_id)
+where role = 'user' and client_request_id is not null;
+create unique index if not exists uq_qa_jobs_active_conversation
+on qa_jobs(user_id, conversation_id)
+where status in ('queued','running');
+create index if not exists ix_qa_jobs_scheduler
+on qa_jobs(status, lease_expires_at, created_at, id);
+
 create table if not exists data_migrations (
     id integer primary key autoincrement,
     migration_key text not null unique,
