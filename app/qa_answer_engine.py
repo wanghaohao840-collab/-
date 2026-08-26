@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import PurePath
+from typing import Any, Literal, Mapping, Protocol
+
+from app.qa_models import QaMode, QaSourceDraft
+
+
+@dataclass(frozen=True)
+class QaAnswerRequest:
+    question: str
+    conversation_context: str
+    document_ids: tuple[str, ...]
+    mode: QaMode
+    limit: int = 5
+    structured_output: bool = False
+
+
+@dataclass(frozen=True)
+class QaAnswerResult:
+    answer: str
+    sources: tuple[QaSourceDraft, ...]
+    mode: QaMode
+    comparison: Mapping[str, Any] | None = None
+    comparison_format: str | None = None
+    graph_sources: tuple[QaSourceDraft, ...] = ()
+
+
+class QaEngineError(RuntimeError):
+    def __init__(self, code: str, retryable: bool) -> None:
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+
+
+class QaAnswerEngine(Protocol):
+    def answer(
+        self,
+        runtime: object,
+        request: QaAnswerRequest,
+        *,
+        progress_callback: object | None = None,
+        cancel_event: object | None = None,
+    ) -> QaAnswerResult: ...
+
+
+class RagQaAnswerEngine:
+    def answer(
+        self,
+        runtime: object,
+        request: QaAnswerRequest,
+        *,
+        progress_callback: object | None = None,
+        cancel_event: object | None = None,
+    ) -> QaAnswerResult:
+        kwargs: dict[str, Any] = {
+            "query": request.question,
+            "conversation_context": request.conversation_context,
+            "document_ids": list(request.document_ids),
+            "mode": request.mode,
+            "limit": request.limit,
+            "min_score": 0.12,
+            "structured_output": request.structured_output,
+        }
+        if progress_callback is not None:
+            kwargs["progress_callback"] = progress_callback
+        if cancel_event is not None:
+            kwargs["cancel_event"] = cancel_event
+
+        result = runtime.rag_tool.execute_result("ask", **kwargs)
+        if not result.success:
+            raise QaEngineError(
+                str(result.error_code or "QA_ENGINE_UNAVAILABLE"),
+                bool(result.retryable),
+            )
+
+        rag_sources = tuple(
+            _source_draft(item, "rag")
+            for item in _mapping_items(result.data.get("sources"))
+        )
+        graph_sources = tuple(
+            _source_draft(item, "graph")
+            for item in _mapping_items(result.data.get("graph_sources"))
+        )
+        comparison = result.data.get("comparison")
+        return QaAnswerResult(
+            answer=str(result.message),
+            sources=(*rag_sources, *graph_sources),
+            mode=request.mode,
+            comparison=comparison if isinstance(comparison, Mapping) else None,
+            comparison_format=_optional_text(result.data.get("comparison_format")),
+            graph_sources=graph_sources,
+        )
+
+
+def _mapping_items(value: object) -> tuple[Mapping[str, Any], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _source_draft(
+    raw: Mapping[str, Any], source_type: Literal["rag", "graph"]
+) -> QaSourceDraft:
+    page = raw.get("page_number")
+    raw_name = str(raw.get("file_name") or raw.get("document_name") or "")
+    document_name = PurePath(raw_name.replace("\\", "/")).name
+    return QaSourceDraft(
+        citation_id=str(raw.get("citation_id") or "")[:100],
+        document_id=str(raw.get("document_id") or "")[:200],
+        document_name=document_name[:300],
+        page_number=page if isinstance(page, int) and not isinstance(page, bool) else None,
+        section=_optional_text(raw.get("section"), limit=300),
+        excerpt=str(raw.get("excerpt") or "")[:2000],
+        reference=str(raw.get("reference") or "")[:1000],
+        truncated=bool(raw.get("truncated")),
+        source_type=source_type,
+    )
+
+
+def _optional_text(value: object, *, limit: int = 100) -> str | None:
+    text = str(value or "").strip()
+    return text[:limit] if text else None

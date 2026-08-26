@@ -26,6 +26,10 @@ class FakeRAGTool:
         self.calls.append((args, kwargs))
         return "rag-ok"
 
+    def execute_result(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return FakeActionResult(True, "rag-ok", {})
+
 
 class FakeActionResult:
     def __init__(
@@ -137,8 +141,10 @@ class PDFLearningAssistantMultiDocumentTests(unittest.TestCase):
         self.assertIn("progress_callback", kwargs)
         self.assertIn("cancel_event", kwargs)
 
-    def test_ask_history_records_document_scope_and_mode(self):
+    def test_ask_does_not_append_flat_question_history(self):
         assistant = self.make_assistant()
+
+        before = assistant.history_repository.load()["questions"]
 
         assistant.ask(
             "联合总结",
@@ -146,11 +152,8 @@ class PDFLearningAssistantMultiDocumentTests(unittest.TestCase):
             mode="summary",
         )
 
-        item = assistant.history["questions"][-1]
-        self.assertEqual(item["document_ids"], ["doc-1", "doc-2"])
-        self.assertEqual(item["document_names"], ["One.md", "Two.md"])
-        self.assertEqual(item["mode"], "summary")
-        self.assertEqual(item["document"], "One.md | doc-1; Two.md | doc-2")
+        self.assertEqual(assistant.history_repository.load()["questions"], before)
+        self.assertEqual(assistant.history["questions"], before)
 
     def test_ask_explicit_empty_selection_does_not_fallback_to_current_document(self):
         assistant = self.make_assistant()
@@ -229,7 +232,7 @@ class PDFLearningAssistantMultiDocumentTests(unittest.TestCase):
         self.assertEqual(assistant.memory_tool.calls, [])
         self.assertEqual(assistant.rag_tool.calls, [])
 
-    def test_history_records_resolved_auto_mode(self):
+    def test_auto_mode_is_resolved_for_rag_without_history_write(self):
         assistant = self.make_assistant()
 
         assistant.ask(
@@ -238,7 +241,7 @@ class PDFLearningAssistantMultiDocumentTests(unittest.TestCase):
             mode="auto",
         )
 
-        self.assertEqual(assistant.history["questions"][-1]["mode"], "joint")
+        self.assertEqual(assistant.history["questions"], [])
         _, kwargs = assistant.rag_tool.calls[-1]
         self.assertEqual(kwargs["mode"], "joint")
 
