@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-02"
 title: "Add isolated QA persistence"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-01"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -126,4 +126,51 @@ Stop and append a reality-conflict report if packet 01 is not done, existing sch
 
 ## Implementation handoff
 
-Replace this section with the required packet ID/status, delivered result, files/interfaces, acceptance evidence, exact command outcomes, scope confirmation, deviations, residual risks and commit hash.
+**Packet:** `qa-vertical-slice-02` — `done`
+
+**Delivered result:** Added the user-scoped SQLite QA domain for immutable
+conversation document snapshots, ordered messages and citations, conditional
+message transitions, rolling-summary compare-and-set state, and durable summary
+jobs with atomic idempotent enqueue, leases, heartbeat, cancellation, retry caps
+and restart recovery.
+
+**Files and interfaces:**
+
+- `app/database.py` adds idempotent QA tables, composite ownership foreign keys,
+  partial uniqueness constraints and scheduler/page indexes without rewriting
+  existing tables.
+- `app/qa_models.py` provides frozen domain records, typed domain errors,
+  validation, grapheme-safe titles and opaque stable cursors.
+- `app/qa_repository.py` provides user-scoped conversation/message/source APIs,
+  atomic pending turns, conditional complete/fail/cancel, recovery, summary CAS
+  and hard cascade deletion.
+- `app/qa_job_repository.py` provides atomic summary enqueue, worker claims,
+  renewable leases, stale-owner rejection, cancellation, bounded retry and
+  expired-lease recovery.
+- `tests/test_qa_models.py`, `tests/test_qa_repository.py` and
+  `tests/test_qa_job_repository.py` cover the packet contracts and races.
+
+**Acceptance evidence:**
+
+- RED: repository and job modules were absent; collection failed as expected.
+- GREEN: `29 passed` across the three new suites plus
+  `tests/test_p0_data_integrity.py`.
+- `python -m compileall -q` passed for all three new application modules.
+- `git diff --check` passed (Git only reported the existing Windows line-ending
+  normalization warning for `app/database.py`).
+- `pragma foreign_key_check` is asserted clean after repeated initialization.
+
+**Scope confirmation:** No RAG, service, API, UI, Memory or filesystem behavior
+was changed. Document ownership/readiness remains authoritative in the existing
+library/runtime; the repository consumes already-verified candidates and stores
+only immutable ID/name snapshots, avoiding a second document master.
+
+**Deviations:** The revised task packet explicitly includes
+`app/qa_job_repository.py`, so durable job persistence was delivered here even
+though the earlier narrative plan introduced it in the worker task. Ruff was not
+available in the fixed project venv; compile and pytest verification passed.
+
+**Residual risks:** Worker orchestration, real RAG completion, deletion fences
+and Memory synchronization intentionally remain for later packets.
+
+**Implementation commit:** `958f136` (`feat: add persistent QA conversations`).
