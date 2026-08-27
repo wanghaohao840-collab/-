@@ -217,7 +217,6 @@ class QaRepository:
         mode: str,
         client_request_id: str,
         *,
-        retry_of_message_id: str | None = None,
         now: str | None = None,
     ) -> PendingTurn:
         timestamp = now or _utc_now()
@@ -231,8 +230,42 @@ class QaRepository:
                 question,
                 mode,
                 client_request_id,
-                retry_of_message_id=retry_of_message_id,
+                retry_of_message_id=None,
                 timestamp=timestamp,
+            )
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def create_pending_retry(
+        self,
+        user_id: str,
+        conversation_id: str,
+        failed_assistant_message_id: str,
+        client_request_id: str,
+        *,
+        now: str | None = None,
+    ) -> PendingTurn:
+        request_id = str(client_request_id or "").strip()
+        if not request_id:
+            raise QaValidationError(
+                "QA_CLIENT_REQUEST_REQUIRED", "client request id is required"
+            )
+        timestamp = now or _utc_now()
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
+            result = self._create_pending_retry_in_connection(
+                conn,
+                user_id,
+                conversation_id,
+                failed_assistant_message_id,
+                request_id,
+                timestamp,
             )
             conn.commit()
             return result
@@ -893,6 +926,231 @@ class QaRepository:
             self._message_from_row(conn, user_row),
             self._message_from_row(conn, assistant_row),
             False,
+        )
+
+    def _create_pending_retry_in_connection(
+        self,
+        conn: sqlite3.Connection,
+        user_id: str,
+        conversation_id: str,
+        failed_assistant_message_id: str,
+        client_request_id: str,
+        timestamp: str,
+    ) -> PendingTurn:
+        conversation = conn.execute(
+            f"""
+            select * from qa_conversations where id = ? and user_id = ?
+              and {_not_fenced_clause('qa_conversations')}
+            """,
+            (conversation_id, user_id),
+        ).fetchone()
+        if conversation is None:
+            raise QaValidationError("QA_CONVERSATION_NOT_FOUND", "conversation not found")
+
+        request = conn.execute(
+            """
+            select * from qa_retry_requests
+            where user_id = ? and conversation_id = ? and client_request_id = ?
+            """,
+            (user_id, conversation_id, client_request_id),
+        ).fetchone()
+        if request is not None:
+            if request["failed_assistant_message_id"] != failed_assistant_message_id:
+                raise QaValidationError(
+                    "QA_CLIENT_REQUEST_REUSED", "client request id is already in use"
+                )
+            return self._pending_retry_from_ids(
+                conn,
+                user_id,
+                conversation_id,
+                request["failed_assistant_message_id"],
+                request["assistant_message_id"],
+            )
+
+        request = conn.execute(
+            """
+            select * from qa_retry_requests
+            where user_id = ? and conversation_id = ?
+              and failed_assistant_message_id = ?
+            """,
+            (user_id, conversation_id, failed_assistant_message_id),
+        ).fetchone()
+        if request is not None:
+            return self._pending_retry_from_ids(
+                conn,
+                user_id,
+                conversation_id,
+                request["failed_assistant_message_id"],
+                request["assistant_message_id"],
+            )
+
+        failed = conn.execute(
+            """
+            select * from qa_messages
+            where id = ? and user_id = ? and conversation_id = ?
+              and role = 'assistant' and status = 'failed'
+            """,
+            (failed_assistant_message_id, user_id, conversation_id),
+        ).fetchone()
+        if failed is None:
+            raise QaValidationError(
+                "QA_RETRY_NOT_ALLOWED", "retry target is not a failed answer"
+            )
+        paired_user = conn.execute(
+            """
+            select * from qa_messages
+            where user_id = ? and conversation_id = ? and turn_id = ?
+              and role = 'user' and status = 'completed'
+            order by created_at, id limit 1
+            """,
+            (user_id, conversation_id, failed["turn_id"]),
+        ).fetchone()
+        if paired_user is None:
+            raise QaValidationError(
+                "QA_RETRY_NOT_ALLOWED", "retry target has no user message"
+            )
+
+        # Databases created before the retry ledger may already contain a
+        # linked assistant. Adopt one canonical child without rewriting history.
+        legacy_retry = conn.execute(
+            """
+            select * from qa_messages
+            where user_id = ? and conversation_id = ?
+              and retry_of_message_id = ? and role = 'assistant'
+            order by created_at, id limit 1
+            """,
+            (user_id, conversation_id, failed_assistant_message_id),
+        ).fetchone()
+        if legacy_retry is not None:
+            conn.execute(
+                """
+                insert into qa_retry_requests (
+                    user_id, conversation_id, failed_assistant_message_id,
+                    assistant_message_id, client_request_id, created_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    conversation_id,
+                    failed_assistant_message_id,
+                    legacy_retry["id"],
+                    client_request_id,
+                    timestamp,
+                ),
+            )
+            return PendingTurn(
+                self._message_from_row(conn, paired_user),
+                self._message_from_row(conn, legacy_retry),
+                True,
+            )
+
+        busy = conn.execute(
+            """
+            select 1 from qa_messages
+            where user_id = ? and conversation_id = ?
+              and role = 'assistant' and status = 'pending'
+            """,
+            (user_id, conversation_id),
+        ).fetchone()
+        if busy is not None:
+            raise QaConflictError("QA_CONVERSATION_BUSY")
+
+        assistant_message_id = str(uuid4())
+        conn.execute(
+            """
+            insert into qa_messages (
+                id, conversation_id, user_id, turn_id, role, status, mode,
+                content, source_state, retry_of_message_id,
+                memory_sync_status, created_at, updated_at
+            ) values (
+                ?, ?, ?, ?, 'assistant', 'pending', ?, '', 'none', ?,
+                'not_required', ?, ?
+            )
+            """,
+            (
+                assistant_message_id,
+                conversation_id,
+                user_id,
+                failed["turn_id"],
+                failed["mode"],
+                failed_assistant_message_id,
+                timestamp,
+                timestamp,
+            ),
+        )
+        conn.execute(
+            """
+            insert into qa_retry_requests (
+                user_id, conversation_id, failed_assistant_message_id,
+                assistant_message_id, client_request_id, created_at
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                conversation_id,
+                failed_assistant_message_id,
+                assistant_message_id,
+                client_request_id,
+                timestamp,
+            ),
+        )
+        conn.execute(
+            """
+            update qa_conversations
+            set last_message_at = ?, updated_at = ?, version = version + 1
+            where id = ? and user_id = ?
+            """,
+            (timestamp, timestamp, conversation_id, user_id),
+        )
+        assistant = conn.execute(
+            "select * from qa_messages where id = ? and user_id = ?",
+            (assistant_message_id, user_id),
+        ).fetchone()
+        return PendingTurn(
+            self._message_from_row(conn, paired_user),
+            self._message_from_row(conn, assistant),
+            False,
+        )
+
+    def _pending_retry_from_ids(
+        self,
+        conn: sqlite3.Connection,
+        user_id: str,
+        conversation_id: str,
+        failed_assistant_message_id: str,
+        assistant_message_id: str,
+    ) -> PendingTurn:
+        failed = conn.execute(
+            """
+            select turn_id from qa_messages
+            where id = ? and user_id = ? and conversation_id = ?
+            """,
+            (failed_assistant_message_id, user_id, conversation_id),
+        ).fetchone()
+        assistant = conn.execute(
+            """
+            select * from qa_messages
+            where id = ? and user_id = ? and conversation_id = ?
+            """,
+            (assistant_message_id, user_id, conversation_id),
+        ).fetchone()
+        if failed is None or assistant is None:
+            raise QaConflictError("QA_RETRY_INCOMPLETE")
+        paired_user = conn.execute(
+            """
+            select * from qa_messages
+            where user_id = ? and conversation_id = ? and turn_id = ?
+              and role = 'user' and status = 'completed'
+            order by created_at, id limit 1
+            """,
+            (user_id, conversation_id, failed["turn_id"]),
+        ).fetchone()
+        if paired_user is None:
+            raise QaConflictError("QA_RETRY_INCOMPLETE")
+        return PendingTurn(
+            self._message_from_row(conn, paired_user),
+            self._message_from_row(conn, assistant),
+            True,
         )
 
     def _finish_pending(

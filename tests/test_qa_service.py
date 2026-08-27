@@ -245,9 +245,19 @@ def test_retry_reuses_question_and_links_new_assistant(service_parts) -> None:
     )
 
     retried = service.retry(TOKEN, failed.id, "client-2")
+    duplicate = service.retry(TOKEN, failed.id, "client-2")
     assert retried.status == "completed"
+    assert duplicate.id == retried.id
     assert retried.retry_of_message_id == failed.id
     assert engine.calls[-1][1].question == "原问题"
+    assert len(engine.calls) == 2
+    messages = service.list_messages(TOKEN, conversation.id).items
+    assert [message.role for message in messages].count("user") == 1
+    assert [message.role for message in messages].count("assistant") == 2
+    report_turns = service.report_turns(TOKEN)
+    assert [(turn.question, turn.answer) for turn in report_turns] == [
+        ("原问题", "恢复回答")
+    ]
 
     with pytest.raises(QaRetryNotAllowedError):
         service.retry(TOKEN, retried.id, "client-3")

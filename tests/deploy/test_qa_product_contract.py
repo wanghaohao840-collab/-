@@ -7,6 +7,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HANDOFF_PATH = REPOSITORY_ROOT / "docs" / "product-ui" / "penpot-handoff.md"
 REFERENCE_ROOT = REPOSITORY_ROOT / "docs" / "product-ui" / "reference" / "penpot"
+QA_STYLE_PATH = REPOSITORY_ROOT / "web" / "src" / "styles" / "qa.css"
 
 QA_REFERENCES = (
     ("Desktop / QA / Default", "desktop-qa.png", 1440, 1024),
@@ -46,3 +47,11 @@ def test_qa_penpot_exports_are_exact_nonempty_pngs() -> None:
         path = REFERENCE_ROOT / filename
         assert path.stat().st_size > 1_024
         assert _png_dimensions(path) == (width, height)
+
+
+def test_qa_supporting_copy_uses_accessible_primary_text_token() -> None:
+    stylesheet = QA_STYLE_PATH.read_text(encoding="utf-8")
+    selector = ".qa-header p, .qa-muted, .qa-conversation small, .qa-sources small"
+    rule = next(line for line in stylesheet.splitlines() if line.startswith(selector))
+    assert "var(--color-text-primary)" in rule
+    assert "var(--color-text-secondary)" not in rule

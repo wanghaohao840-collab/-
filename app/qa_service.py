@@ -250,13 +250,11 @@ class QaService:
             raise QaRetryNotAllowedError()
         mode = failed.mode or "auto"
         try:
-            pending = self.repository.create_pending_turn(
+            pending = self.repository.create_pending_retry(
                 user_id,
                 conversation.id,
-                paired_user.content,
-                mode,
+                failed.id,
                 client_request_id,
-                retry_of_message_id=failed.id,
             )
         except QaConflictError as error:
             self.telemetry.record("qa_busy", conversation_id=conversation.id)

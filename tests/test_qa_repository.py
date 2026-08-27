@@ -71,6 +71,7 @@ def test_schema_is_additive_idempotent_and_user_scoped(db_path) -> None:
         "qa_messages",
         "qa_message_sources",
         "qa_jobs",
+        "qa_retry_requests",
     } <= tables
     assert {
         "ix_qa_conversations_user_recent",
@@ -191,20 +192,41 @@ def test_fail_cancel_retry_link_and_delete_fence(repository) -> None:
     )
     assert not repository.cancel_turn(OWNER, failed.assistant_message.id, 0)
 
-    retry = repository.create_pending_turn(
+    retry = repository.create_pending_retry(
         OWNER,
         conversation.id,
-        "失败问题",
-        "auto",
+        failed.assistant_message.id,
         "client-retry",
-        retry_of_message_id=failed.assistant_message.id,
     )
+    duplicate = repository.create_pending_retry(
+        OWNER,
+        conversation.id,
+        failed.assistant_message.id,
+        "client-retry",
+    )
+    same_target = repository.create_pending_retry(
+        OWNER,
+        conversation.id,
+        failed.assistant_message.id,
+        "another-client-retry",
+    )
+    assert retry.user_message.id == failed.user_message.id
     assert retry.assistant_message.retry_of_message_id == failed.assistant_message.id
+    assert retry.assistant_message.turn_id == failed.user_message.turn_id
+    assert duplicate.duplicate is True
+    assert duplicate.assistant_message.id == retry.assistant_message.id
+    assert same_target.duplicate is True
+    assert same_target.assistant_message.id == retry.assistant_message.id
+    messages = repository.list_messages(OWNER, conversation.id).items
+    assert [message.role for message in messages].count("user") == 1
+    assert [message.role for message in messages].count("assistant") == 2
     assert repository.hard_delete_conversation(OWNER, conversation.id)
     assert not repository.complete_turn(
         OWNER, retry.assistant_message.id, 0, "late", (), "none", None
     )
     assert repository.list_messages(OWNER, conversation.id).items == ()
+    with connect(repository.db_path) as conn:
+        assert conn.execute("select count(*) from qa_retry_requests").fetchone()[0] == 0
 
 
 def test_cursor_pagination_uses_id_tiebreaker(repository) -> None:

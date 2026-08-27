@@ -131,6 +131,22 @@ create table if not exists qa_messages (
     check(role = 'user' or client_request_id is null)
 );
 
+create table if not exists qa_retry_requests (
+    user_id text not null,
+    conversation_id text not null,
+    failed_assistant_message_id text not null,
+    assistant_message_id text not null,
+    client_request_id text not null,
+    created_at text not null,
+    primary key(user_id, conversation_id, failed_assistant_message_id),
+    unique(user_id, conversation_id, client_request_id),
+    unique(user_id, conversation_id, assistant_message_id),
+    foreign key(failed_assistant_message_id, conversation_id, user_id)
+        references qa_messages(id, conversation_id, user_id) on delete cascade,
+    foreign key(assistant_message_id, conversation_id, user_id)
+        references qa_messages(id, conversation_id, user_id) on delete cascade
+);
+
 create table if not exists qa_message_sources (
     id text primary key,
     assistant_message_id text not null,

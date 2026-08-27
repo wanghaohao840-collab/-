@@ -2,7 +2,7 @@
 .qa-header, .qa-panel-heading, .qa-message__failure, .qa-document-picker footer, .qa-delete-copy footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .qa-header { margin-bottom: var(--space-4); }
 .qa-header h1, .qa-header p, .qa-panel-heading h2, .qa-sources h2 { margin: 0; }
-.qa-header p, .qa-muted, .qa-conversation small, .qa-sources small { color: var(--color-text-secondary); }
+.qa-header p, .qa-muted, .qa-conversation small, .qa-sources small { color: var(--color-text-primary); }
 .qa-header__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 .qa-workspace { display: grid; grid-template-columns: 240px minmax(0, 1fr) 320px; min-height: 680px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-surface); }
 .qa-conversations, .qa-sources { min-width: 0; padding: var(--space-4); }
