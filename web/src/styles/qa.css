@@ -31,9 +31,12 @@
 .qa-source-index { display: grid; width: 28px; height: 28px; place-items: center; border-radius: var(--radius-pill); color: var(--color-surface); background: var(--color-brand-700); }
 .qa-sources strong, .qa-sources small { display: block; }
 .qa-sources p { margin: var(--space-2) 0; line-height: 1.5; }
+.qa-source-copy { min-height: 44px; margin-top: var(--space-2); padding: 0 var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); color: var(--color-brand-700); background: var(--color-surface); cursor: pointer; }
+.qa-copy-feedback { min-height: 1.5em; }
 .qa-icon-button { display: grid; min-width: 44px; min-height: 44px; padding: 0; place-items: center; border: 0; border-radius: var(--radius-md); color: inherit; background: transparent; cursor: pointer; }
 .qa-summary-status, .qa-legacy-note, .qa-error { margin: 0 0 var(--space-3); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); }
 .qa-summary-status { display: flex; align-items: center; gap: var(--space-4); background: var(--color-brand-100); }
+.qa-summary-status__skeleton { width: 96px; height: 8px; border-radius: var(--radius-pill); background: var(--color-border); }
 .qa-legacy-note { background: var(--color-brand-100); }
 .qa-error { color: var(--color-danger); background: var(--color-surface); }
 .qa-overlay { position: fixed; z-index: 120; inset: 0; display: grid; padding: var(--space-4); place-items: center; }
