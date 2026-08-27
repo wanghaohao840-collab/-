@@ -16,6 +16,8 @@ QaMemorySyncStatus = Literal[
     "pending", "running", "completed", "failed", "not_required"
 ]
 QaJobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+QaDeletionTarget = Literal["conversation", "document"]
+QaDeletionStatus = Literal["queued", "running", "completed", "failed"]
 
 
 class QaValidationError(ValueError):
@@ -194,6 +196,22 @@ class SummaryEnqueueResult:
     pending: PendingTurn
     job: QaJob
     duplicate: bool
+
+
+@dataclass(frozen=True)
+class QaDeletion:
+    id: str
+    user_id: str
+    target_type: QaDeletionTarget
+    target_id: str
+    status: QaDeletionStatus
+    stage: str
+    affected_conversation_count: int
+    attempt_count: int
+    safe_error_code: str | None
+    trace_id: str | None
+    created_at: str
+    updated_at: str
 
 
 def normalize_question(value: str) -> str:

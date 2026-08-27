@@ -34,10 +34,20 @@ class DocumentLibraryItem:
 
 
 class DocumentLibraryService:
-    def __init__(self, session_registry, storage, import_service) -> None:
+    def __init__(
+        self,
+        session_registry,
+        storage,
+        import_service,
+        *,
+        deletion_repository=None,
+        deletion_service=None,
+    ) -> None:
         self.session_registry = session_registry
         self.storage = storage
         self.import_service = import_service
+        self.deletion_repository = deletion_repository
+        self.deletion_service = deletion_service
 
     def list_documents(self, session_token: str) -> tuple[DocumentLibraryItem, ...]:
         session = self.session_registry.get_session(session_token)
@@ -49,6 +59,12 @@ class DocumentLibraryService:
                 item
                 for record in latest.values()
                 if (item := self._project_record(user_id, record)) is not None
+                and (
+                    self.deletion_repository is None
+                    or not self.deletion_repository.has_active_fence(
+                        user_id, "document", item.document_id
+                    )
+                )
             ]
 
         dated = sorted(
@@ -65,11 +81,41 @@ class DocumentLibraryService:
         )
         return tuple((*dated, *undated))
 
-    def delete_document(self, session_token: str, document_id: str) -> None:
+    def delete_document(self, session_token: str, document_id: str):
+        if self.deletion_service is not None:
+            deletion = self.deletion_service.request_document(
+                session_token, document_id
+            )
+            if deletion is None:
+                raise DocumentNotFoundError()
+            return deletion
+
         session = self.session_registry.get_session(session_token)
         user_id = str(session.user_id)
-        with session.runtime.lock:
-            history = session.runtime.history.load()
+        self.perform_document_delete(
+            user_id,
+            session.runtime,
+            document_id,
+            assistant=session.assistant,
+        )
+
+        try:
+            self.session_registry.clear_document_selection(user_id, document_id)
+        except Exception:
+            logger.warning("document selection invalidation failed")
+            raise DocumentDeleteFailedError() from None
+
+    def perform_document_delete(
+        self,
+        user_id: str,
+        runtime,
+        document_id: str,
+        *,
+        assistant=None,
+    ) -> None:
+        temporary_assistant = None
+        with runtime.lock:
+            history = runtime.history.load()
             records = history.get("documents", [])
             record = self._latest_records(records).get(document_id)
             if record is None or self._project_record(user_id, record) is None:
@@ -92,10 +138,24 @@ class DocumentLibraryService:
             ):
                 raise DocumentImportActiveError()
             try:
-                result = session.assistant.delete_document(document_id)
+                if assistant is None:
+                    from assistants.pdf_learning_assistant import (
+                        PDFLearningAssistant,
+                    )
+
+                    temporary_assistant = PDFLearningAssistant(
+                        user_id=user_id,
+                        runtime_dir=runtime.paths.root,
+                        runtime=runtime,
+                    )
+                    assistant = temporary_assistant
+                result = assistant.delete_document(document_id)
             except Exception:
                 logger.warning("coordinated document deletion failed")
                 raise DocumentDeleteFailedError() from None
+            finally:
+                if temporary_assistant is not None:
+                    temporary_assistant.close()
             if (
                 getattr(result, "document_id", None) != document_id
                 or not isinstance(getattr(result, "documents_removed", None), int)
@@ -104,12 +164,6 @@ class DocumentLibraryService:
             ):
                 logger.warning("coordinated document deletion was incomplete")
                 raise DocumentDeleteFailedError()
-
-        try:
-            self.session_registry.clear_document_selection(user_id, document_id)
-        except Exception:
-            logger.warning("document selection invalidation failed")
-            raise DocumentDeleteFailedError() from None
 
     @staticmethod
     def _latest_records(records: object) -> dict[str, dict]:

@@ -10,6 +10,7 @@ from app.database import connect, initialize_database
 from app.qa_answer_engine import QaAnswerResult, QaEngineError
 from app.qa_context import QaContextBuilder
 from app.qa_job_repository import QaJobRepository
+from app.qa_memory import QaMemoryLinker
 from app.qa_models import QaDocumentCandidate, QaSourceDraft
 from app.qa_observability import InProcessQaTelemetry
 from app.qa_repository import QaRepository
@@ -210,3 +211,51 @@ def test_rolling_summary_refresh_is_deduplicated_and_compare_and_set(
         pool.stop()
     assert updated.conversation.rolling_summary == "滚动摘要"
     assert len(summarizer.calls) == 1
+
+
+def test_worker_processes_deterministic_memory_sync(worker_parts) -> None:
+    qa, jobs, conversation = worker_parts
+    turn = qa.create_pending_turn(
+        OWNER, conversation.id, "问题", "joint", "client-memory"
+    )
+    qa.complete_turn(OWNER, turn.assistant_message.id, 0, "回答", (), "none", None)
+
+    class Manager:
+        def __init__(self):
+            self.ids = []
+
+        def add_memory(self, content, **kwargs):
+            self.ids.append(kwargs["memory_id"])
+            return kwargs["memory_id"]
+
+        def remove_memory(self, memory_id, *, memory_type):
+            return True
+
+    registry = RuntimeRegistry()
+    manager = Manager()
+    registry.runtime.memory_tool = SimpleNamespace(memory_manager=manager)
+    pool = QaWorkerPool(
+        jobs,
+        qa,
+        registry,
+        Engine(),
+        QaContextBuilder(2000),
+        InProcessQaTelemetry(),
+        memory_linker=QaMemoryLinker(qa),
+        worker_count=1,
+        lease_seconds=5,
+        poll_interval=0.02,
+    )
+    pool.start()
+    try:
+        linked = wait_for(
+            lambda: (
+                message
+                if (message := qa.get_message(OWNER, turn.assistant_message.id)).memory_sync_status
+                == "completed"
+                else None
+            )
+        )
+    finally:
+        pool.stop()
+    assert linked.memory_id == manager.ids[0]

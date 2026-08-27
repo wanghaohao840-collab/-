@@ -77,6 +77,7 @@ class QaService:
         *,
         job_repository=None,
         worker_pool=None,
+        deletion_service=None,
     ) -> None:
         self.session_registry = session_registry
         self.document_library = document_library
@@ -86,6 +87,7 @@ class QaService:
         self.telemetry = telemetry
         self.job_repository = job_repository
         self.worker_pool = worker_pool
+        self.deletion_service = deletion_service
 
     def create_conversation(
         self,
@@ -290,6 +292,18 @@ class QaService:
         if job is not None:
             self.worker_pool.notify()
         return job
+
+    def delete_conversation(
+        self, session_token: str, conversation_id: str
+    ):
+        if self.deletion_service is None:
+            raise RuntimeError("QA deletion workers are not configured")
+        deletion = self.deletion_service.request_conversation(
+            session_token, conversation_id
+        )
+        if deletion is None:
+            raise QaNotFoundError(conversation_id)
+        return deletion
 
     def _execute_pending(
         self,

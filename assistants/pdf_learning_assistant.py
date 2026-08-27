@@ -417,14 +417,49 @@ class PDFLearningAssistant:
         else:
             rag_kwargs["document_id"] = self.current_document_id
 
-        answer_result = self.rag_tool.execute_result("ask", **rag_kwargs)
-        answer = answer_result.message
+        execute_result = getattr(self.rag_tool, "execute_result", None)
+        if callable(execute_result):
+            answer = execute_result("ask", **rag_kwargs).message
+        else:
+            # One-release direct-Python compatibility for custom RAG tools.
+            # Product QA uses QaAnswerEngine and never enters this branch.
+            answer = self.rag_tool.execute("ask", **rag_kwargs)
         is_cancelled = getattr(cancel_event, "is_set", None)
         if callable(is_cancelled) and is_cancelled():
             self.stats["questions_asked"] = max(
                 0, self.stats["questions_asked"] - 1
             )
             return answer
+
+        document_label = (
+            "; ".join(scope.labels or [])
+            if explicit_scope
+            else self.current_document
+        )
+        history_item = {
+            "question": question,
+            "answer": answer,
+            "document": document_label,
+            "session_id": self.session_id,
+            "asked_at": datetime.now().isoformat(),
+        }
+        if explicit_scope:
+            document_ids = scope.document_ids
+            document_names = scope.document_names
+        else:
+            latest = self._load_latest_history()
+            document_ids = [self.current_document_id]
+            document_names = [
+                item.get("document_name", self.current_document_id)
+                for item in latest["documents"]
+                if item.get("document_id") == self.current_document_id
+            ] or [Path(self.current_document or "").name]
+        history_item["document_ids"] = document_ids
+        history_item["document_names"] = document_names
+        history_item["mode"] = selected_mode
+        self._update_history(
+            lambda history: history["questions"].append(history_item)
+        )
 
         self.memory_tool.execute(
             "add",

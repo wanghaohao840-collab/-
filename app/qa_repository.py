@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
@@ -51,6 +51,20 @@ class QaRepository:
         timestamp = now or _utc_now()
         conversation_id = str(uuid4())
         with connect(self.db_path) as conn:
+            fenced_document = conn.execute(
+                f"""
+                select 1 from qa_deletion_fences
+                where user_id = ? and target_type = 'document'
+                  and status != 'completed'
+                  and target_id in ({','.join('?' for _ in scope)})
+                limit 1
+                """,
+                (user_id, *(item.document_id for item in scope)),
+            ).fetchone()
+            if fenced_document is not None:
+                raise QaValidationError(
+                    "QA_DOCUMENT_DELETING", "a selected document is being deleted"
+                )
             conn.execute(
                 """
                 insert into qa_conversations (
@@ -108,7 +122,9 @@ class QaRepository:
             rows = conn.execute(
                 f"""
                 select * from qa_conversations
-                where user_id = ? {cursor_clause}
+                where user_id = ?
+                  and {_not_fenced_clause('qa_conversations')}
+                  {cursor_clause}
                 order by last_message_at desc, id desc
                 limit ?
                 """,
@@ -154,7 +170,14 @@ class QaRepository:
             rows = conn.execute(
                 f"""
                 select * from qa_messages
-                where user_id = ? and conversation_id = ? {cursor_clause}
+                where user_id = ? and conversation_id = ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
+                  {cursor_clause}
                 order by created_at, id
                 limit ?
                 """,
@@ -172,7 +195,15 @@ class QaRepository:
     def get_message(self, user_id: str, message_id: str) -> QaMessage | None:
         with connect(self.db_path) as conn:
             row = conn.execute(
-                "select * from qa_messages where id = ? and user_id = ?",
+                f"""
+                select * from qa_messages where id = ? and user_id = ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
+                """,
                 (message_id, user_id),
             ).fetchone()
             return self._message_from_row(conn, row) if row is not None else None
@@ -230,10 +261,16 @@ class QaRepository:
         try:
             conn.execute("begin immediate")
             row = conn.execute(
-                """
+                f"""
                 select conversation_id from qa_messages
                 where id = ? and user_id = ? and role = 'assistant'
                   and status = 'pending' and version = ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
                 """,
                 (assistant_message_id, user_id, expected_version),
             ).fetchone()
@@ -404,13 +441,14 @@ class QaRepository:
         timestamp = now or _utc_now()
         with connect(self.db_path) as conn:
             updated = conn.execute(
-                """
+                f"""
                 update qa_conversations
                 set rolling_summary = ?, summary_through_message_id = ?,
                     summary_version = summary_version + 1,
                     version = version + 1, updated_at = ?
                 where id = ? and user_id = ? and version = ?
                   and summary_version = ?
+                  and {_not_fenced_clause('qa_conversations')}
                   and exists (
                       select 1 from qa_messages
                       where id = ? and conversation_id = qa_conversations.id
@@ -427,6 +465,209 @@ class QaRepository:
                     expected_version,
                     expected_summary_version,
                     through_message_id,
+                ),
+            )
+            return bool(updated.rowcount)
+
+    def claim_next_memory_sync(
+        self,
+        worker_id: str,
+        *,
+        lease_seconds: int,
+        now: str | None = None,
+    ) -> QaMessage | None:
+        if lease_seconds < 1:
+            raise QaValidationError(
+                "QA_MEMORY_LEASE_INVALID", "lease seconds must be positive"
+            )
+        timestamp = now or _utc_now()
+        expires_at = _add_seconds(timestamp, lease_seconds)
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
+            candidates = conn.execute(
+                f"""
+                select * from qa_messages
+                where role = 'assistant' and status = 'completed'
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
+                  and (
+                      memory_sync_status in ('pending','failed')
+                      or (
+                          memory_sync_status = 'running'
+                          and memory_sync_lease_expires_at <= ?
+                      )
+                  )
+                order by completed_at, id
+                """,
+                (timestamp,),
+            ).fetchall()
+            for candidate in candidates:
+                updated = conn.execute(
+                    f"""
+                    update qa_messages
+                    set memory_sync_status = 'running',
+                        memory_sync_lease_owner = ?,
+                        memory_sync_lease_expires_at = ?,
+                        memory_sync_attempt_count = memory_sync_attempt_count + 1,
+                        version = version + 1, updated_at = ?
+                    where id = ? and user_id = ? and version = ?
+                      and role = 'assistant' and status = 'completed'
+                      and exists (
+                          select 1 from qa_conversations
+                          where qa_conversations.id = qa_messages.conversation_id
+                            and qa_conversations.user_id = qa_messages.user_id
+                            and {_not_fenced_clause('qa_conversations')}
+                      )
+                      and (
+                          memory_sync_status in ('pending','failed')
+                          or (
+                              memory_sync_status = 'running'
+                              and memory_sync_lease_expires_at <= ?
+                          )
+                      )
+                    """,
+                    (
+                        worker_id,
+                        expires_at,
+                        timestamp,
+                        candidate["id"],
+                        candidate["user_id"],
+                        candidate["version"],
+                        timestamp,
+                    ),
+                )
+                if updated.rowcount:
+                    row = conn.execute(
+                        "select * from qa_messages where id = ?",
+                        (candidate["id"],),
+                    ).fetchone()
+                    result = self._message_from_row(conn, row)
+                    conn.commit()
+                    return result
+            conn.commit()
+            return None
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def heartbeat_memory_sync(
+        self,
+        message_id: str,
+        worker_id: str,
+        *,
+        lease_seconds: int,
+        now: str | None = None,
+    ) -> bool:
+        if lease_seconds < 1:
+            return False
+        timestamp = now or _utc_now()
+        expires_at = _add_seconds(timestamp, lease_seconds)
+        with connect(self.db_path) as conn:
+            updated = conn.execute(
+                f"""
+                update qa_messages
+                set memory_sync_lease_expires_at = ?, updated_at = ?
+                where id = ? and memory_sync_status = 'running'
+                  and memory_sync_lease_owner = ?
+                  and memory_sync_lease_expires_at > ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
+                """,
+                (expires_at, timestamp, message_id, worker_id, timestamp),
+            )
+            return bool(updated.rowcount)
+
+    def complete_memory_sync(
+        self,
+        user_id: str,
+        message_id: str,
+        worker_id: str,
+        memory_id: str,
+        expected_version: int,
+        *,
+        now: str | None = None,
+    ) -> bool:
+        return self._finish_memory_sync(
+            user_id,
+            message_id,
+            worker_id,
+            expected_version,
+            "completed",
+            memory_id,
+            now=now,
+        )
+
+    def fail_memory_sync(
+        self,
+        user_id: str,
+        message_id: str,
+        worker_id: str,
+        expected_version: int,
+        safe_error_code: str,
+        *,
+        now: str | None = None,
+    ) -> bool:
+        return self._finish_memory_sync(
+            user_id,
+            message_id,
+            worker_id,
+            expected_version,
+            "failed",
+            None,
+            now=now,
+        )
+
+    def _finish_memory_sync(
+        self,
+        user_id: str,
+        message_id: str,
+        worker_id: str,
+        expected_version: int,
+        status: str,
+        memory_id: str | None,
+        *,
+        now: str | None,
+    ) -> bool:
+        timestamp = now or _utc_now()
+        with connect(self.db_path) as conn:
+            updated = conn.execute(
+                f"""
+                update qa_messages
+                set memory_sync_status = ?, memory_id = ?,
+                    memory_sync_lease_owner = null,
+                    memory_sync_lease_expires_at = null,
+                    version = version + 1, updated_at = ?
+                where id = ? and user_id = ? and role = 'assistant'
+                  and status = 'completed' and memory_sync_status = 'running'
+                  and memory_sync_lease_owner = ?
+                  and memory_sync_lease_expires_at > ? and version = ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
+                """,
+                (
+                    status,
+                    memory_id,
+                    timestamp,
+                    message_id,
+                    user_id,
+                    worker_id,
+                    timestamp,
+                    expected_version,
                 ),
             )
             return bool(updated.rowcount)
@@ -450,8 +691,9 @@ class QaRepository:
                 "QA_CLIENT_REQUEST_REQUIRED", "client request id is required"
             )
         conversation = conn.execute(
-            """
+            f"""
             select * from qa_conversations where id = ? and user_id = ?
+              and {_not_fenced_clause('qa_conversations')}
             """,
             (conversation_id, user_id),
         ).fetchone()
@@ -616,10 +858,16 @@ class QaRepository:
         try:
             conn.execute("begin immediate")
             row = conn.execute(
-                """
+                f"""
                 select conversation_id from qa_messages
                 where id = ? and user_id = ? and role = 'assistant'
                   and status = 'pending' and version = ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
                 """,
                 (assistant_message_id, user_id, expected_version),
             ).fetchone()
@@ -700,7 +948,10 @@ class QaRepository:
         self, conn: sqlite3.Connection, user_id: str, conversation_id: str
     ) -> QaConversationAggregate | None:
         row = conn.execute(
-            "select * from qa_conversations where id = ? and user_id = ?",
+            f"""
+            select * from qa_conversations where id = ? and user_id = ?
+              and {_not_fenced_clause('qa_conversations')}
+            """,
             (conversation_id, user_id),
         ).fetchone()
         return self._aggregate_from_row(conn, row) if row is not None else None
@@ -739,6 +990,40 @@ def _validated_limit(limit: int, *, maximum: int) -> int:
             "QA_PAGE_LIMIT_INVALID", f"limit must be between 1 and {maximum}"
         )
     return limit
+
+
+def _not_fenced_clause(conversation_alias: str) -> str:
+    return f"""
+    not exists (
+        select 1 from qa_deletion_fences deletion_fence
+        where deletion_fence.user_id = {conversation_alias}.user_id
+          and deletion_fence.status != 'completed'
+          and (
+              (
+                  deletion_fence.target_type = 'conversation'
+                  and deletion_fence.target_id = {conversation_alias}.id
+              )
+              or (
+                  deletion_fence.target_type = 'document'
+                  and exists (
+                      select 1 from qa_conversation_documents fenced_document
+                      where fenced_document.conversation_id = {conversation_alias}.id
+                        and fenced_document.user_id = {conversation_alias}.user_id
+                        and fenced_document.document_id = deletion_fence.target_id
+                  )
+              )
+          )
+    )
+    """
+
+
+def _add_seconds(timestamp: str, seconds: int) -> str:
+    parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed + timedelta(seconds=seconds)).astimezone(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def _conversation_from_row(row: sqlite3.Row) -> QaConversation:

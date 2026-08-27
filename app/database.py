@@ -207,6 +207,35 @@ where status in ('queued','running');
 create index if not exists ix_qa_jobs_scheduler
 on qa_jobs(status, lease_expires_at, created_at, id);
 
+create table if not exists qa_deletion_fences (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    target_type text not null check(target_type in ('conversation','document')),
+    target_id text not null,
+    status text not null check(status in ('queued','running','completed','failed')),
+    stage text not null check(stage in (
+        'fenced','qa_rows_removed','memory_removed','document_removed','completed'
+    )),
+    affected_conversation_count integer not null default 0,
+    conversation_ids_json text not null default '[]',
+    memory_ids_json text not null default '[]',
+    attempt_count integer not null default 0,
+    lease_owner text,
+    lease_expires_at text,
+    safe_error_code text,
+    trace_id text,
+    created_at text not null,
+    updated_at text not null,
+    finished_at text
+);
+create unique index if not exists uq_qa_deletion_active_target
+on qa_deletion_fences(user_id, target_type, target_id)
+where status != 'completed';
+create index if not exists ix_qa_deletion_scheduler
+on qa_deletion_fences(status, lease_expires_at, created_at, id);
+create index if not exists ix_qa_deletion_target
+on qa_deletion_fences(user_id, target_type, target_id, status);
+
 create table if not exists data_migrations (
     id integer primary key autoincrement,
     migration_key text not null unique,

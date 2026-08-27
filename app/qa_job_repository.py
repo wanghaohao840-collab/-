@@ -14,7 +14,7 @@ from app.qa_models import (
     QaValidationError,
     SummaryEnqueueResult,
 )
-from app.qa_repository import QaRepository, _utc_now
+from app.qa_repository import QaRepository, _not_fenced_clause, _utc_now
 
 
 class QaJobRepository:
@@ -116,9 +116,15 @@ class QaJobRepository:
         try:
             conn.execute("begin immediate")
             candidates = conn.execute(
-                """
+                f"""
                 select id, status, version from qa_jobs
                 where attempt_count < max_attempts
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_jobs.conversation_id
+                        and qa_conversations.user_id = qa_jobs.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
                   and (
                       status = 'queued'
                       or (status = 'running' and lease_expires_at <= ?)
@@ -129,7 +135,7 @@ class QaJobRepository:
             ).fetchall()
             for candidate in candidates:
                 updated = conn.execute(
-                    """
+                    f"""
                     update qa_jobs
                     set status = 'running', stage = 'starting',
                         attempt_count = attempt_count + 1,
@@ -137,10 +143,17 @@ class QaJobRepository:
                         lease_duration_seconds = ?,
                         started_at = coalesce(started_at, ?), updated_at = ?,
                         version = version + 1
-                    where id = ? and version = ? and (
-                        status = 'queued'
-                        or (status = 'running' and lease_expires_at <= ?)
-                    )
+                    where id = ? and version = ?
+                      and exists (
+                          select 1 from qa_conversations
+                          where qa_conversations.id = qa_jobs.conversation_id
+                            and qa_conversations.user_id = qa_jobs.user_id
+                            and {_not_fenced_clause('qa_conversations')}
+                      )
+                      and (
+                          status = 'queued'
+                          or (status = 'running' and lease_expires_at <= ?)
+                      )
                     """,
                     (
                         worker_id,

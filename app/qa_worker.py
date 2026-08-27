@@ -10,6 +10,7 @@ from uuid import uuid4
 from app.qa_answer_engine import QaAnswerEngine, QaAnswerRequest, QaEngineError
 from app.qa_context import QaContextBuilder
 from app.qa_job_repository import QaJobRepository
+from app.qa_memory import QaMemoryLinker
 from app.qa_models import QaJob, QaMessage
 from app.qa_observability import QaTelemetry
 from app.qa_repository import QaRepository
@@ -68,6 +69,7 @@ class QaWorkerPool:
         telemetry: QaTelemetry,
         *,
         summarizer: QaConversationSummarizer | None = None,
+        memory_linker: QaMemoryLinker | None = None,
         worker_count: int = 2,
         lease_seconds: int = 60,
         poll_interval: float = 0.5,
@@ -81,6 +83,7 @@ class QaWorkerPool:
         self.context_builder = context_builder
         self.telemetry = telemetry
         self.summarizer = summarizer or LlmQaConversationSummarizer()
+        self.memory_linker = memory_linker
         self.worker_count = worker_count
         self.lease_seconds = lease_seconds
         self.poll_interval = poll_interval
@@ -137,6 +140,13 @@ class QaWorkerPool:
                 if job is not None:
                     self._run_job(worker_id, job)
                     continue
+                if self.memory_linker is not None:
+                    memory_message = self.qa_repository.claim_next_memory_sync(
+                        worker_id, lease_seconds=self.lease_seconds
+                    )
+                    if memory_message is not None:
+                        self._run_memory(worker_id, memory_message)
+                        continue
                 try:
                     refresh = self._refresh_queue.get_nowait()
                 except queue.Empty:
@@ -222,6 +232,30 @@ class QaWorkerPool:
                 raise _LeaseLost()
 
         return update
+
+    def _run_memory(self, worker_id: str, message: QaMessage) -> None:
+        runtime = None
+        try:
+            conversation = self.qa_repository.get_conversation(
+                message.user_id, message.conversation_id
+            )
+            if conversation is None:
+                return
+            runtime = self.runtime_registry.acquire_background(message.user_id)
+            self.memory_linker.sync(
+                runtime, conversation, message, worker_id
+            )
+        except Exception:
+            self.qa_repository.fail_memory_sync(
+                message.user_id,
+                message.id,
+                worker_id,
+                message.version,
+                "QA_MEMORY_WRITE_FAILED",
+            )
+        finally:
+            if runtime is not None:
+                self.runtime_registry.release_background(message.user_id)
 
     def _run_refresh(self, refresh: _Refresh) -> None:
         key = (refresh.user_id, refresh.conversation_id)
