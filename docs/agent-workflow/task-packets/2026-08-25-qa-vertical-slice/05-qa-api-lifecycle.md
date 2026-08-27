@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-05"
 title: "Expose QA API and lifecycle"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-04"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -54,11 +54,14 @@ React and Gradio must share one service domain. REST status resources provide re
 ### Allowed files
 
 - Modify: `app/bootstrap.py`
+- Modify: `app/qa_deletion.py` (add the missing user-scoped read-only polling facade only)
+- Modify: `app/document_library.py` (preserve active-import conflict before durable fence delegation only)
 - Modify: `api/app.py`, `api/dependencies.py`, `api/errors.py`
 - Modify: `api/routes/documents.py`, `api/schemas/documents.py`
 - Create: `api/routes/qa.py`, `api/schemas/qa.py`
 - Create/Test: `tests/api/test_qa_routes.py`
 - Test: `tests/api/test_document_routes.py`, `tests/api/test_app_lifecycle.py`, `tests/api/test_frontend_mount.py`, `tests/test_app_bootstrap.py`
+- Test: `tests/test_document_library_service.py` (durable delegation preflight only)
 
 ### Allowed behavior changes
 
@@ -72,6 +75,17 @@ React and Gradio must share one service domain. REST status resources provide re
 - `QA_ROUTE_ENABLED=false` must not stop migration/recovery/workers or resume legacy writes.
 
 ## Interface contract
+
+### Adjudicated interface amendment (2026-08-27)
+
+Packet 04 produced `QaDeletionRepository.get_deletion(user_id, deletion_id)`
+but omitted the service-level authenticated polling facade required by this
+packet's `GET /deletions/{id}` route. Packet 05 may add only
+`QaDeletionService.get_deletion(session_token, deletion_id)`; routing directly
+to the repository is forbidden and the deletion state machine is unchanged.
+The durable delegation also bypassed the prior synchronous active-import
+preflight. Packet 05 may restore that exact conflict check before requesting a
+fence so the documented `409 document_import_active` contract remains true.
 
 ### Consumes
 
@@ -105,10 +119,10 @@ Use narrow Pydantic DTO conversion functions, dependency injection and current e
 
 ## Acceptance criteria
 
-- [ ] All QA endpoints require authentication and enforce user isolation/not-found semantics.
-- [ ] Ask/summary/retry idempotency and safe error/trace envelopes are exact.
-- [ ] Lifecycle recovery ordering preserves active summaries and reclaims expired work.
-- [ ] Route flag disables presentation only; document deletion API/compatibility tests reflect durable `202`.
+- [x] All QA endpoints require authentication and enforce user isolation/not-found semantics.
+- [x] Ask/summary/retry idempotency and safe error/trace envelopes are exact.
+- [x] Lifecycle recovery ordering preserves active summaries and reclaims expired work.
+- [x] Route flag disables presentation only; document deletion API/compatibility tests reflect durable `202`.
 
 ## Test and verification commands
 
@@ -125,5 +139,56 @@ Stop with a reality-conflict report if packet 04 interfaces differ, lifecycle re
 
 ## Implementation handoff
 
-Replace this section with packet ID/status, delivery, changed files/interfaces, acceptance and exact verification evidence, scope/deviation/risk confirmation and commit.
+**Packet:** `qa-vertical-slice-05` — `done`
 
+**Delivered result:** `ApplicationServices` now composes the QA repository,
+answer engine, context, telemetry, legacy migration, summary/Memory worker and
+deletion service/worker exactly once. Startup reconciles durable rows before
+starting workers; shutdown is reverse-order, idempotent and best-effort across
+all pools. A complete authenticated `/api/v1/qa` REST surface exposes safe
+conversation/message/citation/job/deletion status resources. Document deletion
+now returns durable `202` acceptance.
+
+**Files and interfaces:**
+
+- `app/bootstrap.py` adds the explicit keyword-only `qa_answer_engine` test
+  seam and lifecycle-owned QA graph.
+- `api/schemas/qa.py` adds narrow response/request DTOs with no owner, path,
+  Memory or lease fields.
+- `api/routes/qa.py` adds capabilities, conversation/message, retry, durable
+  summary, cancellation and deletion polling routes with auth/CSRF isolation.
+- `api/config.py` adds default-on, explicit-`false`-only `QA_ROUTE_ENABLED`.
+- `api/errors.py` adds an optional trace field only for safe persisted traces,
+  preserving legacy envelope shape when no trace exists.
+- document deletion preserves active-import conflict before requesting a fence
+  and returns `QaDeletionResponse` with real affected-conversation count.
+- `QaDeletionService.get_deletion()` provides the missing authenticated polling
+  facade; API routes do not bypass services to query repositories.
+
+**Acceptance evidence:**
+
+- Focused composition/document/API increment: `29 passed`, then `30 passed`.
+- Exact packet command: `117 passed in 133.21s`.
+- QA route integration uses real `ApplicationServices` with an explicitly
+  injected engine and proves idempotency, source projection, CSRF, cross-user
+  404, safe trace, durable polling and route-disable lifecycle behavior.
+- Changed modules compile successfully; `git diff --check` passes with only
+  Windows line-ending normalization warnings.
+
+**Scope confirmation:** No frontend, RAG/Memory implementation, database
+schema, distributed queue, environment-selectable fake engine, auth bypass or
+client-provided owner field was added. Disabling the QA route affects only HTTP
+presentation; shared lifecycle start/stop still runs.
+
+**Deviations:** Two narrow interface amendments were adjudicated in this
+packet: a read-only deletion polling facade and restoration of the existing
+active-import preflight before durable deletion delegation. Both close required
+contracts without changing deletion state-machine semantics. Nullable traces
+are omitted when absent to retain exact backward compatibility for existing
+auth/import/document clients; QA failures include them when present.
+
+**Residual risks:** Packet 06 must consume these transport-neutral DTOs and
+honor server polling/status truth. Packet 07 still owns combined real-server,
+accessibility, security, restart and deployment acceptance.
+
+**Implementation commit:** `6d4a790` — `feat: expose durable QA API`
