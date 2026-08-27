@@ -13,6 +13,20 @@ from app.import_repository import ImportTaskRepository
 from app.import_service import ImportTaskService
 from app.import_worker import ImportWorkerPool
 from app.migration import LegacyMigrationService
+from app.qa_answer_engine import QaAnswerEngine, RagQaAnswerEngine
+from app.qa_context import QaContextBuilder
+from app.qa_deletion import (
+    QaDeletionRepository,
+    QaDeletionService,
+    QaDeletionWorker,
+)
+from app.qa_job_repository import QaJobRepository
+from app.qa_memory import QaMemoryLinker
+from app.qa_migration import QaLegacyMigrationService
+from app.qa_observability import InProcessQaTelemetry
+from app.qa_repository import QaRepository
+from app.qa_service import QaService
+from app.qa_worker import QaWorkerPool
 from app.session import SessionRegistry
 from app.storage import UserStorage
 
@@ -33,11 +47,25 @@ class ApplicationServices:
     import_worker_pool: ImportWorkerPool
     import_service: ImportTaskService
     document_library: DocumentLibraryService
+    qa_repository: QaRepository
+    qa_job_repository: QaJobRepository
+    qa_deletion_repository: QaDeletionRepository
+    qa_legacy_migration: QaLegacyMigrationService
+    qa_telemetry: InProcessQaTelemetry
+    qa_worker_pool: QaWorkerPool
+    qa_deletion_service: QaDeletionService
+    qa_deletion_worker: QaDeletionWorker
+    qa_service: QaService
     _started: bool = field(default=False, init=False, repr=False)
     _lifecycle_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     @classmethod
-    def create(cls, data_root: Path | None = None) -> "ApplicationServices":
+    def create(
+        cls,
+        data_root: Path | None = None,
+        *,
+        qa_answer_engine: QaAnswerEngine | None = None,
+    ) -> "ApplicationServices":
         resolved_data_root = Path(
             data_root
             or os.getenv("PDF_ASSISTANT_DATA_DIR")
@@ -62,10 +90,54 @@ class ApplicationServices:
             import_worker_pool,
         )
         session_registry.runtime_registry.set_import_task_service(import_service)
+        qa_repository = QaRepository(db_path)
+        qa_job_repository = QaJobRepository(db_path)
+        qa_deletion_repository = QaDeletionRepository(db_path)
+        qa_legacy_migration = QaLegacyMigrationService(db_path, storage)
+        qa_telemetry = InProcessQaTelemetry()
+        answer_engine = qa_answer_engine or RagQaAnswerEngine()
+        context_builder = QaContextBuilder(max_input_tokens=6000)
         document_library = DocumentLibraryService(
             session_registry,
             storage,
             import_service,
+            deletion_repository=qa_deletion_repository,
+        )
+        qa_worker_pool = QaWorkerPool(
+            qa_job_repository,
+            qa_repository,
+            session_registry.runtime_registry,
+            answer_engine,
+            context_builder,
+            qa_telemetry,
+            memory_linker=QaMemoryLinker(qa_repository),
+        )
+        qa_deletion_worker = QaDeletionWorker(
+            qa_deletion_repository,
+            session_registry.runtime_registry,
+            document_library,
+            session_registry,
+            legacy_migration=qa_legacy_migration,
+        )
+        qa_deletion_service = QaDeletionService(
+            session_registry,
+            document_library,
+            qa_repository,
+            qa_deletion_repository,
+            qa_deletion_worker,
+        )
+        document_library.deletion_service = qa_deletion_service
+        qa_service = QaService(
+            session_registry,
+            document_library,
+            qa_repository,
+            answer_engine,
+            context_builder,
+            qa_telemetry,
+            job_repository=qa_job_repository,
+            worker_pool=qa_worker_pool,
+            deletion_service=qa_deletion_service,
+            legacy_migration=qa_legacy_migration,
         )
         return cls(
             data_root=resolved_data_root,
@@ -77,21 +149,56 @@ class ApplicationServices:
             import_worker_pool=import_worker_pool,
             import_service=import_service,
             document_library=document_library,
+            qa_repository=qa_repository,
+            qa_job_repository=qa_job_repository,
+            qa_deletion_repository=qa_deletion_repository,
+            qa_legacy_migration=qa_legacy_migration,
+            qa_telemetry=qa_telemetry,
+            qa_worker_pool=qa_worker_pool,
+            qa_deletion_service=qa_deletion_service,
+            qa_deletion_worker=qa_deletion_worker,
+            qa_service=qa_service,
         )
 
     def start(self) -> None:
         with self._lifecycle_lock:
             if self._started:
                 return
-            self.import_worker_pool.start()
+            self.qa_job_repository.recover_expired()
+            self.qa_deletion_repository.recover_expired()
+            self.qa_repository.recover_interrupted_questions()
+            started: list[object] = []
+            try:
+                self.import_worker_pool.start()
+                started.append(self.import_worker_pool)
+                self.qa_worker_pool.start()
+                started.append(self.qa_worker_pool)
+                self.qa_deletion_worker.start()
+                started.append(self.qa_deletion_worker)
+            except Exception:
+                for worker in reversed(started):
+                    worker.stop()
+                raise
             self._started = True
 
     def stop(self) -> None:
         with self._lifecycle_lock:
             if not self._started:
                 return
-            self.import_worker_pool.stop()
+            first_error: Exception | None = None
+            for worker in (
+                self.qa_deletion_worker,
+                self.qa_worker_pool,
+                self.import_worker_pool,
+            ):
+                try:
+                    worker.stop()
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
             self._started = False
+            if first_error is not None:
+                raise first_error
 
 
 _application_services: ApplicationServices | None = None

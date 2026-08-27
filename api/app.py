@@ -20,6 +20,7 @@ from api.errors import (
 from api.routes.auth import router as auth_router
 from api.routes.documents import router as documents_router
 from api.routes.imports import router as imports_router
+from api.routes.qa import router as qa_router
 from app.bootstrap import ApplicationServices, get_application_services
 
 
@@ -80,6 +81,7 @@ def create_api_app(
 
     register_error_handlers(api_app)
     api_app.include_router(auth_router)
+    api_app.include_router(qa_router)
     api_app.include_router(documents_router)
     api_app.include_router(imports_router)
     return api_app

@@ -47,17 +47,19 @@ def error_response(
     *,
     retryable: bool = False,
     field_errors: Mapping[str, str] | None = None,
+    trace_id: str | None = None,
 ) -> JSONResponse:
+    error = {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "field_errors": dict(field_errors or {}),
+    }
+    if trace_id is not None:
+        error["trace_id"] = trace_id
     return JSONResponse(
         status_code=status_code,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "retryable": retryable,
-                "field_errors": dict(field_errors or {}),
-            }
-        },
+        content={"error": error},
     )
 
 

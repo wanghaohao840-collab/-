@@ -83,6 +83,11 @@ class DocumentLibraryService:
 
     def delete_document(self, session_token: str, document_id: str):
         if self.deletion_service is not None:
+            session = self.session_registry.get_session(session_token)
+            if self.import_service.has_active_task_for_document(
+                str(session.user_id), document_id
+            ):
+                raise DocumentImportActiveError()
             deletion = self.deletion_service.request_document(
                 session_token, document_id
             )

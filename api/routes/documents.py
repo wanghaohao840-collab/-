@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Request, status
 
 from api.dependencies import (
     get_csrf_validated_session,
@@ -13,6 +13,7 @@ from api.dependencies import (
 )
 from api.errors import error_response
 from api.schemas.documents import DocumentListResponse, document_response
+from api.schemas.qa import QaDeletionResponse, deletion_response
 from app.document_library import (
     DocumentDeleteFailedError,
     DocumentImportActiveError,
@@ -42,7 +43,11 @@ def list_documents(
     )
 
 
-@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{document_id}",
+    response_model=QaDeletionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def delete_document(
     document_id: UUID,
     request: Request,
@@ -51,9 +56,11 @@ def delete_document(
         DocumentLibraryService,
         Depends(get_document_library_service),
     ],
-) -> Response:
+):
     try:
-        service.delete_document(get_session_token(request), str(document_id))
+        deletion = service.delete_document(
+            get_session_token(request), str(document_id)
+        )
     except DocumentNotFoundError:
         return error_response(
             status.HTTP_404_NOT_FOUND,
@@ -73,4 +80,4 @@ def delete_document(
             "文档删除失败，请重试",
             retryable=True,
         )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return deletion_response(deletion)

@@ -7,6 +7,7 @@ from fastapi import Depends, Header, Request
 from api.config import ApiConfig
 from app.document_library import DocumentLibraryService
 from app.import_service import ImportTaskService
+from app.qa_service import QaService
 from app.session import SessionRegistry, UserSession
 
 
@@ -20,6 +21,10 @@ def get_document_library_service(request: Request) -> DocumentLibraryService:
 
 def get_import_service(request: Request) -> ImportTaskService:
     return request.app.state.services.import_service
+
+
+def get_qa_service(request: Request) -> QaService:
+    return request.app.state.services.qa_service
 
 
 def get_session_token(request: Request) -> str | None:

@@ -516,6 +516,14 @@ class QaDeletionService:
         self.worker_wake.notify()
         return deletion
 
+    def get_deletion(
+        self, session_token: str, deletion_id: str
+    ) -> QaDeletion | None:
+        session = self.session_registry.get_session(session_token)
+        return self.deletion_repository.get_deletion(
+            str(session.user_id), deletion_id
+        )
+
 
 class QaDeletionWorker:
     def __init__(

@@ -28,10 +28,12 @@ def test_health_and_lifespan_start_and_stop_shared_services_once():
 
 def test_api_config_defaults_and_true_only_environment_parsing(monkeypatch):
     monkeypatch.delenv("APP_COOKIE_SECURE", raising=False)
+    monkeypatch.delenv("QA_ROUTE_ENABLED", raising=False)
     assert ApiConfig.from_environment() == ApiConfig(
         cookie_name="zhiyan_session",
         cookie_secure=False,
         cookie_samesite="lax",
+        qa_route_enabled=True,
     )
 
     monkeypatch.setenv("APP_COOKIE_SECURE", "TRUE")
@@ -39,6 +41,11 @@ def test_api_config_defaults_and_true_only_environment_parsing(monkeypatch):
 
     monkeypatch.setenv("APP_COOKIE_SECURE", "1")
     assert ApiConfig.from_environment().cookie_secure is False
+
+    monkeypatch.setenv("QA_ROUTE_ENABLED", "FALSE")
+    assert ApiConfig.from_environment().qa_route_enabled is False
+    monkeypatch.setenv("QA_ROUTE_ENABLED", "0")
+    assert ApiConfig.from_environment().qa_route_enabled is True
 
 
 def test_api_config_is_frozen():

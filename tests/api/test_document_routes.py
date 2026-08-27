@@ -14,6 +14,7 @@ from app.document_library import (
     DocumentNotFoundError,
 )
 from app.session import InvalidCsrfTokenError, InvalidSessionError
+from app.qa_models import QaDeletion
 
 
 COOKIE = "zhiyan_session"
@@ -73,6 +74,20 @@ class FakeDocumentLibrary:
             raise DocumentNotFoundError()
         if self.delete_error is not None:
             raise self.delete_error
+        return QaDeletion(
+            id="cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            user_id="owner",
+            target_type="document",
+            target_id=document_id,
+            status="queued",
+            stage="fenced",
+            affected_conversation_count=2,
+            attempt_count=0,
+            safe_error_code=None,
+            trace_id=None,
+            created_at="2026-08-27T00:00:00Z",
+            updated_at="2026-08-27T00:00:00Z",
+        )
 
 
 @dataclass
@@ -171,7 +186,7 @@ def test_delete_requires_valid_csrf(client, csrf):
     _error(response, 403, "invalid_csrf_token")
 
 
-def test_delete_uses_cookie_token_and_returns_empty_204(client, services):
+def test_delete_uses_cookie_token_and_returns_durable_202(client, services):
     _owner(client)
 
     response = client.delete(
@@ -179,8 +194,20 @@ def test_delete_uses_cookie_token_and_returns_empty_204(client, services):
         headers={"X-CSRF-Token": "owner-csrf"},
     )
 
-    assert response.status_code == 204
-    assert response.content == b""
+    assert response.status_code == 202
+    assert response.json() == {
+        "deletion_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "target_type": "document",
+        "target_id": DOCUMENT_ID,
+        "status": "queued",
+        "stage": "fenced",
+        "affected_conversation_count": 2,
+        "attempt_count": 0,
+        "safe_error_code": None,
+        "trace_id": None,
+        "created_at": "2026-08-27T00:00:00Z",
+        "updated_at": "2026-08-27T00:00:00Z",
+    }
     assert services.document_library.calls == [
         ("delete", "owner-token", DOCUMENT_ID)
     ]

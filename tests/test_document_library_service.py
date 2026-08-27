@@ -473,6 +473,20 @@ def test_delete_missing_and_unowned_document_are_same_not_found(
     assert service_fixture.registry.clear_calls == []
 
 
+def test_durable_delete_rejects_active_import_before_creating_fence(
+    service_fixture,
+) -> None:
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    service_fixture.imports.active_document_id = document_id
+    deletion_service = Mock()
+    service_fixture.service.deletion_service = deletion_service
+
+    with pytest.raises(DocumentImportActiveError):
+        service_fixture.service.delete_document("cookie-token", document_id)
+
+    deletion_service.request_document.assert_not_called()
+
+
 def test_delete_failure_is_typed_safe_and_does_not_clear_selection(
     service_fixture,
 ):

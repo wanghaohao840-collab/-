@@ -34,6 +34,15 @@ def test_create_uses_explicit_absolute_data_root_before_environment(tmp_path, mo
     assert services.document_library.session_registry is services.session_registry
     assert services.document_library.storage is services.storage
     assert services.document_library.import_service is services.import_service
+    assert services.qa_service.repository is services.qa_repository
+    assert services.qa_worker_pool.job_repository is services.qa_job_repository
+    assert services.qa_service.worker_pool is services.qa_worker_pool
+    assert services.qa_service.deletion_service is services.qa_deletion_service
+    assert services.document_library.deletion_service is services.qa_deletion_service
+    assert (
+        services.document_library.deletion_repository
+        is services.qa_deletion_repository
+    )
 
 
 def test_create_uses_environment_data_root_when_not_explicit(tmp_path, monkeypatch):
@@ -60,6 +69,13 @@ def test_start_and_stop_are_idempotent(tmp_path):
     services = ApplicationServices.create(tmp_path / "data")
     services.import_worker_pool.start = start = Mock()
     services.import_worker_pool.stop = stop = Mock()
+    services.qa_job_repository.recover_expired = Mock()
+    services.qa_deletion_repository.recover_expired = Mock()
+    services.qa_repository.recover_interrupted_questions = Mock()
+    services.qa_worker_pool.start = qa_start = Mock()
+    services.qa_worker_pool.stop = qa_stop = Mock()
+    services.qa_deletion_worker.start = deletion_start = Mock()
+    services.qa_deletion_worker.stop = deletion_stop = Mock()
 
     services.start()
     services.start()
@@ -68,12 +84,23 @@ def test_start_and_stop_are_idempotent(tmp_path):
 
     start.assert_called_once_with()
     stop.assert_called_once_with()
+    qa_start.assert_called_once_with()
+    qa_stop.assert_called_once_with()
+    deletion_start.assert_called_once_with()
+    deletion_stop.assert_called_once_with()
 
 
 def test_document_library_is_one_stable_service_without_extra_lifecycle(tmp_path):
     services = ApplicationServices.create(tmp_path / "data")
     start = services.import_worker_pool.start = Mock()
     stop = services.import_worker_pool.stop = Mock()
+    services.qa_job_repository.recover_expired = Mock()
+    services.qa_deletion_repository.recover_expired = Mock()
+    services.qa_repository.recover_interrupted_questions = Mock()
+    services.qa_worker_pool.start = Mock()
+    services.qa_worker_pool.stop = Mock()
+    services.qa_deletion_worker.start = Mock()
+    services.qa_deletion_worker.stop = Mock()
 
     first = services.document_library
     services.start()
@@ -82,6 +109,49 @@ def test_document_library_is_one_stable_service_without_extra_lifecycle(tmp_path
 
     start.assert_called_once_with()
     stop.assert_called_once_with()
+
+
+def test_qa_recovery_and_worker_lifecycle_order_is_stable(tmp_path):
+    services = ApplicationServices.create(tmp_path / "data")
+    calls = []
+    services.qa_job_repository.recover_expired = lambda: calls.append("job.recover")
+    services.qa_deletion_repository.recover_expired = lambda: calls.append(
+        "deletion.recover"
+    )
+    services.qa_repository.recover_interrupted_questions = lambda: calls.append(
+        "questions.recover"
+    )
+    services.import_worker_pool.start = lambda: calls.append("import.start")
+    services.qa_worker_pool.start = lambda: calls.append("qa.start")
+    services.qa_deletion_worker.start = lambda: calls.append("deletion.start")
+    services.qa_deletion_worker.stop = lambda: calls.append("deletion.stop")
+    services.qa_worker_pool.stop = lambda: calls.append("qa.stop")
+    services.import_worker_pool.stop = lambda: calls.append("import.stop")
+
+    services.start()
+    services.stop()
+
+    assert calls == [
+        "job.recover",
+        "deletion.recover",
+        "questions.recover",
+        "import.start",
+        "qa.start",
+        "deletion.start",
+        "deletion.stop",
+        "qa.stop",
+        "import.stop",
+    ]
+
+
+def test_create_accepts_only_explicit_answer_engine_seam(tmp_path):
+    engine = Mock()
+    services = ApplicationServices.create(
+        tmp_path / "data", qa_answer_engine=engine
+    )
+
+    assert services.qa_service.answer_engine is engine
+    assert services.qa_worker_pool.answer_engine is engine
 
 
 def test_concurrent_lifecycle_transitions_call_pool_once(tmp_path):
