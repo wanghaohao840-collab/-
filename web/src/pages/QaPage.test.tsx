@@ -57,4 +57,19 @@ describe("QaPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "永久删除" }));
     expect(fetchMock).toHaveBeenCalledWith(`/api/v1/qa/conversations/${conversation.conversation_id}`, expect.objectContaining({ method: "DELETE" }));
   });
+
+  it("reaches the existing deletion confirmation from the conversation drawer", async () => {
+    renderPage(true, `/qa?conversation=${conversation.conversation_id}`);
+    await screen.findByRole("heading", { name: "智能问答" });
+    await userEvent.click(screen.getByRole("button", { name: "对话" }));
+    await userEvent.click(screen.getByRole("button", { name: "删除当前对话" }));
+    expect(screen.getByRole("dialog", { name: "永久删除对话" })).toHaveTextContent(
+      "消息、引用、摘要和问答记忆",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/v1/qa/conversations/${conversation.conversation_id}`,
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
 });
