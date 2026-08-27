@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-06"
 title: "Build responsive QA workspace"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-05"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -107,10 +107,10 @@ Model the data layer first and test exact URLs/bodies/errors/invalidation. Then 
 
 ## Acceptance criteria
 
-- [ ] Client/hook tests prove exact endpoint, idempotency ID reuse, error trace mapping, polling/cancel and cache invalidation.
-- [ ] Page/component tests cover empty, ask, summary, failure/retry, sources, delete and route-disabled states.
-- [ ] Desktop/tablet/mobile layouts match verified Penpot semantics with accessible focus/targets and no overflow.
-- [ ] Document handoff creates only validated fixed-scope conversations; existing shell/document tests remain passing.
+- [x] Client/hook tests prove exact endpoint, idempotency ID reuse, error trace mapping, polling/cancel and cache invalidation.
+- [x] Page/component tests cover empty, ask, summary, failure/retry, sources, delete and route-disabled states.
+- [x] Desktop/tablet/mobile layouts match verified Penpot semantics with accessible focus/targets and no overflow.
+- [x] Document handoff creates only validated fixed-scope conversations; existing shell/document tests remain passing.
 
 ## Test and verification commands
 
@@ -133,5 +133,12 @@ Stop with a reality-conflict report if packet 05 DTOs differ, Penpot IDs/exports
 
 ## Implementation handoff
 
-Replace this section with packet ID/status, delivered workspace, files/interfaces, acceptance/verification evidence, scope/deviation/risk confirmation and commit.
+Packet `qa-vertical-slice-06` is `done`.
 
+- Delivered the protected real `/qa` workspace, typed QA API/query layer, fixed-scope creation, ask/retry/citations, durable summary polling/cancel, durable delete polling, capability-disabled migration state and the document-library “开始问答” handoff using document IDs only.
+- Added desktop `240px minmax(0,1fr) 320px`, tablet side-drawer and mobile bottom-sheet layouts using the existing semantic tokens. Drawer/dialog focus trapping, `Escape`, focus return, 44px targets, live status and reduced-motion behavior are implemented.
+- Added verified Penpot mappings only for the existing Drawer and `Dialog / md` components; ordinary QA business surfaces were deliberately not assigned fabricated Penpot component identities.
+- Automated evidence: `npm run typecheck`, `npm run lint`, `npm test -- --run` (`14` files, `114` tests), `npm run build`, both design test files (`9` tests), and `git diff --check` pass. No dependency or lockfile changed.
+- Real browser evidence at 1440×1024, 1024×768 and 390×844 found no horizontal overflow. Desktop measured 240px conversation and 320px source columns; tablet hid both fixed panels and opened a focused 360px drawer; mobile used a 390px bottom sheet ending exactly above the 64px navigation. All visible mobile action targets measured at least 44px. Browser testing exposed and led to fixes for a false legacy notice and missing conversation-drawer focus return.
+- Scope confirmation: no backend, dependency, lockfile, token or unrelated route changes. Polling remains isolated behind hooks so a future SSE transport can replace it without changing page state ownership.
+- Implementation commit: `904e3b2` (`feat: build responsive qa workspace`).
