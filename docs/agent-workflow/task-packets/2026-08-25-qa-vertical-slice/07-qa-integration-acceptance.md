@@ -3,7 +3,7 @@ id: "qa-vertical-slice-07"
 title: "Prove QA release readiness"
 status: "ready"
 parallel-safe: false
-depends-on: ["qa-vertical-slice-06", "qa-vertical-slice-06a"]
+depends-on: ["qa-vertical-slice-06", "qa-vertical-slice-06a", "qa-vertical-slice-06b"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
 owner: "unassigned"
 ---

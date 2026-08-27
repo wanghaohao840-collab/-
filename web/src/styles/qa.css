@@ -51,7 +51,7 @@
 .document-row__delete { grid-column: 3; grid-row: 1; }
 
 @media (max-width: 1199px) {
-  .qa-workspace { grid-template-columns: minmax(0, 1fr); }
+  .qa-workspace { grid-template-columns: minmax(0, 1fr); min-height: max(520px, calc(100dvh - var(--topbar-height) - var(--space-8) - var(--space-8) - 80px)); }
   .qa-workspace > .qa-conversations, .qa-workspace > .qa-sources { display: none; }
   .qa-conversation-trigger { display: inline-flex; }
   .qa-overlay__panel--conversations { width: min(360px, 100%); margin-right: auto; border-radius: 0 var(--radius-lg) var(--radius-lg) 0; align-self: stretch; max-height: none; }
