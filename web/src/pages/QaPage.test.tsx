@@ -1,0 +1,60 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthProvider } from "../auth/AuthProvider";
+import { QaPage } from "./QaPage";
+
+const fetchMock = vi.fn<typeof fetch>();
+const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+const conversation = { conversation_id: "11111111-1111-4111-8111-111111111111", title: "研究对话", origin: "product", rolling_summary: "", summary_version: 0, created_at: "now", updated_at: "now", last_message_at: "now", documents: [{ document_id: "doc-1", document_name: "研究.md", position: 0 }] };
+
+function renderPage(enabled: boolean, path = "/qa") {
+  fetchMock.mockImplementation((input, init) => {
+    const url = String(input);
+    if (url === "/api/v1/auth/session") return Promise.resolve(response({ username: "reader", csrf_token: "csrf" }));
+    if (url === "/api/v1/qa/capabilities") return Promise.resolve(response({ enabled }));
+    if (url === "/api/v1/documents") return Promise.resolve(response({ items: [{ document_id: "doc-1", name: "研究.md", file_suffix: ".md", size_bytes: 1, loaded_at: "now", status: "ready" }] }));
+    if (url === "/api/v1/qa/conversations?limit=100") return Promise.resolve(response({ items: [conversation], next_cursor: null }));
+    if (url === `/api/v1/qa/conversations/${conversation.conversation_id}` && (init?.method ?? "GET") === "GET") return Promise.resolve(response(conversation));
+    if (url === `/api/v1/qa/conversations/${conversation.conversation_id}` && init?.method === "DELETE") return Promise.resolve(response({ deletion_id: "deletion-1", target_type: "conversation", target_id: conversation.conversation_id, status: "queued", stage: "queued", affected_conversation_count: 1, attempt_count: 0, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "queued" }, 202));
+    if (url.includes("/messages?limit=200")) return Promise.resolve(response({ items: [], next_cursor: null }));
+    if (url.endsWith("/messages") && init?.method === "POST") return Promise.resolve(response({ message_id: "message-1", conversation_id: conversation.conversation_id, turn_id: "turn-1", role: "assistant", status: "pending", mode: "auto", content: "", source_state: "none", retry_of_message_id: null, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "now", completed_at: null, sources: [] }, 202));
+    if (url.endsWith("/summary-jobs") && init?.method === "POST") return Promise.resolve(response({ job_id: "job-1", conversation_id: conversation.conversation_id, input_message_id: "input-1", assistant_message_id: "assistant-1", status: "running", stage: "summarizing", progress: 40, cancel_requested_at: null, attempt_count: 1, max_attempts: 3, safe_error_code: null, trace_id: null, created_at: "now", started_at: "now", finished_at: null, updated_at: "running" }, 202));
+    if (url === "/api/v1/qa/jobs/job-1") return Promise.resolve(response({ job_id: "job-1", conversation_id: conversation.conversation_id, input_message_id: "input-1", assistant_message_id: "assistant-1", status: "completed", stage: "completed", progress: 100, cancel_requested_at: null, attempt_count: 1, max_attempts: 3, safe_error_code: null, trace_id: null, created_at: "now", started_at: "now", finished_at: "now", updated_at: "done" }));
+    if (url === "/api/v1/qa/deletions/deletion-1") return Promise.resolve(response({ deletion_id: "deletion-1", target_type: "conversation", target_id: conversation.conversation_id, status: "completed", stage: "completed", affected_conversation_count: 1, attempt_count: 1, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "done" }));
+    return Promise.reject(new Error(`Unexpected request ${url}`));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><AuthProvider><QaPage /></AuthProvider></MemoryRouter></QueryClientProvider>);
+}
+
+describe("QaPage", () => {
+  afterEach(() => { vi.unstubAllGlobals(); fetchMock.mockReset(); document.body.style.overflow = ""; });
+  it("shows an explicit migration state when the route is disabled", async () => {
+    renderPage(false);
+    expect(await screen.findByRole("heading", { name: "智能问答正在迁移" })).toBeVisible();
+    expect(screen.getByText(/历史数据不会被修改/)).toBeVisible();
+  });
+  it("submits a real question inside a fixed-scope conversation", async () => {
+    renderPage(true, `/qa?conversation=${conversation.conversation_id}`);
+    expect(await screen.findByRole("heading", { name: "智能问答" })).toBeVisible();
+    await userEvent.type(screen.getByLabelText("向这些文档提问"), "研究结论是什么？");
+    await userEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/messages"), expect.objectContaining({ method: "POST", body: expect.stringContaining("研究结论是什么？") }));
+  });
+
+  it("renders durable summary completion and deletion confirmation", async () => {
+    renderPage(true, `/qa?conversation=${conversation.conversation_id}`);
+    await screen.findByRole("heading", { name: "智能问答" });
+    await userEvent.click(screen.getByRole("button", { name: "生成摘要" }));
+    expect(await screen.findByText(/学习摘要 · 已完成/)).toBeVisible();
+
+    await userEvent.click(screen.getByRole("button", { name: "删除对话" }));
+    expect(screen.getByRole("dialog", { name: "永久删除对话" })).toHaveTextContent("消息、引用、摘要和问答记忆");
+    await userEvent.click(screen.getByRole("button", { name: "永久删除" }));
+    expect(fetchMock).toHaveBeenCalledWith(`/api/v1/qa/conversations/${conversation.conversation_id}`, expect.objectContaining({ method: "DELETE" }));
+  });
+});

@@ -81,6 +81,22 @@
         "state": ["idle", "drag-active", "invalid"]
       },
       "verified": true
+    },
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-70750e4567f4",
+      "penpotName": "Drawer",
+      "codeFile": "web/src/components/QaWorkspace/QaDrawer.tsx",
+      "exportName": "QaDrawer",
+      "variants": {},
+      "verified": true
+    },
+    {
+      "penpotId": "9b1e7a6b-703c-8060-8008-7074ad832f95",
+      "penpotName": "Dialog / md",
+      "codeFile": "web/src/components/QaWorkspace/QaDeleteDialog.tsx",
+      "exportName": "QaDeleteDialog",
+      "variants": {},
+      "verified": true
     }
   ]
 }

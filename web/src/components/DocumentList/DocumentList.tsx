@@ -4,6 +4,7 @@ type DocumentRowProps = {
   deleting: boolean;
   document: Document;
   onDelete: (document: Document, trigger: HTMLButtonElement) => void;
+  onAsk: (document: Document) => void;
 };
 
 function formatSize(sizeBytes: number): string {
@@ -28,7 +29,7 @@ function formatDate(value: string): string | undefined {
   }).format(date);
 }
 
-export function DocumentRow({ deleting, document, onDelete }: DocumentRowProps) {
+export function DocumentRow({ deleting, document, onDelete, onAsk }: DocumentRowProps) {
   const metadata = [
     document.file_suffix.replace(/^\./, "").toUpperCase(),
     document.size_bytes === null ? undefined : formatSize(document.size_bytes),
@@ -51,6 +52,7 @@ export function DocumentRow({ deleting, document, onDelete }: DocumentRowProps) 
         </span>
       </span>
       <span className="document-row__status">{deleting ? "正在删除" : "已导入"}</span>
+      <button type="button" className="document-row__ask document-action-target" disabled={deleting} onClick={() => onAsk(document)}>开始问答</button>
       <button
         type="button"
         className="document-row__delete document-action-target"
@@ -69,12 +71,14 @@ type DocumentListProps = {
   deletingDocumentId?: string;
   documents: Document[];
   onDelete: (document: Document, trigger: HTMLButtonElement) => void;
+  onAsk: (document: Document) => void;
 };
 
 export function DocumentList({
   deletingDocumentId,
   documents,
   onDelete,
+  onAsk,
 }: DocumentListProps) {
   return (
     <section className="document-list-panel" aria-labelledby="document-list-title">
@@ -87,6 +91,7 @@ export function DocumentList({
               document={document}
               deleting={document.document_id === deletingDocumentId}
               onDelete={onDelete}
+              onAsk={onAsk}
             />
           ))}
         </ul>

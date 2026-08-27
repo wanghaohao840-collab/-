@@ -96,6 +96,12 @@ function installFetchStub({
     if (url === "/api/v1/auth/session") {
       return Promise.resolve(jsonResponse({ username: "reader", csrf_token: "csrf" }));
     }
+    if (url === "/api/v1/qa/capabilities") {
+      return Promise.resolve(jsonResponse({ enabled: true }));
+    }
+    if (url === "/api/v1/qa/conversations?limit=100") {
+      return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+    }
     if (url === "/api/v1/documents" && (init?.method ?? "GET") === "GET") {
       return documentsResponse?.() ?? Promise.resolve(jsonResponse(documents));
     }
@@ -145,7 +151,7 @@ describe("DocumentsPage", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "文档库" })).toBeVisible();
     expect(screen.queryByText("该能力正在迁移到新版界面")).not.toBeInTheDocument();
     unmount();
-    for (const item of navigationItems.filter(({ path }) => path !== "/documents")) {
+    for (const item of navigationItems.filter(({ path }) => path !== "/documents" && path !== "/qa")) {
       const migration = renderApp(item.path);
       expect(
         await screen.findByRole("heading", { level: 1, name: item.heading }),
@@ -166,6 +172,7 @@ describe("DocumentsPage", () => {
     expect(await screen.findByRole("status", { name: "正在加载文档库" })).toBeVisible();
     expect(screen.queryByText("还没有文档")).not.toBeInTheDocument();
 
+    await waitFor(() => expect(resolveDocuments).toBeTypeOf("function"));
     resolveDocuments(jsonResponse({ items: [] }));
     const emptyHeading = await screen.findByRole("heading", {
       level: 2,
@@ -410,5 +417,14 @@ describe("DocumentsPage", () => {
     } finally {
       window.removeEventListener("unhandledrejection", record);
     }
+  });
+
+  it("hands off only the owned document ID to the real QA workspace", async () => {
+    installFetchStub({ documents: { items: [documentItem("doc-1", "notes.md")] } });
+    renderApp();
+    await userEvent.click(await screen.findByRole("button", { name: "开始问答" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "智能问答" })).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "新建对话" })).toBeVisible();
+    expect(screen.getByRole("checkbox", { name: "notes.md" })).toBeChecked();
   });
 });

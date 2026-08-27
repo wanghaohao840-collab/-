@@ -8,6 +8,7 @@ import { AuthProvider } from "./auth/AuthProvider";
 import "./styles/tokens.css";
 import "./styles/global.css";
 import "./styles/documents.css";
+import "./styles/qa.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

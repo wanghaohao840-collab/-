@@ -1,4 +1,5 @@
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { ApiError } from "../api/client";
 import { Button } from "../components/Button/Button";
@@ -167,6 +168,7 @@ function documentBodyOverflow(): string {
 }
 
 export function DocumentsPage() {
+  const navigate = useNavigate();
   const documentsQuery = useDocumentsQuery();
   const importsQuery = useImportsQuery();
   const mutations = useDocumentMutations();
@@ -304,6 +306,7 @@ export function DocumentsPage() {
                   : undefined
               }
               onDelete={openDelete}
+              onAsk={(document) => navigate(`/qa?documents=${encodeURIComponent(document.document_id)}`)}
             />
           )}
         </>

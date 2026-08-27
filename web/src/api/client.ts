@@ -4,6 +4,7 @@ export type ApiErrorBody = {
     message: string;
     retryable: boolean;
     field_errors: Record<string, string>;
+    trace_id?: string | null;
   };
 };
 
@@ -13,6 +14,8 @@ export class ApiError extends Error {
     public readonly code: string,
     message: string,
     public readonly fieldErrors: Record<string, string> = {},
+    public readonly traceId: string | null = null,
+    public readonly retryable = false,
   ) {
     super(message);
     this.name = "ApiError";
@@ -86,6 +89,8 @@ export async function apiRequest<T>(
         body.error.code,
         body.error.message,
         body.error.field_errors,
+        body.error.trace_id ?? null,
+        body.error.retryable,
       );
     }
 

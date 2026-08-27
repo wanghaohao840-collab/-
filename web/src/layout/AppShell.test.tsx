@@ -72,6 +72,15 @@ function mockAuthenticatedSession() {
     if (input === "/api/v1/auth/logout") {
       return Promise.resolve(new Response(null, { status: 204 }));
     }
+    if (input === "/api/v1/qa/capabilities") {
+      return Promise.resolve(jsonResponse({ enabled: true }));
+    }
+    if (input === "/api/v1/qa/conversations?limit=100") {
+      return Promise.resolve(jsonResponse({ items: [], next_cursor: null }));
+    }
+    if (input === "/api/v1/documents") {
+      return Promise.resolve(jsonResponse({ items: [] }));
+    }
     return Promise.reject(new Error(`Unexpected request: ${String(input)}`));
   });
   vi.stubGlobal("fetch", fetchMock);
