@@ -131,4 +131,4 @@ Stop if implementation requires a new API, duplicated dialog/mutation state, hea
 - Residual risks/follow-ups:
   - Packet 07 must exercise this entry through real browsers at tablet/mobile widths.
 - Commit:
-  - `pending`
+  - `e8f1d2d`
