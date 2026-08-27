@@ -127,4 +127,4 @@ Stop if the fix requires JavaScript scroll mutation, global shell changes or a d
 - Residual risks/follow-ups:
   - Packet 07 owns the final three-viewport run and baselines.
 - Commit:
-  - `pending`
+  - `10057c6`
