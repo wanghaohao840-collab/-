@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-04"
 title: "Add durable QA operations"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-03"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -109,11 +109,11 @@ Follow `ImportWorkerPool` lifecycle. Keep model/RAG/Memory/file operations outsi
 
 ## Acceptance criteria
 
-- [ ] Summary jobs survive restart, reclaim expired leases, cancel safely and do not duplicate messages.
-- [ ] Memory sync is deterministic, leased, retryable and safe against deletion/lease races.
-- [ ] Scoped deletion removes exactly related QA/Memory/RAG/file/history/legacy state and never resurrects late work.
-- [ ] Migration reruns are idempotent; Gradio/report use SQLite and produce no new flat question writes.
-- [ ] Deprecated direct-Python summary compatibility remains passing and explicitly unused by product handlers.
+- [x] Summary jobs survive restart, reclaim expired leases, cancel safely and do not duplicate messages.
+- [x] Memory sync is deterministic, leased, retryable and safe against deletion/lease races.
+- [x] Scoped deletion removes exactly related QA/Memory/RAG/file/history/legacy state and never resurrects late work.
+- [x] Migration reruns are idempotent; Gradio/report use SQLite and produce no new flat question writes.
+- [x] Deprecated direct-Python summary compatibility remains passing and explicitly unused by product handlers.
 
 ## Test and verification commands
 
@@ -130,4 +130,63 @@ Stop with a reality-conflict report if a dependency is incomplete, exact deletio
 
 ## Implementation handoff
 
-Replace this section with the workflow-required packet ID/status, delivered operations, changed files/interfaces, acceptance/verification evidence, scope confirmation, deviations, residual risks and commit.
+**Packet:** `qa-vertical-slice-04` — `done`
+
+**Delivered result:** Added restart-safe summary execution, nonblocking rolling
+context refresh, deterministic leased QA Memory linking, exact episodic removal,
+and staged conversation/document deletion fences. Added per-user digest/version
+legacy question migration, SQLite report projections, and switched Gradio QA,
+summary, statistics and report paths to `QaService`. Privacy deletion also
+scrubs the non-authoritative active legacy JSON and owned rollback copies.
+
+**Files and interfaces:**
+
+- `app/qa_worker.py` owns bounded summary, rolling-summary and Memory-sync work
+  with background runtime leases and conditional terminal writes.
+- `app/qa_memory.py` creates one deterministic `qa-<uuid5>` episodic record and
+  compensates any lost lease/deletion race.
+- `app/qa_deletion.py` provides user-scoped fence repository/service/worker
+  APIs, retryable stages, exact cleanup payloads and idempotent lifecycle.
+- `app/qa_migration.py` provides `QaLegacyMigrationService`, canonical digest
+  ledger imports, truthful single-turn legacy conversations and privacy scrub.
+- QA repositories now expose deletion-aware reads/writes, leased Memory sync,
+  atomic summary answer/job commits and `QaReportTurn` projections.
+- `DocumentLibraryService` exposes background-safe coordinated deletion and
+  can hide fenced documents immediately.
+- exact Memory removal is public through `MemoryManager`/`EpisodicMemory`.
+- Gradio product handlers consume `QaService`; deprecated direct-Python
+  Assistant QA/summary compatibility remains available for one release only.
+
+**Acceptance evidence:**
+
+- Summary/rolling increment: `24 passed`.
+- Memory lease, exact cleanup and worker increment: `21 passed`.
+- Deletion/service/repository regression: `75 passed`.
+- Migration/report/Gradio focused regression: `65 passed`.
+- Exact final packet command: `264 passed in 305.32s`.
+- Changed Python modules compile successfully; `git diff --check` passes with
+  only Windows line-ending normalization warnings.
+
+**Scope confirmation:** No HTTP route, React UI, distributed queue, alternate
+RAG stack or environment-selectable fake engine was added. Model, Memory,
+RAG and file work stays outside database transactions; every claim/fence/read
+is user-scoped, and persisted operational failures contain only safe codes and
+opaque trace IDs.
+
+**Deviations:** Direct-Python `PDFLearningAssistant.ask()` retains its historical
+flat-JSON write as the explicitly approved one-release compatibility surface.
+The product service and Gradio paths bypass it and tests prove they use the QA
+repository exactly once. Legacy records without a real document ID or an aware
+timestamp are counted/skipped rather than receiving fabricated identity.
+
+**Residual risks:** Packet 05 must compose these services exactly once, inject
+the deletion/migration dependencies into the document library and workers, and
+own startup/shutdown ordering. The local SQLite lease model intentionally
+remains replaceable by a later distributed queue/outbox without changing the
+public service/API contracts.
+
+**Implementation commits:**
+
+- `87a9026` — `feat: add durable QA summaries`
+- `7c83b6c` — `feat: add safe QA cascade deletion`
+- `9791035` — `feat: migrate legacy QA history`
