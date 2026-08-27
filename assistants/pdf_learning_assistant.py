@@ -681,7 +681,7 @@ class PDFLearningAssistant:
 
         return "\n".join(lines)
 
-    def get_stats(self) -> str:
+    def get_stats(self, qa_turns=None) -> str:
         """查看学习统计"""
 
         memory_summary = self.memory_tool.execute("summary")
@@ -694,13 +694,13 @@ class PDFLearningAssistant:
             f"- 当前文档: {self.current_document or '暂无'}\n"
             f"- 当前文档ID: {self.current_document_id or '暂无'}\n"
             f"- 已导入文档数: {self.stats['documents_loaded']}\n"
-            f"- 提问次数: {self.stats['questions_asked']}\n"
+            f"- 提问次数: {len(qa_turns) if qa_turns is not None else self.stats['questions_asked']}\n"
             f"- 学习笔记数: {self.stats['notes_added']}\n\n"
             f"{memory_summary}\n\n"
             f"{rag_stats}"
         )
 
-    def generate_report(self) -> str:
+    def generate_report(self, qa_turns=None) -> str:
         """生成学习报告"""
 
         self._load_latest_history()
@@ -708,7 +708,11 @@ class PDFLearningAssistant:
         rag_stats = self.rag_tool.execute("stats")
 
         documents = self.history.get("documents", [])
-        questions = self.history.get("questions", [])
+        questions = (
+            self.history.get("questions", [])
+            if qa_turns is None
+            else list(qa_turns)
+        )
         notes = self.history.get("notes", [])
 
         recent_documents = documents[-5:]
@@ -724,7 +728,8 @@ class PDFLearningAssistant:
 
         qa_text = "\n\n".join(
             [
-                f"{i + 1}. 问题：{item.get('question')}\n回答：{str(item.get('answer'))[:300]}..."
+                f"{i + 1}. 问题：{getattr(item, 'question', None) if qa_turns is not None else item.get('question')}\n"
+                f"回答：{str(getattr(item, 'answer', '') if qa_turns is not None else item.get('answer'))[:300]}..."
                 for i, item in enumerate(recent_questions)
             ]
         ) or "暂无问答记录"
@@ -746,7 +751,6 @@ class PDFLearningAssistant:
     - 历史导入文档数: {len(documents)}
     - 历史提问次数: {len(questions)}
     - 历史学习笔记数: {len(notes)}
-    - 历史文件路径: {self.history_path}
 
     二、最近导入的文档
     {doc_text}
@@ -1016,7 +1020,7 @@ class PDFLearningAssistant:
             )
         return result
 
-    def export_report_markdown(self) -> str:
+    def export_report_markdown(self, qa_turns=None) -> str:
         """导出学习报告为 Markdown 文件"""
 
         from pathlib import Path
@@ -1028,7 +1032,7 @@ class PDFLearningAssistant:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         file_path = report_dir / f"learning_report_{self.user_id}_{timestamp}.md"
 
-        report = self.generate_report()
+        report = self.generate_report(qa_turns)
         if self.report_service is not None:
             with self._write_lock:
                 record = self.report_service.create_markdown_snapshot(
@@ -1038,7 +1042,9 @@ class PDFLearningAssistant:
         file_path.write_text(report, encoding="utf-8")
         return str(file_path)
 
-    def export_report_docx(self, report_id: Optional[str] = None) -> str:
+    def export_report_docx(
+        self, report_id: Optional[str] = None, qa_turns=None
+    ) -> str:
         """导出学习报告为格式更美观的 Word 文件"""
 
         from pathlib import Path
@@ -1057,7 +1063,7 @@ class PDFLearningAssistant:
 
         if self.report_service is not None:
             if report_id is None:
-                report = self.generate_report()
+                report = self.generate_report(qa_turns)
                 with self._write_lock:
                     record = self.report_service.create_markdown_snapshot(
                         self.user_id, "Learning report", report
@@ -1069,7 +1075,7 @@ class PDFLearningAssistant:
             if file_path.exists():
                 return str(file_path)
         else:
-            report = self.generate_report()
+            report = self.generate_report(qa_turns)
 
         doc = Document()
 

@@ -236,6 +236,15 @@ on qa_deletion_fences(status, lease_expires_at, created_at, id);
 create index if not exists ix_qa_deletion_target
 on qa_deletion_fences(user_id, target_type, target_id, status);
 
+create table if not exists qa_legacy_imports (
+    user_id text primary key references users(id) on delete cascade,
+    migration_version integer not null,
+    source_digest text not null,
+    imported_count integer not null,
+    skipped_count integer not null,
+    completed_at text not null
+);
+
 create table if not exists data_migrations (
     id integer primary key autoincrement,
     migration_key text not null unique,

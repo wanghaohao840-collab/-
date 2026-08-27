@@ -147,6 +147,25 @@ def test_create_conversation_preserves_verified_scope_and_is_user_scoped(
         service.create_conversation(TOKEN, ("other-doc",))
 
 
+def test_legacy_gradio_submission_uses_shared_qa_domain_once(
+    service_parts,
+) -> None:
+    service = make_service(service_parts)
+    conversation = service.create_legacy_single_turn_conversation(
+        TOKEN, ["一.pdf | doc-1"]
+    )
+    message = service.ask(
+        TOKEN, conversation.id, "问题", "joint", "gradio-request"
+    )
+
+    assert conversation.conversation.origin == "legacy_gradio"
+    assert message.content == "回答"
+    report_turns = service.report_turns(TOKEN)
+    assert len(report_turns) == 1
+    assert report_turns[0].question == "问题"
+    assert report_turns[0].answer == "回答"
+
+
 def test_duplicate_request_calls_engine_once_and_returns_persisted_answer(
     service_parts,
 ) -> None:

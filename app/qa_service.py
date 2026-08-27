@@ -23,6 +23,7 @@ from app.qa_models import (
 )
 from app.qa_observability import QaTelemetry
 from app.qa_repository import QaRepository
+from assistants.document_selection import build_document_scope
 
 
 RETRYABLE_ERROR_CODES = frozenset(
@@ -78,6 +79,7 @@ class QaService:
         job_repository=None,
         worker_pool=None,
         deletion_service=None,
+        legacy_migration=None,
     ) -> None:
         self.session_registry = session_registry
         self.document_library = document_library
@@ -88,6 +90,7 @@ class QaService:
         self.job_repository = job_repository
         self.worker_pool = worker_pool
         self.deletion_service = deletion_service
+        self.legacy_migration = legacy_migration
 
     def create_conversation(
         self,
@@ -97,6 +100,7 @@ class QaService:
         origin: str = "product",
     ) -> QaConversationAggregate:
         session = self.session_registry.get_session(session_token)
+        self._ensure_migrated(session)
         available = {
             item.document_id: item
             for item in self.document_library.list_documents(session_token)
@@ -118,6 +122,16 @@ class QaService:
             str(session.user_id), tuple(candidates), origin=origin
         )
 
+    def create_legacy_single_turn_conversation(
+        self, session_token: str, selected_documents
+    ) -> QaConversationAggregate:
+        scope = build_document_scope(selected_documents)
+        return self.create_conversation(
+            session_token,
+            scope.document_ids,
+            origin="legacy_gradio",
+        )
+
     def list_conversations(
         self,
         session_token: str,
@@ -126,6 +140,7 @@ class QaService:
         limit: int = 20,
     ) -> QaConversationPage:
         session = self.session_registry.get_session(session_token)
+        self._ensure_migrated(session)
         return self.repository.list_conversations(
             str(session.user_id), cursor=cursor, limit=limit
         )
@@ -153,6 +168,17 @@ class QaService:
         self._require_conversation(str(session.user_id), conversation_id)
         return self.repository.list_messages(
             str(session.user_id), conversation_id, cursor=cursor, limit=limit
+        )
+
+    def get_message(self, session_token: str, message_id: str) -> QaMessage:
+        session = self.session_registry.get_session(session_token)
+        return self._require_message(str(session.user_id), message_id)
+
+    def report_turns(self, session_token: str):
+        session = self.session_registry.get_session(session_token)
+        self._ensure_migrated(session)
+        return self.repository.list_completed_turns_for_report(
+            str(session.user_id)
         )
 
     def ask(
@@ -425,6 +451,12 @@ class QaService:
         if message is None:
             raise QaNotFoundError(message_id)
         return message
+
+    def _ensure_migrated(self, session) -> None:
+        if self.legacy_migration is not None:
+            self.legacy_migration.ensure_user_migrated(
+                str(session.user_id), session.runtime.history
+            )
 
     @staticmethod
     def _safe_engine_failure(error: Exception) -> tuple[str, bool]:

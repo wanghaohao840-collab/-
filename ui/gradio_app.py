@@ -2,6 +2,7 @@ import json
 import inspect
 import sys
 import re
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
@@ -88,6 +89,12 @@ def _current_import_service():
     if bindings is not None:
         return bindings.import_service
     return import_service
+
+
+def _current_qa_service():
+    bindings = _handler_bindings.get()
+    active_services = bindings.services if bindings is not None else services
+    return active_services.qa_service
 
 
 def _current_legacy_migration():
@@ -714,21 +721,26 @@ def _legacy_search_pdf_unused(query, selected_pdf=None):
 def ask_pdf(session_token, question, selected_pdf=None, qa_mode="auto"):
     """Document QA for one or more selected documents."""
 
-    assistant = _require_assistant(session_token)
+    _require_assistant(session_token)
 
     if not question or not question.strip():
         return "❌ 请输入问题"
 
     try:
-        return assistant.ask(
-            question,
-            limit=5,
-            selected_documents=selected_pdf,
-            mode=qa_mode or "auto",
-            structured_output=(qa_mode == "compare"),
+        qa_service = _current_qa_service()
+        conversation = qa_service.create_legacy_single_turn_conversation(
+            session_token, selected_pdf or []
         )
-    except Exception as e:
-        return f"❌ 文档问答失败: {e}"
+        message = qa_service.ask(
+            session_token,
+            conversation.id,
+            question,
+            qa_mode or "auto",
+            str(uuid.uuid4()),
+        )
+        return message.content
+    except Exception:
+        return "❌ 文档问答失败，请稍后重试"
 
 
 def _format_answer_sources(sources):
@@ -736,81 +748,119 @@ def _format_answer_sources(sources):
         return "暂无可定位来源"
     grouped = {}
     for source in sources:
-        document_id = source.get("document_id") or "unknown"
+        document_id = _source_value(source, "document_id") or "unknown"
         grouped.setdefault(document_id, []).append(source)
     lines = []
     for document_id, items in grouped.items():
         lines.append(f"## {document_id}")
         for item in items:
-            lines.append(item.get("reference") or f"[{item.get('citation_id', '')}]")
-            if item.get("file_name"):
-                lines.append(f"文件: {item['file_name']}")
-            if item.get("excerpt"):
-                lines.append(f"原文片段: {item['excerpt']}")
+            lines.append(
+                _source_value(item, "reference")
+                or f"[{_source_value(item, 'citation_id') or ''}]"
+            )
+            file_name = _source_value(item, "file_name") or _source_value(
+                item, "document_name"
+            )
+            if file_name:
+                lines.append(f"文件: {file_name}")
+            excerpt = _source_value(item, "excerpt")
+            if excerpt:
+                lines.append(f"原文片段: {excerpt}")
             lines.append("")
     return "\n".join(lines).strip()
 
 
+def _source_value(source, name):
+    if isinstance(source, dict):
+        return source.get(name)
+    return getattr(source, name, None)
+
+
 def ask_pdf_with_sources(session_token, question, selected_pdf=None, qa_mode="auto"):
-    answer = ask_pdf(session_token, question, selected_pdf, qa_mode)
+    _require_assistant(session_token)
+    if not question or not question.strip():
+        return "❌ 请输入问题", "暂无可定位来源"
     try:
-        assistant = _require_assistant(session_token)
-        data = dict(getattr(assistant.rag_tool, "_last_action_data", {}) or {})
-        return answer, _format_answer_sources(data.get("sources") or [])
+        qa_service = _current_qa_service()
+        conversation = qa_service.create_legacy_single_turn_conversation(
+            session_token, selected_pdf or []
+        )
+        message = qa_service.ask(
+            session_token,
+            conversation.id,
+            question,
+            qa_mode or "auto",
+            str(uuid.uuid4()),
+        )
+        return message.content, _format_answer_sources(message.sources)
     except Exception:
-        return answer, "暂无可定位来源"
+        return "❌ 文档问答失败，请稍后重试", "暂无可定位来源"
 
 
 def _format_summary_task(task):
-    status = task.get("status", "unknown")
-    completed = task.get("completed", 0)
-    total = task.get("total", 0)
-    stage = task.get("stage", "")
+    status = _source_value(task, "status") or "unknown"
+    completed = _source_value(task, "completed")
+    if completed is None:
+        completed = _source_value(task, "progress") or 0
+    total = _source_value(task, "total")
+    if total is None:
+        total = 100
+    stage = _source_value(task, "stage") or ""
     lines = [
         f"任务状态: {status}",
         f"进度: {completed}/{total}",
         f"阶段: {stage}",
     ]
-    if task.get("current_document_id"):
-        lines.append(f"当前文档: {task['current_document_id']}")
-    if task.get("error"):
-        lines.append(f"错误: {task['error']}")
-    if task.get("result"):
-        lines.extend(["", task["result"]])
+    current_document_id = _source_value(task, "current_document_id")
+    if current_document_id:
+        lines.append(f"当前文档: {current_document_id}")
+    error = _source_value(task, "error") or _source_value(
+        task, "safe_error_code"
+    )
+    if error:
+        lines.append(f"错误: {error}")
+    result = _source_value(task, "result")
+    if result:
+        lines.extend(["", result])
     return "\n".join(lines)
 
 
 def start_summary_pdf(session_token, question, selected_pdf=None):
-    assistant = _require_assistant(session_token)
+    _require_assistant(session_token)
     try:
-        task = assistant.start_summary_task(
-            question,
-            selected_documents=selected_pdf or [],
-            limit=5,
+        qa_service = _current_qa_service()
+        conversation = qa_service.create_legacy_single_turn_conversation(
+            session_token, selected_pdf or []
         )
-        return task["task_id"], _format_summary_task(task)
-    except Exception as error:
-        return "", f"后台总结启动失败: {error}"
+        task = qa_service.start_summary(
+            session_token,
+            conversation.id,
+            question,
+            str(uuid.uuid4()),
+        )
+        return task.id, _format_summary_task(task)
+    except Exception:
+        return "", "后台总结启动失败，请稍后重试"
 
 
 def poll_summary_pdf(session_token, task_id):
-    assistant = _require_assistant(session_token)
+    _require_assistant(session_token)
     if not task_id:
         return "当前没有后台总结任务"
     try:
-        return _format_summary_task(assistant.get_summary_task(task_id))
-    except Exception as error:
-        return f"查询总结任务失败: {error}"
+        return _format_summary_task(_current_qa_service().get_job(session_token, task_id))
+    except Exception:
+        return "查询总结任务失败，请稍后重试"
 
 
 def cancel_summary_pdf(session_token, task_id):
-    assistant = _require_assistant(session_token)
+    _require_assistant(session_token)
     if not task_id:
         return "当前没有可取消的后台总结任务"
     try:
-        return _format_summary_task(assistant.cancel_summary_task(task_id))
-    except Exception as error:
-        return f"取消总结任务失败: {error}"
+        return _format_summary_task(_current_qa_service().cancel_job(session_token, task_id))
+    except Exception:
+        return "取消总结任务失败，请稍后重试"
 
 
 def start_summary_pdf_auto(session_token, question, selected_pdf=None):
@@ -819,15 +869,15 @@ def start_summary_pdf_auto(session_token, question, selected_pdf=None):
 
 
 def poll_summary_pdf_auto(session_token, task_id):
-    assistant = _require_assistant(session_token)
+    _require_assistant(session_token)
     if not task_id:
         return "当前没有后台总结任务", gr.update(active=False)
     try:
-        task = assistant.get_summary_task(task_id)
-        active = task.get("status") not in {"completed", "failed", "cancelled"}
+        task = _current_qa_service().get_job(session_token, task_id)
+        active = _source_value(task, "status") not in {"completed", "failed", "cancelled"}
         return _format_summary_task(task), gr.update(active=active)
-    except Exception as error:
-        return f"查询总结任务失败: {error}", gr.update(active=False)
+    except Exception:
+        return "查询总结任务失败，请稍后重试", gr.update(active=False)
 
 
 def cancel_summary_pdf_auto(session_token, task_id):
@@ -932,12 +982,14 @@ def recall_memory(session_token, query):
 
 def show_stats(session_token):
     assistant = _require_assistant(session_token)
-    return assistant.get_stats()
+    return assistant.get_stats(_current_qa_service().report_turns(session_token))
 
 
 def generate_report(session_token):
     assistant = _require_assistant(session_token)
-    return assistant.generate_report()
+    return assistant.generate_report(
+        _current_qa_service().report_turns(session_token)
+    )
 
 def _report_id(selected):
     if not selected:
@@ -967,12 +1019,18 @@ def download_report_markdown(session_token, selected):
 
 def export_report_docx(session_token, selected=None):
     assistant = _require_assistant(session_token)
-    path = assistant.export_report_docx(_report_id(selected) if selected else None)
+    qa_turns = None if selected else _current_qa_service().report_turns(session_token)
+    path = assistant.export_report_docx(
+        _report_id(selected) if selected else None,
+        qa_turns,
+    )
     return path
 
 def export_report_markdown(session_token):
     assistant = _require_assistant(session_token)
-    path = assistant.export_report_markdown()
+    path = assistant.export_report_markdown(
+        _current_qa_service().report_turns(session_token)
+    )
     return path
 
 

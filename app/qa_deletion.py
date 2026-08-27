@@ -525,6 +525,7 @@ class QaDeletionWorker:
         document_library,
         session_registry,
         *,
+        legacy_migration=None,
         lease_seconds: int = 300,
         poll_interval: float = 0.5,
     ) -> None:
@@ -534,6 +535,7 @@ class QaDeletionWorker:
         self.runtime_registry = runtime_registry
         self.document_library = document_library
         self.session_registry = session_registry
+        self.legacy_migration = legacy_migration
         self.lease_seconds = lease_seconds
         self.poll_interval = poll_interval
         self._stop = threading.Event()
@@ -590,11 +592,21 @@ class QaDeletionWorker:
             if payload is None:
                 return True
             deletion = payload.deletion
-            needs_runtime = bool(payload.memory_ids) or deletion.target_type == "document"
+            needs_runtime = (
+                bool(payload.memory_ids)
+                or deletion.target_type == "document"
+                or self.legacy_migration is not None
+            )
             if needs_runtime:
                 runtime = self.runtime_registry.acquire_background(deletion.user_id)
 
             if deletion.stage == "qa_rows_removed":
+                if self.legacy_migration is not None:
+                    self.legacy_migration.scrub_conversations(
+                        deletion.user_id,
+                        runtime.history,
+                        payload.conversation_ids,
+                    )
                 if runtime is not None:
                     manager = runtime.memory_tool.memory_manager
                     for memory_id in payload.memory_ids:
@@ -616,6 +628,12 @@ class QaDeletionWorker:
                 self.document_library.perform_document_delete(
                     deletion.user_id, runtime, deletion.target_id
                 )
+                if self.legacy_migration is not None:
+                    self.legacy_migration.scrub_document(
+                        deletion.user_id,
+                        runtime.history,
+                        deletion.target_id,
+                    )
                 self.session_registry.clear_document_selection(
                     deletion.user_id, deletion.target_id
                 )

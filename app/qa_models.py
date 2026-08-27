@@ -214,6 +214,16 @@ class QaDeletion:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class QaReportTurn:
+    question: str
+    answer: str
+    document_ids: tuple[str, ...]
+    document_names: tuple[str, ...]
+    mode: QaMode
+    asked_at: str
+
+
 def normalize_question(value: str) -> str:
     normalized = " ".join(str(value or "").split())
     if not normalized:

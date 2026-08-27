@@ -17,6 +17,7 @@ from app.qa_models import (
     QaDocumentCandidate,
     QaMessage,
     QaMessagePage,
+    QaReportTurn,
     QaSource,
     QaSourceDraft,
     QaValidationError,
@@ -426,6 +427,58 @@ class QaRepository:
             raise
         finally:
             conn.close()
+
+    def list_completed_turns_for_report(
+        self, user_id: str
+    ) -> tuple[QaReportTurn, ...]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                select user_message.content as question,
+                       assistant_message.content as answer,
+                       user_message.mode as mode,
+                       user_message.created_at as asked_at,
+                       user_message.conversation_id as conversation_id
+                from qa_messages user_message
+                join qa_messages assistant_message
+                  on assistant_message.user_id = user_message.user_id
+                 and assistant_message.conversation_id = user_message.conversation_id
+                 and assistant_message.turn_id = user_message.turn_id
+                 and assistant_message.role = 'assistant'
+                 and assistant_message.status = 'completed'
+                join qa_conversations
+                  on qa_conversations.id = user_message.conversation_id
+                 and qa_conversations.user_id = user_message.user_id
+                where user_message.user_id = ?
+                  and user_message.role = 'user'
+                  and user_message.status = 'completed'
+                  and {_not_fenced_clause('qa_conversations')}
+                order by user_message.created_at, user_message.id
+                """,
+                (user_id,),
+            ).fetchall()
+            turns: list[QaReportTurn] = []
+            for row in rows:
+                documents = conn.execute(
+                    """
+                    select document_id, document_name
+                    from qa_conversation_documents
+                    where user_id = ? and conversation_id = ?
+                    order by position
+                    """,
+                    (user_id, row["conversation_id"]),
+                ).fetchall()
+                turns.append(
+                    QaReportTurn(
+                        question=row["question"],
+                        answer=row["answer"],
+                        document_ids=tuple(item["document_id"] for item in documents),
+                        document_names=tuple(item["document_name"] for item in documents),
+                        mode=row["mode"] or "auto",
+                        asked_at=row["asked_at"],
+                    )
+                )
+            return tuple(turns)
 
     def update_rolling_summary(
         self,
