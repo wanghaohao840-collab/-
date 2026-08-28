@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-07"
 title: "Prove QA release readiness"
-status: "in_progress"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-06", "qa-vertical-slice-06a", "qa-vertical-slice-06b", "qa-vertical-slice-06c", "qa-vertical-slice-06d", "qa-vertical-slice-06e", "qa-vertical-slice-06f", "qa-vertical-slice-06g", "qa-vertical-slice-06h"]
 base-commit: "6b1548972cc3819d45c89edf0939931d80c4d362"
@@ -104,10 +104,10 @@ Start the deterministic server as a child process, wait on an explicit health en
 
 ## Acceptance criteria
 
-- [ ] Real-server E2E covers the full QA product loop without route interception or model network calls.
-- [ ] Recovery/race/isolation/security tests prove the accepted invariants and safe observable failures.
-- [ ] Eight viewport visuals and accessibility checks pass with documented deliberate differences only.
-- [ ] Python, Node, design, dependency and Docker gates pass; docs accurately mark only `/qa` complete among future product slices.
+- [x] Real-server E2E covers the full QA product loop without route interception or model network calls.
+- [x] Recovery/race/isolation/security tests prove the accepted invariants and safe observable failures.
+- [x] Eight viewport visuals and accessibility checks pass with documented deliberate differences only.
+- [x] Python, Node, design, dependency and Docker gates pass; docs accurately mark only `/qa` complete among future product slices.
 
 ## Test and verification commands
 
@@ -132,10 +132,10 @@ Expected: all gates PASS with no skipped QA acceptance test and no moderate-or-h
 Docker gate (worktree-local values only):
 
 ```powershell
-docker compose --env-file .runtime/qa-docker/deploy.env -p zhiyan-qa-20260825 build app qdrant
-docker compose --env-file .runtime/qa-docker/deploy.env -p zhiyan-qa-20260825 up -d app qdrant
+docker compose --env-file .runtime/qa-docker/deploy.env -p zhiyan-qa-20260828 build app qdrant
+docker compose --env-file .runtime/qa-docker/deploy.env -p zhiyan-qa-20260828 up -d app qdrant
 & 'D:\python_self_agent\venv\Scripts\python.exe' deploy/smoke_test.py --env-file .runtime/qa-docker/deploy.env --deep
-docker compose --env-file .runtime/qa-docker/deploy.env -p zhiyan-qa-20260825 down --remove-orphans
+docker compose --env-file .runtime/qa-docker/deploy.env -p zhiyan-qa-20260828 down --remove-orphans
 ```
 
 Expected: build/up/deep smoke/down PASS and no container remains. Run cleanup even after failure.
@@ -146,4 +146,22 @@ Stop with a reality-conflict report if any dependency packet is not done, the de
 
 ## Implementation handoff
 
-Replace this section with packet ID/status, complete acceptance evidence, files/interfaces, exact command outcomes/counts, scope confirmation, deviations/residual risks and commit. Once status is `done`, request the mandatory Codex final integration review; do not declare the feature complete yourself.
+Packet `qa-vertical-slice-07` is `done`.
+
+Delivered a deterministic Python-only `QaAnswerEngine` adapter and real FastAPI/React Playwright fixture, full QA browser workflow coverage, eight reviewed responsive visual baselines, and release/recovery/evolution documentation. The adapter is supplied only through the existing `ApplicationServices.create(..., qa_answer_engine=...)` test composition seam; no environment switch, route interception, production import or model-network dependency was introduced.
+
+Acceptance evidence on 2026-08-28:
+
+- Python: `1031 passed, 7 skipped in 894.27s`; the seven skips are existing optional-environment cases and no QA acceptance test is skipped.
+- Frontend: TypeScript and ESLint passed; Vitest reported `14` files and `117` tests passed; production build completed with `121` modules.
+- Browser: full Playwright matrix reported `58 passed, 2 skipped, 0 failed`; all `12` QA tests passed across desktop, tablet and mobile. The two skips are pre-existing project-conditional cases outside QA.
+- Visual/accessibility: all eight tracked QA PNG baselines were inspected at their original viewports; Axe reported no serious/critical violations, and QA tests proved no horizontal overflow plus keyboard drawer focus/escape behavior.
+- Design/contracts: `17/17` Node design tests passed; the QA product documentation contract passed.
+- Dependencies/security: `pip check` reported no broken requirements and `npm audit --audit-level=moderate` reported `0` vulnerabilities.
+- Docker Linux: Docker Desktop server `29.6.2` built both app and Qdrant images under unique project `zhiyan-qa-20260828`; Compose reached healthy state; `deploy/smoke_test.py --deep` passed app/Qdrant health, HTTP, Qdrant data write/import, and temporary document retrieval plus LLM answer. The LLM endpoint was a host-local OpenAI-compatible deterministic process used only by the deployment harness. `down --remove-orphans` completed and `compose ps -a` returned no containers.
+
+Runtime-only Penpot differences are documented in `docs/product-ui/penpot-handoff.md`: tablet chat height preserves the complete composer at `1024 x 768`, and mobile conversation deletion lives in the existing bottom sheet. Both retain approved state semantics and tokens.
+
+Changed surfaces are limited to `web/e2e/qa-runtime.py`, `web/e2e/qa.spec.ts`, shared E2E setup, eight QA snapshots, the tracked QA deployment contract, and product/operations handoff documentation. No production application, API, service, worker, dependency, Compose manifest or secret was changed in this packet.
+
+Residual constraints are intentional and documented: polling remains `1500 ms` until a later SSE/WebSocket transport upgrade; deployment remains single application replica/worker until shared Session, distributed locking, task dispatch/wakeup and consistent storage are available. The mandatory Codex final integration review is the next gate.

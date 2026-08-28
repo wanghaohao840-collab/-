@@ -17,7 +17,8 @@
 - 旧版单用户数据迁移；
 - History/Memory 损坏检测、隔离、备份和恢复；
 - 同一用户多会话写入协调及失败补偿。
-- Penpot 驱动的 React 登录、注册和响应式产品外壳。
+- Penpot 驱动的 React 登录、注册、文档库和三档响应式智能问答工作区。
+- 持久 QA 会话、不可变文档范围、引用快照、可恢复摘要任务和栅栏式安全删除。
 
 ## 功能概览
 
@@ -112,8 +113,9 @@ Memory 系统包含：
 
 ```mermaid
 flowchart TD
-    UI["Gradio UI"] --> SESSION["认证与 Session"]
-    SESSION --> ASSISTANT["PDFLearningAssistant"]
+    UI["React 产品界面 / legacy Gradio"] --> SESSION["认证与 Session"]
+    SESSION --> QASERVICE["QaService / durable QA resources"]
+    QASERVICE --> ASSISTANT["PDFLearningAssistant / QaAnswerEngine"]
     ASSISTANT --> RAGTOOL["RAGTool"]
     ASSISTANT --> MEMORYTOOL["MemoryTool"]
     ASSISTANT --> SERVICES["History / Reports / Recovery"]
@@ -139,6 +141,9 @@ UI → Session/Runtime → Assistant → Tool → Memory/RAG/Storage
 ```
 
 底层 Memory、RAG 和 Storage 不应反向依赖 UI 或 Assistant。
+
+React `/qa` 不保存第二份业务状态：会话、消息、引用、摘要任务、删除栅栏和重试
+请求身份均以 SQLite 资源为准，生成仍通过现有用户 Runtime、RAG 和 Memory 边界。
 
 ## 核心实现目录
 
@@ -308,6 +313,19 @@ Chunk 正文。对比模式的结构化输出可以引用 `S-*` 或 `G-*`；摘�
 PDF_ASSISTANT_DATA_DIR=D:\document-assistant-data
 ```
 
+### 智能问答产品路由
+
+`/qa` 默认启用。仅在需要表现层回滚时设置并重启服务：
+
+```env
+QA_ROUTE_ENABLED=false
+```
+
+关闭路由不会停止问答数据迁移、摘要/删除恢复 worker，也不会恢复旧历史双写。
+浏览器对 pending 消息、摘要任务和删除任务每 `1500 ms` 读取一次持久状态；刷新或
+重连后继续从服务端资源恢复。未来 SSE/WebSocket 只替换通知传输，不改变现有资源
+ID、状态机、版本和幂等请求契约。
+
 ## 知研产品界面
 
 Penpot 是产品界面的设计源，经过核验的文件、页面、组件和参考画板 ID 见
@@ -340,7 +358,8 @@ Set-Location web; npm run dev
 
 Vite 将 `/api` 和 `/legacy` 代理到 `http://127.0.0.1:7860`。构建
 `web/dist` 后，上述 Uvicorn 进程也会直接提供 React SPA；`/healthz` 用于健康
-检查，`/legacy/` 是完整旧版功能入口。默认后端地址：
+检查，`/documents` 与 `/qa` 是已产品化路由，`/legacy/` 是其余旧版功能和表现层
+回滚入口。默认后端地址：
 
 ```text
 http://127.0.0.1:7860
@@ -366,12 +385,17 @@ python3 deploy/smoke_test.py --env-file deploy/.env
 [`deploy/README.md`](deploy/README.md)。该部署保持单副本、单 worker，直接
 HTTP 仅适用于受控内网；公网访问必须由外部 HTTPS 网关保护。
 
+QA 冷备份必须把 `app.db`、用户目录、Memory 与向量/图存储作为一致集合，不能只
+复制消息表。会话/文档删除先建立持久栅栏再清理引用、摘要任务和 QA Memory；恢复
+旧备份前必须确认不会把已删除内容重新带回。多副本部署仍需共享 Session、分布式
+用户锁、共享任务队列/唤醒与一致存储，不能只增加 Uvicorn worker 数量。
+
 ## 使用流程
 
 1. 注册或登录。用户名长度为 3–32，密码长度为 8–128。
 2. 上传 PDF、TXT、MD 或 DOCX 文档。
-3. 在问答页选择一篇或多篇文档。
-4. 选择自动、联合问答、对比分析或联合总结模式。
+3. 从文档库进入 `/qa`，选择 1–10 篇文档建立不可变范围的持久对话。
+4. 选择自动、联合分析或对比模式；核对并复制回答引用，按需生成/取消摘要。
 5. 在检索页查看命中片段、来源、页码和引用格式。
 6. 添加学习笔记并按关键词回忆。
 7. 查看学习统计和生成报告。
@@ -385,7 +409,7 @@ HTTP 仅适用于受控内网；公网访问必须由外部 HTTPS 网关保护�
 
 ```text
 data/
-├── app.db
+├── app.db                         # 认证、导入与持久 QA 资源/任务/删除栅栏
 ├── uploads/
 └── users/
     └── <user_id>/
@@ -472,11 +496,12 @@ powershell -ExecutionPolicy Bypass -File scripts\run_qdrant_integration.ps1
 - Neo4j 文档图谱构建、查询、恢复、重试、定向删除及全问答模式混合检索；
 - 旧数据迁移和损坏数据恢复；
 - 较完整的单元、契约、集成和验收测试。
+- React 文档库与智能问答产品垂直切片（桌面、平板、手机）。
 
 后续可继续推进：
 
 - GraphRAG 图谱可视化与实体人工复核 UI；
-- 文档命中高亮与引用一键复制；
+- 文档命中高亮；
 - 学习计划、间隔复习和知识掌握度；
 - 自动生成知识卡片与练习题；
 - Docker、云端或内网部署；

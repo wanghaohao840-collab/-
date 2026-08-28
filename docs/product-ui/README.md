@@ -1,7 +1,7 @@
 # 知研产品 UI 工作流
 
 本目录记录知研 React 产品界面的受支持设计、开发、验证与发布流程。当前已交付
-认证流程、响应式应用外壳和文档库垂直切片；Memory、RAG、文档隔离、引用、
+认证流程、响应式应用外壳、文档库和智能问答垂直切片；Memory、RAG、文档隔离、引用、
 报告、批量导入与存储仍由现有 `ApplicationServices` 边界提供，不在 React 中
 复制业务状态或后端逻辑。
 
@@ -12,7 +12,7 @@
 | `/login`、`/register` | React 登录与注册；成功后恢复目标页或进入 `/overview` |
 | `/overview` | 受保护的默认落点；当前显示明确的迁移状态 |
 | `/documents` | 真实文档库：列表、批量导入、任务进度、重试、取消与删除 |
-| `/qa` | 智能问答导航位；当前显示明确的迁移状态 |
+| `/qa` | 真实智能问答：固定文档范围、持久对话、引用、摘要、重试与安全删除 |
 | `/search` | 文献检索导航位；当前显示明确的迁移状态 |
 | `/notes` | 学习笔记导航位；当前显示明确的迁移状态 |
 | `/insights` | 学习洞察导航位；当前显示明确的迁移状态 |
@@ -21,7 +21,7 @@
 | `/healthz` | 统一服务健康检查，返回 `{"status":"ok"}` |
 
 迁移页不展示虚构产品数据，而是说明功能仍在迁移并提供 `/legacy/` 操作。后续
-垂直切片依次为 QA、notes、overview/insights、search；每个切片应复用现有服务
+垂直切片依次为 notes、overview/insights、search；每个切片应复用现有服务
 边界，并在端到端能力完成后替换对应迁移状态。
 
 ## Penpot 连接与交接
@@ -108,6 +108,32 @@ Compose 的秘密与运行数据约束、Qdrant/Neo4j 配置、备份和恢复�
 [`deploy/README.md`](../../deploy/README.md)。不得提交 `deploy/.env`、运行数据库、
 上传文档或报告。
 
+## `/qa` 发布、恢复与演进
+
+`/qa` 默认启用。只有环境值精确为 `false`（忽略大小写）时，
+`QA_ROUTE_ENABLED=false` 才会在重启后把产品路由切回明确的迁移状态；该开关不
+停止问答迁移、启动恢复、摘要 worker 或删除 worker，也不会恢复对旧
+`history.json` 的双写。需要表现层回滚时先关闭路由并重启单一服务，再按下节使用
+`/legacy/`；旧界面的新问答仍必须经过同一 `QaService`，不能形成第二份历史。
+
+浏览器把 pending 消息、摘要任务和删除任务视为服务端资源，每 `1500 ms` 轮询
+活动状态。刷新、断网重连或重新登录后，页面重新读取会话、消息、任务和删除状态，
+而不是依赖内存中的动画或 token 流。一次用户动作保持稳定的
+`client_request_id`；仅安全、可重试的请求允许客户端自动重试一次。服务启动时会
+回收过期摘要/删除租约，并把失去执行者的同步 pending 回答收敛为安全失败，供用户
+显式重试。
+
+冷备份必须把 `app.db` 与用户目录、Memory、Qdrant（以及启用时的 Neo4j）作为一
+致集合处理，使用 `deploy/backup.sh`/`deploy/restore.sh`，不得只复制 QA 表。删除
+会话会先建立栅栏并立即停止读取/生成，再由可恢复 worker 清理消息、引用、摘要、
+任务和关联 QA Memory；文档删除还会级联引用它的会话。旧迁移源或回滚副本不得以
+“兼容”为由保留已删除内容。
+
+当前 `1500 ms` 轮询是传输策略，不是领域模型。后续可在保持现有资源 ID、版本、
+幂等请求和状态端点的前提下替换为 SSE/WebSocket 通知。多副本部署前仍必须完成共享
+Session、分布式用户锁、共享任务队列/唤醒和一致存储；在这些条件满足前继续保持单
+应用副本、单 Uvicorn worker，不能仅提高 `--workers`。
+
 ## Cookie 与 CSRF
 
 - 服务端把 session token 放在 `zhiyan_session` Cookie 中，属性为 `HttpOnly`、
@@ -137,7 +163,8 @@ Playwright 固定三个目标视口：desktop `1440 × 1024`、tablet `1024 × 7
 mobile `390 × 844`。认证、导航、键盘焦点与响应式行为在这些项目中验证；axe
 要求 WCAG 2 A/AA 与 2.1 A/AA 下没有 serious/critical violation。
 
-视觉基线位于 `web/e2e/visual.spec.ts-snapshots/`。截图禁用动画、隐藏插入光标并
+应用外壳基线位于 `web/e2e/visual.spec.ts-snapshots/`，QA 八态基线位于
+`web/e2e/qa.spec.ts-snapshots/`。截图禁用动画、隐藏插入光标并
 启用 reduced motion。只有 Penpot 批准的视觉变化或经过审阅的有意实现变更才可
 运行 `npx playwright test --update-snapshots`；更新前后必须以匹配视口对照
 [`reference/penpot/`](reference/penpot/)，逐张检查布局、换行、状态和裁切。不要

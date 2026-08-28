@@ -6,6 +6,8 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 HANDOFF_PATH = REPOSITORY_ROOT / "docs" / "product-ui" / "penpot-handoff.md"
+PRODUCT_UI_README_PATH = REPOSITORY_ROOT / "docs" / "product-ui" / "README.md"
+ROOT_README_PATH = REPOSITORY_ROOT / "README.md"
 REFERENCE_ROOT = REPOSITORY_ROOT / "docs" / "product-ui" / "reference" / "penpot"
 QA_STYLE_PATH = REPOSITORY_ROOT / "web" / "src" / "styles" / "qa.css"
 
@@ -55,3 +57,22 @@ def test_qa_supporting_copy_uses_accessible_primary_text_token() -> None:
     rule = next(line for line in stylesheet.splitlines() if line.startswith(selector))
     assert "var(--color-text-primary)" in rule
     assert "var(--color-text-secondary)" not in rule
+
+
+def test_qa_release_and_evolution_operations_are_documented() -> None:
+    product_readme = PRODUCT_UI_README_PATH.read_text(encoding="utf-8")
+    root_readme = ROOT_README_PATH.read_text(encoding="utf-8")
+    handoff = HANDOFF_PATH.read_text(encoding="utf-8")
+
+    assert "| `/qa` | 真实智能问答" in product_readme
+    for required in (
+        "QA_ROUTE_ENABLED=false",
+        "1500 ms",
+        "SSE/WebSocket",
+        "分布式用户锁",
+        "deploy/backup.sh",
+    ):
+        assert required in product_readme
+    assert "`/documents` 与 `/qa` 是已产品化路由" in root_readme
+    assert "### React runtime acceptance" in handoff
+    assert "qa-failure-mobile.png" in handoff
