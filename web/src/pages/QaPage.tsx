@@ -41,6 +41,13 @@ export function QaPage() {
     }
   }, [deletion.data?.status, setParams]);
 
+  useEffect(() => {
+    const items = messages.data?.items;
+    if (!items) return;
+    const latest = [...items].reverse().find((item) => item.role === "assistant" && item.status === "completed");
+    setSources(latest?.sources ?? []);
+  }, [messages.data?.items, selectedId]);
+
   function selectConversation(id: string) { setParams({ conversation: id }); setConversationOpen(false); setSources([]); }
   function createConversation() {
     mutations.create.mutate([...selectedDocuments], { onSuccess: (item) => { setCreateOpen(false); setParams({ conversation: item.conversation_id }); setSelectedDocuments(new Set()); } });

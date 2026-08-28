@@ -9,8 +9,9 @@ import { QaPage } from "./QaPage";
 const fetchMock = vi.fn<typeof fetch>();
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 const conversation = { conversation_id: "11111111-1111-4111-8111-111111111111", title: "研究对话", origin: "product", rolling_summary: "", summary_version: 0, created_at: "now", updated_at: "now", last_message_at: "now", documents: [{ document_id: "doc-1", document_name: "研究.md", position: 0 }] };
+const completedMessage = { message_id: "message-complete", conversation_id: conversation.conversation_id, turn_id: "turn-complete", role: "assistant", status: "completed", mode: "auto", content: "回答", source_state: "available", retry_of_message_id: null, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "now", completed_at: "now", sources: [{ citation_id: "S-1", document_id: "doc-1", document_name: "研究.md", page_number: 3, section: "方法", excerpt: "服务器证据", reference: "[S-1]", truncated: false, source_type: "rag" }] };
 
-function renderPage(enabled: boolean, path = "/qa") {
+function renderPage(enabled: boolean, path = "/qa", messages: unknown[] = []) {
   fetchMock.mockImplementation((input, init) => {
     const url = String(input);
     if (url === "/api/v1/auth/session") return Promise.resolve(response({ username: "reader", csrf_token: "csrf" }));
@@ -19,7 +20,7 @@ function renderPage(enabled: boolean, path = "/qa") {
     if (url === "/api/v1/qa/conversations?limit=100") return Promise.resolve(response({ items: [conversation], next_cursor: null }));
     if (url === `/api/v1/qa/conversations/${conversation.conversation_id}` && (init?.method ?? "GET") === "GET") return Promise.resolve(response(conversation));
     if (url === `/api/v1/qa/conversations/${conversation.conversation_id}` && init?.method === "DELETE") return Promise.resolve(response({ deletion_id: "deletion-1", target_type: "conversation", target_id: conversation.conversation_id, status: "queued", stage: "queued", affected_conversation_count: 1, attempt_count: 0, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "queued" }, 202));
-    if (url.includes("/messages?limit=200")) return Promise.resolve(response({ items: [], next_cursor: null }));
+    if (url.includes("/messages?limit=200")) return Promise.resolve(response({ items: messages, next_cursor: null }));
     if (url.endsWith("/messages") && init?.method === "POST") return Promise.resolve(response({ message_id: "message-1", conversation_id: conversation.conversation_id, turn_id: "turn-1", role: "assistant", status: "pending", mode: "auto", content: "", source_state: "none", retry_of_message_id: null, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "now", completed_at: null, sources: [] }, 202));
     if (url.endsWith("/summary-jobs") && init?.method === "POST") return Promise.resolve(response({ job_id: "job-1", conversation_id: conversation.conversation_id, input_message_id: "input-1", assistant_message_id: "assistant-1", status: "running", stage: "summarizing", progress: 40, cancel_requested_at: null, attempt_count: 1, max_attempts: 3, safe_error_code: null, trace_id: null, created_at: "now", started_at: "now", finished_at: null, updated_at: "running" }, 202));
     if (url === "/api/v1/qa/jobs/job-1") return Promise.resolve(response({ job_id: "job-1", conversation_id: conversation.conversation_id, input_message_id: "input-1", assistant_message_id: "assistant-1", status: "completed", stage: "completed", progress: 100, cancel_requested_at: null, attempt_count: 1, max_attempts: 3, safe_error_code: null, trace_id: null, created_at: "now", started_at: "now", finished_at: "now", updated_at: "done" }));
@@ -44,6 +45,12 @@ describe("QaPage", () => {
     await userEvent.type(screen.getByLabelText("向这些文档提问"), "研究结论是什么？");
     await userEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/messages"), expect.objectContaining({ method: "POST", body: expect.stringContaining("研究结论是什么？") }));
+  });
+
+  it("shows the latest completed answer sources without a citation click", async () => {
+    renderPage(true, `/qa?conversation=${conversation.conversation_id}`, [completedMessage]);
+    expect(await screen.findByText("服务器证据")).toBeVisible();
+    expect(screen.getByRole("button", { name: "复制引用 1" })).toBeVisible();
   });
 
   it("renders durable summary completion and deletion confirmation", async () => {
