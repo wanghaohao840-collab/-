@@ -130,4 +130,4 @@ Stop if implementation requires another API call, viewport branching, automatic 
 - Residual risks/follow-ups:
   - none within this correction; Packet 07 owns full release gates and Docker evidence.
 - Commit:
-  - pending
+  - `7d798cf`
