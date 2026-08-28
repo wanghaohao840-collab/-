@@ -63,6 +63,7 @@ export type QaJob = {
   finished_at: string | null;
   updated_at: string;
 };
+export type QaActiveJob = { job: QaJob | null };
 export type QaDeletion = {
   deletion_id: string;
   target_type: "conversation" | "document";
