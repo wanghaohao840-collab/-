@@ -83,4 +83,4 @@ Stop if the structured scope/mode is not observable at the existing RAG boundary
 - Residual risks/follow-ups:
   - Packet 07 must replace the prior 1030-pass/1-fail run with a fully green result.
 - Commit:
-  - pending
+  - `0162cea`
