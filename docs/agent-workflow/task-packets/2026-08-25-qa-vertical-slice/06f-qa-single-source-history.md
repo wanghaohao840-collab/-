@@ -113,4 +113,4 @@ Stop if eliminating the write requires changing migration, report, deletion, API
 - Residual risks/follow-ups:
   - The full Python gate must be rerun by Packet 07 to replace the earlier 1029-pass/2-fail evidence with a fully green result.
 - Commit:
-  - pending
+  - `e67f314`
