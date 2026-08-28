@@ -165,3 +165,5 @@ Runtime-only Penpot differences are documented in `docs/product-ui/penpot-handof
 Changed surfaces are limited to `web/e2e/qa-runtime.py`, `web/e2e/qa.spec.ts`, shared E2E setup, eight QA snapshots, the tracked QA deployment contract, and product/operations handoff documentation. No production application, API, service, worker, dependency, Compose manifest or secret was changed in this packet.
 
 Residual constraints are intentional and documented: polling remains `1500 ms` until a later SSE/WebSocket transport upgrade; deployment remains single application replica/worker until shared Session, distributed locking, task dispatch/wakeup and consistent storage are available. The mandatory Codex final integration review is the next gate.
+
+Implementation commit: `eb47112` (`test: prove QA release readiness`).
