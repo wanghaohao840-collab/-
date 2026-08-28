@@ -381,9 +381,8 @@ class TestAssistantCoordination:
         assert loaded["notes"] == [{"note": "keep-me"}]
         assert not src.exists()
 
-    def test_structured_question_scope_committed_after_generation(self, tmp_path):
-        """After ask(), the history question record carries document_ids,
-        document_names, and mode."""
+    def test_question_scope_reaches_generation_without_flat_history_commit(self, tmp_path):
+        """Generation receives structured scope while durable QA owns history."""
         runtime, user_id = _make_runtime(tmp_path)
         runtime.history.update(lambda h: h["documents"].append({
             "document_id": "doc-a",
@@ -398,8 +397,8 @@ class TestAssistantCoordination:
 
         assistant.ask("hello", selected_documents=["Alpha.md | doc-a"], mode="summary")
 
-        questions = runtime.history.load()["questions"]
-        assert len(questions) == 1
-        assert questions[0]["document_ids"] == ["doc-a"]
-        assert questions[0]["document_names"] == ["Alpha.md"]
-        assert questions[0]["mode"] == "summary"
+        action, kwargs = runtime.rag_tool.calls[-1]
+        assert action == "ask"
+        assert kwargs["document_ids"] == ["doc-a"]
+        assert kwargs["mode"] == "summary"
+        assert runtime.history.load()["questions"] == []
