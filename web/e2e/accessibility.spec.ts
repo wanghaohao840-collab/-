@@ -168,6 +168,7 @@ test("populated documents and delete dialog meet axe and keyboard contracts", as
 
   const documentList = page.getByRole("list", { name: "文档列表" });
   const documentRow = documentList.getByRole("listitem", { name: filename });
+  const askTrigger = documentRow.getByRole("button", { name: "开始问答" });
   const deleteTrigger = documentRow.getByRole("button", { name: `删除 ${filename}` });
   await expect(documentRow).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("heading", { level: 1, name: "文档库" })).toHaveCount(1);
@@ -182,6 +183,8 @@ test("populated documents and delete dialog meet axe and keyboard contracts", as
   });
   await page.getByLabel("按名称筛选").focus();
   await page.getByLabel("按名称筛选").press("Tab");
+  await expectVisibleFocus(askTrigger);
+  await askTrigger.press("Tab");
   await expectVisibleFocus(deleteTrigger);
   await deleteTrigger.press("Enter");
   const dialog = page.getByRole("dialog", { name: `删除 ${filename}` });

@@ -67,7 +67,13 @@ test("imports, lists, and deletes a real document", async ({ appUrl, page }, tes
       response.request().method() === "DELETE",
   );
   await deleteDialog.getByRole("button", { name: "确认删除" }).click();
-  expect((await deleteResponse).status()).toBe(204);
+  const acceptedDeletion = await deleteResponse;
+  expect(acceptedDeletion.status()).toBe(202);
+  expect(await acceptedDeletion.json()).toEqual(expect.objectContaining({
+    deletion_id: expect.any(String),
+    status: expect.stringMatching(/queued|running|completed/),
+    target_type: "document",
+  }));
   await expect(documentRow).toHaveCount(0);
 
   await page.reload();
