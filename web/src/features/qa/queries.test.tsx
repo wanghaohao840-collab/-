@@ -71,27 +71,39 @@ describe("QA query lifecycle", () => {
       .mockResolvedValueOnce({ items: [message("m-3"), message("m-4")], next_cursor: "older-2" })
       .mockResolvedValueOnce({ items: [message("m-1"), message("m-2"), staleDuplicate], next_cursor: null });
     const { wrapper } = harness();
-    const { result } = renderHook(() => useQaMessages("conversation-1"), { wrapper });
+    const { result, rerender } = renderHook(() => useQaMessages("conversation-1"), { wrapper });
 
     await waitFor(() => expect(result.current.items.map((item) => item.message_id)).toEqual(["m-3", "m-4"]));
     await act(() => result.current.fetchNextPage());
 
     await waitFor(() => expect(result.current.items.map((item) => item.message_id)).toEqual(["m-1", "m-2", "m-3", "m-4"]));
     expect(result.current.items.find((item) => item.message_id === "m-3")?.content).toBe("m-3");
+    const items = result.current.items;
+    const data = result.current.data;
+    expect(data?.pages).toHaveLength(2);
+    expect(data?.pageParams).toEqual([null, "older-2"]);
+    expect(data?.items).toBe(items);
+    rerender();
+    expect(result.current.items).toBe(items);
+    expect(result.current.data).toBe(data);
+    expect(result.current.data?.items).toBe(items);
     expect(qaApi.listQaMessages).toHaveBeenNthCalledWith(2, expect.anything(), "conversation-1", "older-2", expect.any(AbortSignal));
     expect(result.current.hasNextPage).toBe(false);
   });
 
   it("keeps polling when any loaded message page contains pending work", async () => {
     vi.useFakeTimers();
-    const list = vi.spyOn(qaApi, "listQaMessages").mockResolvedValue({
-      items: [{ ...pendingMessage, message_id: "pending-latest" }],
-      next_cursor: null,
-    });
+    const list = vi.spyOn(qaApi, "listQaMessages")
+      .mockResolvedValueOnce({ items: [message("completed-latest")], next_cursor: "older" })
+      .mockResolvedValueOnce({ items: [{ ...pendingMessage, message_id: "pending-older" }], next_cursor: null })
+      .mockResolvedValue({ items: [message("completed-latest")], next_cursor: "older" });
     const { wrapper } = harness();
-    renderHook(() => useQaMessages("conversation-1"), { wrapper });
+    const { result } = renderHook(() => useQaMessages("conversation-1"), { wrapper });
+    await vi.advanceTimersByTimeAsync(0);
+    await act(async () => { await result.current.fetchNextPage(); });
+    expect(list).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1500);
-    expect(list.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(list.mock.calls.length).toBeGreaterThanOrEqual(3);
     vi.useRealTimers();
   });
 

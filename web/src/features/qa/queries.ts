@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { InfiniteData } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { ApiError } from "../../api/client";
 import { useAuth } from "../../auth/AuthProvider";
 import { DOCUMENTS_QUERY_KEY } from "../documents/queries";
@@ -66,8 +66,12 @@ export function useQaConversations(enabled = true) {
     getNextPageParam: (lastPage) => lastPage.next_cursor ?? undefined,
     enabled,
   });
-  const items = flattenQaConversations(query.data);
-  return { ...query, data: query.data ? { items } : undefined, items };
+  const items = useMemo(() => flattenQaConversations(query.data), [query.data]);
+  const data = useMemo(
+    () => query.data ? { ...query.data, items } : undefined,
+    [items, query.data],
+  );
+  return { ...query, data, items };
 }
 export function useQaConversation(id?: string) {
   const { request } = useAuth();
@@ -86,8 +90,12 @@ export function useQaMessages(id?: string) {
       ? 1500
       : false,
   });
-  const items = flattenQaMessages(query.data);
-  return { ...query, data: query.data ? { items } : undefined, items };
+  const items = useMemo(() => flattenQaMessages(query.data), [query.data]);
+  const data = useMemo(
+    () => query.data ? { ...query.data, items } : undefined,
+    [items, query.data],
+  );
+  return { ...query, data, items };
 }
 export function useQaActiveSummary(id?: string) {
   const { request } = useAuth();
