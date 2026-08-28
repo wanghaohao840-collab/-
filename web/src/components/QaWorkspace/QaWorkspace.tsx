@@ -26,13 +26,34 @@ export function QaOverlay({ title, className = "", onClose, returnFocusTo, child
   return <div className="qa-overlay"><button className="qa-overlay__scrim" tabIndex={-1} aria-hidden="true" onClick={onClose} /><div ref={panel} className={`qa-overlay__panel ${className}`} role="dialog" aria-modal="true" aria-label={title} onKeyDown={onKeyDown}><header><h2>{title}</h2><button ref={close} className="qa-icon-button" aria-label={`关闭${title}`} onClick={onClose}>×</button></header>{children}</div></div>;
 }
 
-export function ConversationList({ items, selectedId, onSelect, onNew, onDeleteSelected }: { items: QaConversation[]; selectedId?: string; onSelect: (id: string) => void; onNew: () => void; onDeleteSelected?: () => void }) {
-  return <aside className="qa-conversations" aria-label="对话列表"><div className="qa-panel-heading"><h2>对话</h2><button className="qa-icon-button" aria-label="新建对话" onClick={onNew}>＋</button></div>{items.length ? <ol>{items.map((item) => <li key={item.conversation_id}><button className="qa-conversation" aria-current={selectedId === item.conversation_id ? "page" : undefined} onClick={() => onSelect(item.conversation_id)}><strong>{item.title}</strong><small>{item.documents.map((doc) => doc.document_name).join("、")}</small></button></li>)}</ol> : <p className="qa-muted">还没有对话</p>}{onDeleteSelected ? <Button hierarchy="danger" onClick={onDeleteSelected}>删除当前对话</Button> : null}</aside>;
+type ConversationListProps = {
+  items: QaConversation[];
+  selectedId?: string;
+  onSelect: (id: string) => void;
+  onNew: () => void;
+  onDeleteSelected?: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
+};
+
+export function ConversationList({ items, selectedId, onSelect, onNew, onDeleteSelected, hasMore, loadingMore, onLoadMore }: ConversationListProps) {
+  return <aside className="qa-conversations" aria-label="对话列表"><div className="qa-panel-heading"><h2>对话</h2><button className="qa-icon-button" aria-label="新建对话" onClick={onNew}>＋</button></div>{items.length ? <ol>{items.map((item) => <li key={item.conversation_id}><button className="qa-conversation" aria-current={selectedId === item.conversation_id ? "page" : undefined} onClick={() => onSelect(item.conversation_id)}><strong>{item.title}</strong><small>{item.documents.map((doc) => doc.document_name).join("、")}</small></button></li>)}</ol> : <p className="qa-muted">还没有对话</p>}{hasMore && onLoadMore ? <Button hierarchy="secondary" disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? "正在加载更多对话…" : "加载更多对话"}</Button> : null}{onDeleteSelected ? <Button hierarchy="danger" onClick={onDeleteSelected}>删除当前对话</Button> : null}</aside>;
 }
 
-export function MessageList({ messages, onSources, onRetry }: { messages: QaMessage[]; onSources: (message: QaMessage, trigger: HTMLButtonElement) => void; onRetry: (message: QaMessage) => void }) {
+type MessageListProps = {
+  messages: QaMessage[];
+  onSources: (message: QaMessage, trigger: HTMLButtonElement) => void;
+  onRetry: (message: QaMessage) => void;
+  busy?: boolean;
+  hasOlder?: boolean;
+  loadingOlder?: boolean;
+  onLoadOlder?: () => void;
+};
+
+export function MessageList({ messages, onSources, onRetry, busy, hasOlder, loadingOlder, onLoadOlder }: MessageListProps) {
   if (!messages.length) return <div className="qa-welcome"><h2>从文档中获得可追溯的答案</h2><p>提出问题，知研会用当前对话绑定的文档回答，并保留引用。</p></div>;
-  return <ol className="qa-messages" aria-label="问答消息">{messages.map((message) => <li key={message.message_id} className={`qa-message qa-message--${message.role}`} data-status={message.status}><span className="qa-message__role">{message.role === "user" ? "你" : "知研"}</span>{message.status === "pending" ? <p role="status">正在查找并组织答案…</p> : <p>{message.content || (message.status === "failed" ? "回答失败，原问题已保留。" : "")}</p>}{message.status === "failed" ? <div className="qa-message__failure" role="alert"><span>{message.safe_error_code ?? "QA_OPERATION_FAILED"}</span><Button hierarchy="secondary" onClick={() => onRetry(message)}>重试回答</Button></div> : null}{message.role === "assistant" && message.sources.length ? <button className="qa-source-trigger" onClick={(event) => onSources(message, event.currentTarget)}>引用 {message.sources.length}</button> : null}</li>)}</ol>;
+  return <>{hasOlder && onLoadOlder ? <Button hierarchy="secondary" disabled={loadingOlder} onClick={onLoadOlder}>{loadingOlder ? "正在加载更早消息…" : "加载更早消息"}</Button> : null}<ol className="qa-messages" aria-label="问答消息">{messages.map((message) => <li key={message.message_id} className={`qa-message qa-message--${message.role}`} data-status={message.status}><span className="qa-message__role">{message.role === "user" ? "你" : "知研"}</span>{message.status === "pending" ? <p role="status">正在查找并组织答案…</p> : <p>{message.content || (message.status === "failed" ? "回答失败，原问题已保留。" : "")}</p>}{message.status === "failed" ? <div className="qa-message__failure" role="alert"><span>{message.safe_error_code ?? "QA_OPERATION_FAILED"}</span><Button hierarchy="secondary" disabled={busy} onClick={() => onRetry(message)}>重试回答</Button></div> : null}{message.role === "assistant" && message.sources.length ? <button className="qa-source-trigger" onClick={(event) => onSources(message, event.currentTarget)}>引用 {message.sources.length}</button> : null}</li>)}</ol></>;
 }
 
 export function QaComposer({ busy, documentCount, onSubmit }: { busy: boolean; documentCount: number; onSubmit: (question: string, mode: QaMode) => void }) {

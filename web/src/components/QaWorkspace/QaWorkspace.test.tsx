@@ -1,13 +1,43 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { MessageList, QaComposer, QaOverlay, SourcePanel, SummaryStatus } from "./QaWorkspace";
+import { ConversationList, MessageList, QaComposer, QaOverlay, SourcePanel, SummaryStatus } from "./QaWorkspace";
 import type { QaJob, QaMessage, QaSource } from "../../features/qa/types";
 
 const source: QaSource = { citation_id: "citation-1", document_id: "doc-1", document_name: "研究.md", page_number: 3, section: "方法", excerpt: "证据片段", reference: "研究.md#方法", truncated: false, source_type: "document" };
 const failed: QaMessage = { message_id: "message-1", conversation_id: "conversation-1", turn_id: "turn-1", role: "assistant", status: "failed", mode: "auto", content: "", source_state: "none", retry_of_message_id: null, safe_error_code: "QA_ENGINE_UNAVAILABLE", trace_id: null, created_at: "now", updated_at: "now", completed_at: null, sources: [] };
 
 describe("QA workspace components", () => {
+  it("exposes explicit disabled loading controls only when another page exists", async () => {
+    const loadConversations = vi.fn();
+    const loadMessages = vi.fn();
+    const { rerender } = render(<>
+      <ConversationList
+        items={[]}
+        onSelect={vi.fn()}
+        onNew={vi.fn()}
+        hasMore
+        loadingMore={false}
+        onLoadMore={loadConversations}
+      />
+      <MessageList
+        messages={[failed]}
+        onSources={vi.fn()}
+        onRetry={vi.fn()}
+        hasOlder
+        loadingOlder
+        onLoadOlder={loadMessages}
+      />
+    </>);
+
+    await userEvent.click(screen.getByRole("button", { name: "加载更多对话" }));
+    expect(loadConversations).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "正在加载更早消息…" })).toBeDisabled();
+
+    rerender(<MessageList messages={[failed]} onSources={vi.fn()} onRetry={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: /加载更早消息/ })).not.toBeInTheDocument();
+  });
+
   it("requires two documents and submits only on a non-composing shortcut", async () => {
     const submit = vi.fn();
     render(<QaComposer busy={false} documentCount={1} onSubmit={submit} />);
@@ -37,6 +67,11 @@ describe("QA workspace components", () => {
     await userEvent.click(screen.getByRole("button", { name: "复制引用 1" }));
     expect(screen.getByText("复制失败，请手动选择引用文本")).toBeVisible();
     expect(document.body).not.toHaveTextContent("private browser failure");
+  });
+
+  it("blocks retry while another QA action is busy", () => {
+    render(<MessageList messages={[failed]} onSources={vi.fn()} onRetry={vi.fn()} busy />);
+    expect(screen.getByRole("button", { name: "重试回答" })).toBeDisabled();
   });
 
   it("renders a decorative cue only while summary work is active", () => {
