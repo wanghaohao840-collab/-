@@ -193,6 +193,53 @@ class QaRepository:
             next_cursor = encode_cursor(last.created_at, last.id)
         return QaMessagePage(items, next_cursor)
 
+    def list_recent_messages(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> QaMessagePage:
+        page_size = _validated_limit(limit, maximum=200)
+        params: list[object] = [user_id, conversation_id]
+        cursor_clause = ""
+        if cursor:
+            timestamp, message_id = decode_cursor(cursor)
+            cursor_clause = (
+                "and (created_at < ? or (created_at = ? and id < ?))"
+            )
+            params.extend((timestamp, timestamp, message_id))
+        params.append(page_size + 1)
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                select * from qa_messages
+                where user_id = ? and conversation_id = ?
+                  and exists (
+                      select 1 from qa_conversations
+                      where qa_conversations.id = qa_messages.conversation_id
+                        and qa_conversations.user_id = qa_messages.user_id
+                        and {_not_fenced_clause('qa_conversations')}
+                  )
+                  {cursor_clause}
+                order by created_at desc, id desc
+                limit ?
+                """,
+                params,
+            ).fetchall()
+            has_more = len(rows) > page_size
+            page_rows = rows[:page_size]
+            items = tuple(
+                self._message_from_row(conn, row)
+                for row in reversed(page_rows)
+            )
+        next_cursor = None
+        if has_more and page_rows:
+            oldest = page_rows[-1]
+            next_cursor = encode_cursor(oldest["created_at"], oldest["id"])
+        return QaMessagePage(items, next_cursor)
+
     def get_message(self, user_id: str, message_id: str) -> QaMessage | None:
         with connect(self.db_path) as conn:
             row = conn.execute(
