@@ -268,9 +268,9 @@ def test_message_route_starts_newest_and_pages_toward_older_history(
     session = qa_parts.services.session_registry.get_session(qa_parts.owner_token)
     user_id = str(session.user_id)
     repository = qa_parts.services.qa_service.repository
-    turn_ids: list[set[str]] = []
-    for index in range(3):
-        timestamp = f"2026-08-27T10:00:0{index}Z"
+    timestamp = "2026-08-27T10:00:00Z"
+    message_ids: set[str] = set()
+    for index in range(4):
         pending = repository.create_pending_turn(
             user_id,
             conversation["conversation_id"],
@@ -289,22 +289,50 @@ def test_message_route_starts_newest_and_pages_toward_older_history(
             None,
             now=timestamp,
         )
-        turn_ids.append({pending.user_message.id, pending.assistant_message.id})
+        message_ids.update((pending.user_message.id, pending.assistant_message.id))
 
     url = f"/api/v1/qa/conversations/{conversation['conversation_id']}/messages"
-    first = qa_parts.client.get(f"{url}?limit=2")
+    first = qa_parts.client.get(f"{url}?limit=3")
     assert first.status_code == 200
     first_page = first.json()
-    assert {item["message_id"] for item in first_page["items"]} == turn_ids[2]
+    repeated_first = qa_parts.client.get(f"{url}?limit=3")
+    assert repeated_first.status_code == 200
+    assert repeated_first.json() == first_page
+    assert len(first_page["items"]) == 3
     assert first_page["next_cursor"] is not None
 
-    second = qa_parts.client.get(
-        f"{url}?limit=2&cursor={quote(first_page['next_cursor'], safe='')}"
+    pages = [first_page]
+    page_texts = [first.text]
+    while pages[-1]["next_cursor"] is not None:
+        page = qa_parts.client.get(
+            f"{url}?limit=3&cursor={quote(pages[-1]['next_cursor'], safe='')}"
+        )
+        assert page.status_code == 200
+        pages.append(page.json())
+        page_texts.append(page.text)
+
+    page_ids = [
+        [item["message_id"] for item in page["items"]]
+        for page in pages
+    ]
+    assert [len(ids) for ids in page_ids] == [3, 3, 2]
+    assert all(
+        item["created_at"] == timestamp
+        for page in pages
+        for item in page["items"]
     )
-    assert second.status_code == 200
-    assert {item["message_id"] for item in second.json()["items"]} == turn_ids[1]
-    assert_safe(first.text)
-    assert_safe(second.text)
+    assert all(ids == sorted(ids) for ids in page_ids)
+    assert len({message_id for ids in page_ids for message_id in ids}) == len(
+        message_ids
+    )
+    assert {message_id for ids in page_ids for message_id in ids} == message_ids
+    expected_descending = sorted(message_ids, reverse=True)
+    assert page_ids == [
+        list(reversed(expected_descending[index : index + 3]))
+        for index in range(0, len(expected_descending), 3)
+    ]
+    for text in page_texts:
+        assert_safe(text)
 
 
 def test_engine_failure_returns_safe_trace_without_raw_exception(qa_parts) -> None:
