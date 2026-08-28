@@ -609,6 +609,28 @@ class QaJobRepository:
             ).fetchone()
             return _job_from_row(row) if row is not None else None
 
+    def get_active_for_conversation(
+        self, user_id: str, conversation_id: str
+    ) -> QaJob | None:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                f"""
+                select qa_jobs.*
+                from qa_jobs
+                join qa_conversations
+                  on qa_conversations.id = qa_jobs.conversation_id
+                 and qa_conversations.user_id = qa_jobs.user_id
+                where qa_jobs.user_id = ?
+                  and qa_jobs.conversation_id = ?
+                  and qa_jobs.status in ('queued', 'running')
+                  and {_not_fenced_clause('qa_conversations')}
+                order by qa_jobs.created_at desc, qa_jobs.id desc
+                limit 1
+                """,
+                (user_id, conversation_id),
+            ).fetchone()
+            return _job_from_row(row) if row is not None else None
+
     @staticmethod
     def _owns_live_lease(
         row: sqlite3.Row | None, worker_id: str, timestamp: str

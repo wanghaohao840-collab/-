@@ -116,6 +116,10 @@ class QaJobResponse(BaseModel):
     updated_at: str
 
 
+class QaActiveJobResponse(BaseModel):
+    job: QaJobResponse | None
+
+
 class QaDeletionResponse(BaseModel):
     deletion_id: str
     target_type: Literal["conversation", "document"]
@@ -223,6 +227,10 @@ def job_response(job: QaJob) -> QaJobResponse:
         finished_at=job.finished_at,
         updated_at=job.updated_at,
     )
+
+
+def active_job_response(job: QaJob | None) -> QaActiveJobResponse:
+    return QaActiveJobResponse(job=job_response(job) if job is not None else None)
 
 
 def deletion_response(deletion: QaDeletion) -> QaDeletionResponse:

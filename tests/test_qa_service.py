@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -304,4 +305,26 @@ def test_summary_service_methods_are_user_scoped_and_notify_worker(
     assert worker.notifications == 1
     assert service.get_job(TOKEN, job.id).id == job.id
     assert service.get_job("other-token", job.id) is None
+    active = service.get_active_job(TOKEN, conversation.id)
+    assert active is not None
+    assert active.id == job.id
+    with pytest.raises(QaNotFoundError):
+        service.get_active_job("other-token", conversation.id)
     assert service.cancel_job(TOKEN, job.id).status == "cancelled"
+
+
+def test_product_message_listing_uses_recent_repository_read(
+    service_parts, monkeypatch
+) -> None:
+    service = make_service(service_parts)
+    _, repository, _sessions, _library, _telemetry = service_parts
+    conversation = service.create_conversation(TOKEN, ["doc-1"])
+    recent = repository.list_recent_messages
+    recent_spy = Mock(wraps=recent)
+    monkeypatch.setattr(repository, "list_recent_messages", recent_spy)
+
+    service.list_messages(TOKEN, conversation.id, limit=7)
+
+    recent_spy.assert_called_once_with(
+        OWNER, conversation.id, cursor=None, limit=7
+    )

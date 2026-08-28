@@ -16,6 +16,7 @@ from api.errors import error_response
 from api.schemas.qa import (
     AskRequest,
     CreateConversationRequest,
+    QaActiveJobResponse,
     QaCapabilitiesResponse,
     QaConversationPageResponse,
     QaConversationResponse,
@@ -25,6 +26,7 @@ from api.schemas.qa import (
     QaMessageResponse,
     RetryRequest,
     SummaryRequest,
+    active_job_response,
     conversation_page_response,
     conversation_response,
     deletion_response,
@@ -302,6 +304,28 @@ def retry_message(
         if message.status == "pending":
             response.status_code = status.HTTP_202_ACCEPTED
         return message_response(message)
+    except Exception as error:
+        return _domain_error(error)
+
+
+@router.get(
+    "/conversations/{conversation_id}/summary-jobs/active",
+    response_model=QaActiveJobResponse,
+)
+def get_active_summary_job(
+    conversation_id: UUID,
+    request: Request,
+    _session: Annotated[UserSession, Depends(get_current_session)],
+    service: Annotated[QaService, Depends(get_qa_service)],
+):
+    if disabled := _disabled(request):
+        return disabled
+    try:
+        return active_job_response(
+            service.get_active_job(
+                get_session_token(request), str(conversation_id)
+            )
+        )
     except Exception as error:
         return _domain_error(error)
 

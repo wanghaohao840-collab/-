@@ -61,6 +61,39 @@ def test_summary_enqueue_is_atomic_and_idempotent(repositories) -> None:
     assert jobs.get(OTHER, first.job.id) is None
 
 
+def test_active_job_discovery_is_user_conversation_and_fence_scoped(
+    repositories,
+) -> None:
+    qa, jobs = repositories
+    created = conversation(qa)
+    enqueued = jobs.create_summary_turn_and_job(
+        OWNER, created.id, "总结", "client-active", now=iso(NOW)
+    )
+
+    assert jobs.get_active_for_conversation(OWNER, created.id).id == enqueued.job.id
+    assert jobs.get_active_for_conversation(OTHER, created.id) is None
+
+    cancelled = jobs.request_cancel(OWNER, enqueued.job.id, now=iso(NOW))
+    assert cancelled.status == "cancelled"
+    assert jobs.get_active_for_conversation(OWNER, created.id) is None
+
+    second = jobs.create_summary_turn_and_job(
+        OWNER, created.id, "再次总结", "client-fenced", now=iso(NOW)
+    )
+    with connect(qa.db_path) as conn:
+        conn.execute(
+            """
+            insert into qa_deletion_fences (
+                id, user_id, target_type, target_id, status, stage,
+                created_at, updated_at
+            ) values ('fence', ?, 'conversation', ?, 'queued', 'fenced', ?, ?)
+            """,
+            (OWNER, created.id, iso(NOW), iso(NOW)),
+        )
+    assert jobs.get_active_for_conversation(OWNER, created.id) is None
+    assert jobs.get(OWNER, second.job.id) is not None
+
+
 def test_expired_running_job_is_reclaimed_and_stale_owner_loses(repositories) -> None:
     qa, jobs = repositories
     created = conversation(qa)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import quote
 from uuid import uuid4
 
 import pytest
@@ -225,11 +226,28 @@ def test_summary_and_deletion_status_resources_are_reconnect_safe(qa_parts) -> N
     assert summary.status_code == 202
     job_id = summary.json()["job_id"]
     assert qa_parts.client.get(f"/api/v1/qa/jobs/{job_id}").status_code == 200
+    active_url = (
+        f"/api/v1/qa/conversations/{conversation['conversation_id']}"
+        "/summary-jobs/active"
+    )
+    active = qa_parts.client.get(active_url)
+    assert active.status_code == 200
+    assert active.json()["job"]["job_id"] == job_id
+    assert_safe(active.text)
+
     cancelled = qa_parts.client.post(
         f"/api/v1/qa/jobs/{job_id}/cancel", headers=csrf(qa_parts)
     )
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
+    assert qa_parts.client.get(active_url).json() == {"job": None}
+
+    qa_parts.client.cookies.set(COOKIE, qa_parts.other_token)
+    hidden = qa_parts.client.get(active_url)
+    assert hidden.status_code == 404
+    assert_safe(hidden.text)
+
+    qa_parts.client.cookies.set(COOKIE, qa_parts.owner_token)
 
     deleted = qa_parts.client.delete(
         f"/api/v1/qa/conversations/{conversation['conversation_id']}",
@@ -241,6 +259,52 @@ def test_summary_and_deletion_status_resources_are_reconnect_safe(qa_parts) -> N
     assert polled.status_code == 200
     assert polled.json()["deletion_id"] == deletion_id
     assert_safe(polled.text)
+
+
+def test_message_route_starts_newest_and_pages_toward_older_history(
+    qa_parts,
+) -> None:
+    conversation = create_conversation(qa_parts)
+    session = qa_parts.services.session_registry.get_session(qa_parts.owner_token)
+    user_id = str(session.user_id)
+    repository = qa_parts.services.qa_service.repository
+    turn_ids: list[set[str]] = []
+    for index in range(3):
+        timestamp = f"2026-08-27T10:00:0{index}Z"
+        pending = repository.create_pending_turn(
+            user_id,
+            conversation["conversation_id"],
+            f"问题 {index}",
+            "auto",
+            f"route-page-{index}",
+            now=timestamp,
+        )
+        assert repository.complete_turn(
+            user_id,
+            pending.assistant_message.id,
+            pending.assistant_message.version,
+            f"回答 {index}",
+            (),
+            "none",
+            None,
+            now=timestamp,
+        )
+        turn_ids.append({pending.user_message.id, pending.assistant_message.id})
+
+    url = f"/api/v1/qa/conversations/{conversation['conversation_id']}/messages"
+    first = qa_parts.client.get(f"{url}?limit=2")
+    assert first.status_code == 200
+    first_page = first.json()
+    assert {item["message_id"] for item in first_page["items"]} == turn_ids[2]
+    assert first_page["next_cursor"] is not None
+
+    second = qa_parts.client.get(
+        f"{url}?limit=2&cursor={quote(first_page['next_cursor'], safe='')}"
+    )
+    assert second.status_code == 200
+    assert {item["message_id"] for item in second.json()["items"]} == turn_ids[1]
+    assert_safe(first.text)
+    assert_safe(second.text)
 
 
 def test_engine_failure_returns_safe_trace_without_raw_exception(qa_parts) -> None:

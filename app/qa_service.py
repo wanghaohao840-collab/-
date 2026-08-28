@@ -166,7 +166,7 @@ class QaService:
     ) -> QaMessagePage:
         session = self.session_registry.get_session(session_token)
         self._require_conversation(str(session.user_id), conversation_id)
-        return self.repository.list_messages(
+        return self.repository.list_recent_messages(
             str(session.user_id), conversation_id, cursor=cursor, limit=limit
         )
 
@@ -307,6 +307,16 @@ class QaService:
             raise RuntimeError("QA summary workers are not configured")
         session = self.session_registry.get_session(session_token)
         return self.job_repository.get(str(session.user_id), job_id)
+
+    def get_active_job(self, session_token: str, conversation_id: str):
+        if self.job_repository is None:
+            raise RuntimeError("QA summary workers are not configured")
+        session = self.session_registry.get_session(session_token)
+        user_id = str(session.user_id)
+        self._require_conversation(user_id, conversation_id)
+        return self.job_repository.get_active_for_conversation(
+            user_id, conversation_id
+        )
 
     def cancel_job(self, session_token: str, job_id: str):
         if self.job_repository is None or self.worker_pool is None:
