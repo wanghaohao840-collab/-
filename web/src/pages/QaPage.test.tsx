@@ -44,6 +44,7 @@ function renderPage(
   options: RenderPageOptions = {},
 ) {
   const conversationItems = options.conversations ?? [conversation];
+  let activeSummaryRequests = 0;
   fetchMock.mockImplementation((input, init) => {
     const url = String(input);
     if (url === "/api/v1/auth/session") return Promise.resolve(response({ username: "reader", csrf_token: "csrf" }));
@@ -57,8 +58,10 @@ function renderPage(
     if (url === `/api/v1/qa/conversations/${conversation.conversation_id}` && init?.method === "DELETE") return Promise.resolve(response({ deletion_id: "deletion-1", target_type: "conversation", target_id: conversation.conversation_id, status: "queued", stage: "queued", affected_conversation_count: 1, attempt_count: 0, safe_error_code: null, trace_id: null, created_at: "now", updated_at: "queued" }, 202));
     if (url.includes("/messages?limit=50")) return Promise.resolve(response({ items: messages, next_cursor: null }));
     if (url.endsWith("/summary-jobs/active") && (init?.method ?? "GET") === "GET") {
+      activeSummaryRequests += 1;
       const selected = conversationItems.find((item) => url.includes(item.conversation_id));
-      const active = options.activeJob?.conversation_id === selected?.conversation_id
+      const active = activeSummaryRequests === 1
+        && options.activeJob?.conversation_id === selected?.conversation_id
         ? options.activeJob
         : null;
       return Promise.resolve(response({ job: active }));
@@ -148,6 +151,8 @@ describe("QaPage", () => {
     await waitFor(() => expect(
       fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/summary-jobs/active")).length,
     ).toBeGreaterThanOrEqual(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText(/学习摘要 · 已完成/)).toBeVisible();
   });
 
   it("does not carry a just-created summary identity into another conversation", async () => {

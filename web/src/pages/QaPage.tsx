@@ -42,10 +42,19 @@ export function QaPage() {
   const summaryJobId = startedJobId ?? activeSummary.data?.job?.job_id;
   const job = useQaJob(summaryJobId);
   const deletion = useQaDeletion(deletionId);
+  const discoveredSummary = activeSummary.data?.job;
 
   useEffect(() => {
     setStartedSummary(undefined);
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId || discoveredSummary?.conversation_id !== selectedId) return;
+    setStartedSummary((current) => current?.conversationId === selectedId
+      && current.jobId === discoveredSummary.job_id
+      ? current
+      : { conversationId: selectedId, jobId: discoveredSummary.job_id });
+  }, [discoveredSummary, selectedId]);
 
   useEffect(() => {
     if (deletion.data?.status === "completed") {
