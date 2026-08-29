@@ -1,7 +1,7 @@
 ---
 id: "qa-vertical-slice-08"
 title: "Restore reconnectable long-history QA state"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["qa-vertical-slice-07"]
 base-commit: "7f3b91fbf72931cb98cf0dd7fad04a3b143780a6"
@@ -113,11 +113,11 @@ Use a dedicated active-job query keyed by conversation. Seed/update it when summ
 
 ## Acceptance criteria
 
-- [ ] Repository/API tests prove newest-first initial messages, opaque older cursor, stable equal-timestamp tiebreaker, active-job isolation and `{job:null}`.
-- [ ] Frontend tests prove both cursors are sent/flattened correctly, latest pending state drives polling, and no duplicates/order regressions occur.
-- [ ] Page tests prove reload discovery restores summary progress/cancel and disables ask/summary until terminal reconciliation.
-- [ ] Real-server Playwright reloads an active summary and observes restored progress/cancel without interception or browser storage.
-- [ ] Focused Python/frontend/E2E gates and the full combined regression remain green; no snapshots, dependencies or production fake paths change.
+- [x] Repository/API tests prove newest-first initial messages, opaque older cursor, stable equal-timestamp tiebreaker, active-job isolation and `{job:null}`.
+- [x] Frontend tests prove both cursors are sent/flattened correctly, latest pending state drives polling, and no duplicates/order regressions occur.
+- [x] Page tests prove reload discovery restores summary progress/cancel and disables ask/summary until terminal reconciliation.
+- [x] Real-server Playwright reloads an active summary and observes restored progress/cancel without interception or browser storage.
+- [x] Focused Python/frontend/E2E gates and the full combined regression are green. Dependencies and production paths are unchanged; the user explicitly approved updating only `qa-summary-desktop.png` after truthful busy-state controls made the prior enabled-controls baseline stale.
 
 ## Test and verification commands
 
@@ -157,5 +157,21 @@ Stop and report `blocked` if implementation requires schema migration, changes e
 
 ## Implementation handoff
 
-Replace this section with packet ID/status, files/interfaces, acceptance evidence, exact verification counts, scope confirmation, deviations/residual risks and commit. After `done`, rerun and revise `FINAL_INTEGRATION_REVIEW.md`; the feature remains incomplete until its result is `accepted`.
-
+- Packet/status: `qa-vertical-slice-08` / `done`
+- Delivered interfaces: recent message cursor paging, active summary discovery, bounded infinite queries, explicit history controls, reload recovery and active-task mutual exclusion.
+- Verification:
+  - Focused Python: `42 passed`.
+  - Focused frontend: `4` files and `25` tests passed; typecheck and lint exited `0`; production build transformed `121` modules.
+  - Focused real-server QA: `12 passed`, `0 skipped` across desktop, tablet and mobile. The desktop reload assertion also passed twice consecutively with the original adapter before deterministic visual synchronization was finalized.
+  - Full Python: `1036 passed, 7 skipped` (`7` documented optional/project-conditional skips).
+  - Full frontend: `14` files and `128` tests passed.
+  - Full Playwright: `58 passed, 2 skipped`; QA was `12/12` with `0` QA skips.
+  - Design: `17/17`; npm audit: `0` vulnerabilities; pip check: no broken requirements; all required commands and `git diff --check` exited `0`.
+- Scope: no schema, dependency, browser-storage, production-fake, auth, deletion, RAG/Memory or internal oldest-first traversal change. The E2E-only runtime holds the existing `starting · 0%` state with cancellable progress callbacks; it adds no browser fixed sleep or route interception.
+- Deviations/residual risks: the user explicitly approved one visual baseline update, `web/e2e/qa.spec.ts-snapshots/qa-summary-desktop.png`, because the accepted active-summary mutual exclusion now truthfully disables conflicting controls. No other snapshot changed. Polling remains the intentional transport boundary pending SSE/WebSocket; distributed deployment still requires shared coordination and storage.
+- Commits:
+  - Task 1: `af2409b`
+  - Task 2: `94eb558`, `e2ab51b`
+  - Task 3: `17e23ad`, `8ab4da8`
+  - Task 4: `ce98906`, `628992e`
+  - Task 5: `81eb092`
