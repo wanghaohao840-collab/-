@@ -54,12 +54,17 @@ test("real server preserves answer, isolates users, cancels summary and deletes 
 
   await page.getByRole("button", { name: "生成摘要" }).click();
   const summary = page.locator(".qa-summary-status");
-  await expect(summary).toContainText(/生成中|已完成/);
-  const cancel = summary.getByRole("button", { name: "取消生成" });
-  if (await cancel.isVisible()) {
-    await cancel.click();
-    await expect(summary).toContainText(/已取消|已完成/, { timeout: 15_000 });
-  }
+  await expect(summary).toContainText("生成中", { timeout: 15_000 });
+  await expect(summary.getByRole("button", { name: "取消生成" })).toBeVisible();
+
+  await page.reload();
+
+  await expect(summary).toContainText("生成中", { timeout: 15_000 });
+  await expect(summary.getByRole("button", { name: "取消生成" })).toBeVisible();
+  await expect(page.getByLabel("向这些文档提问")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "生成摘要" })).toBeDisabled();
+  await summary.getByRole("button", { name: "取消生成" }).click();
+  await expect(summary).toContainText(/已取消|已完成/, { timeout: 15_000 });
 
   const otherPage = await browser.newPage();
   try {

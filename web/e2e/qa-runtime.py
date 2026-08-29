@@ -38,6 +38,10 @@ class DeterministicQaAnswerEngine:
             raise QaEngineError("QA_ENGINE_UNAVAILABLE", retryable=True)
 
         if callable(progress_callback):
+            if request.mode == "summary":
+                for _ in range(20):
+                    progress_callback("starting", 0, 5, "safe")
+                    time.sleep(0.08)
             for completed in range(1, 5):
                 progress_callback("summarizing", completed, 5, "safe")
                 time.sleep(0.08)
