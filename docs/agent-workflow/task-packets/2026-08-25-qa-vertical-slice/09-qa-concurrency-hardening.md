@@ -288,7 +288,10 @@ destructive cleanup outside the stored fence scope. None was encountered.
 - Residual risks/follow-ups:
   - polling and single-process runtime locking remain intentional; distributed
     deployment still requires shared coordination.
-  - final integration status remains pending an independent whole-range re-review.
+  - independent whole-range re-review: PASS — `19 passed in 37.21s`, with no
+    Critical or Important findings. Its sole Minor EOF whitespace finding in
+    `docs/superpowers/specs/2026-08-28-qa-reconnect-pagination-design.md` was
+    fixed by `31b7fca`; the correct reviewed range passes `git diff --check`.
 - Commits:
   - concurrency/lease baseline: `6b0494b55761c39695ba8e2fdae0630f22e5830b`
   - deletion replay audit fixes: `40ec2b124aa02bc50396497a4b435966c7c05738`

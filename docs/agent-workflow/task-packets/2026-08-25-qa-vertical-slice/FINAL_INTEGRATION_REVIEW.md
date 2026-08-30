@@ -1,10 +1,10 @@
 # Final Integration Review: QA vertical slice
 
 - Source review: `REVIEW.md`
-- Reviewed implementation commit: `46ae385e3c5aa406bf6cee8675e732366d72f11d`; controller-owned `.superpowers/sdd/progress.md` remains unstaged and excluded
+- Reviewed implementation/head: `31b7fca6d37f253c97d5c13893822a34a2976a41` (Packet 09 implementation plus the documentation-only EOF fix); controller-owned `.superpowers/sdd/progress.md` remains unstaged and excluded
 - Review date: `2026-08-30`
-- Result: `changes-required`
-- Re-review status: `pending final independent re-review`
+- Result: `accepted`
+- Re-review status: `independent whole-range re-review approved`
 
 ## Delivered packet inventory
 
@@ -26,7 +26,7 @@
 | `qa-vertical-slice-06h` | done | `4fc6122` | existing browser contract alignment | PASS |
 | `qa-vertical-slice-07` | done | `eb47112` | real-server E2E, visual and release evidence | PASS |
 | `qa-vertical-slice-08` | done | `af2409b`, `94eb558`, `e2ab51b`, `17e23ad`, `8ab4da8`, `ce98906`, `628992e`, `81eb092` | recent paging, active discovery, bounded UI consumption, reload recovery and acceptance evidence | PASS |
-| `qa-vertical-slice-09` | done | `6b0494b`, `40ec2b1`, `46ae385` | atomic creation/deletion ordering, live lease recovery, replay-safe document removal/clear-all and regressions | PASS; independent re-review pending |
+| `qa-vertical-slice-09` | done | `6b0494b`, `40ec2b1`, `46ae385` | atomic creation/deletion ordering, live lease recovery, replay-safe document removal/clear-all and regressions | PASS; independent whole-range re-review approved |
 
 ## Combined diff reviewed
 
@@ -89,6 +89,7 @@
 - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_qa_repository.py tests/test_qa_job_repository.py tests/test_qa_worker.py tests/test_qa_deletion.py tests/test_document_library_service.py tests/test_user_mutation_coordination.py tests/test_qa_service.py tests/api/test_qa_routes.py --basetemp=.runtime/pytest-qa-concurrency-focused-takeover` — PASS (`102 passed in 204.67s`). The brief's nonexistent `tests/test_document_library.py` was replaced by the exact nearest existing suite, `tests/test_document_library_service.py`; the existing coordination suite was added to cover direct Assistant contracts.
 - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q --basetemp=.runtime/pytest-qa-concurrency-full-takeover` — PASS (`1053 passed, 7 skipped in 1284.35s`; skips remain documented optional/project-conditional cases).
 - `D:\python_self_agent\venv\Scripts\python.exe -m pip check`; `git diff --check`; packet 09 forbidden-path scan — PASS (no broken requirements, no whitespace errors, and no schema/public DTO/frontend/E2E/snapshot changes).
+- Independent whole-range re-review of `0cfc150cc083127ae0b3e5bdd7f57f2df6f6299c..31b7fca6d37f253c97d5c13893822a34a2976a41` — PASS (`19 passed in 37.21s`); no Critical or Important findings. Its sole Minor, the EOF blank line in `docs/superpowers/specs/2026-08-28-qa-reconnect-pagination-design.md`, was fixed by `31b7fca`. `git diff --check 0cfc150cc083127ae0b3e5bdd7f57f2df6f6299c..31b7fca6d37f253c97d5c13893822a34a2976a41` — PASS with no output.
 
 - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_qa_repository.py tests/test_qa_job_repository.py tests/test_qa_service.py tests/api/test_qa_routes.py --basetemp=.runtime/pytest-qa-08-focused` — PASS (`42 passed`).
 - `npm exec vitest run src/features/qa/api.test.ts src/features/qa/queries.test.tsx src/components/QaWorkspace/QaWorkspace.test.tsx src/pages/QaPage.test.tsx`; `npm run typecheck`; `npm run lint`; `npm run build` — PASS (`4` files, `25` tests; `121` build modules).
@@ -107,14 +108,14 @@
 
 - None.
 
-### Changes required
+### Closed findings
 
-- The packet 09 implementation has not yet received the controller's required final independent whole-range re-review. The integration result therefore remains `changes-required` even though all known implementation findings and gates are closed; do not treat this document as independent acceptance.
+- The independent whole-range re-review is approved: `19 passed in 37.21s`, no Critical or Important findings. The sole Minor was the EOF blank line in `docs/superpowers/specs/2026-08-28-qa-reconnect-pagination-design.md`; `31b7fca` removes it, and the correct reviewed range passes `git diff --check` with no output.
 - The earlier packet 08 P1 findings remain closed:
   - Conversations with `202` messages start from the newest 50-row page, preserve chronological rendering, and traverse older opaque-cursor pages without overlap; the UI exposes bounded 20-conversation and 50-message load controls.
   - Active summary discovery is user/conversation scoped; after browser reload the page restores truthful progress/cancel state from the server, disables ask/summary actions, and retains the discovered job through terminal reconciliation.
 - Packet 07's prior proof gap is closed by the real-server reload assertion in `web/e2e/qa.spec.ts`; it uses no route interception, browser storage or fixed browser sleep.
-- The later whole-branch findings are implemented and locally closed pending that independent decision:
+- The later whole-branch findings are implemented and independently confirmed closed:
   - Important 1: conversation creation now acquires `BEGIN IMMEDIATE` before the fence read, and event-driven two-connection tests prove deletion-first and creation-first commit orderings. The runtime lock also spans document projection through repository commit, closing the service-level TOCTOU seam.
   - Important 2: every summary/deletion claim pass atomically recovers expired rows; live workers terminalize exhausted and cancel-requested work without restart/notification, active discovery/fences clear, and stale owners remain rejected.
   - Important 3: the claimed durable deletion replay path tolerates an already removed target without changing ordinary not-found behavior; RAG then safe source unlink then History removal preserves retry metadata, injected failure after the first destructive delete retries to completion, and direct clear-all now follows the same replay-safe order with RAG failure protection.
@@ -130,4 +131,4 @@
 
 ## Decision
 
-Result remains `changes-required / pending final independent re-review`. Packet 09 closes the three Important findings, the clear-all replay audit gap, and two Minor coverage gaps in implementation; all focused/full/dependency/diff gates are green, but acceptance is deliberately withheld until the controller receives a clean independent review of `c0dc5a8..46ae385` and records that decision.
+Result: `accepted`. The independent whole-range re-review approved `0cfc150cc083127ae0b3e5bdd7f57f2df6f6299c..31b7fca6d37f253c97d5c13893822a34a2976a41` after `19 passed in 37.21s`, with no Critical or Important findings. Its sole Minor EOF whitespace finding is fixed in the reviewed head; all focused, full, dependency and correct-range diff gates are green.
