@@ -115,6 +115,7 @@ class QaJobRepository:
         conn = connect(self.db_path)
         try:
             conn.execute("begin immediate")
+            self._recover_expired_in_connection(conn, timestamp)
             candidates = conn.execute(
                 f"""
                 select id, status, version from qa_jobs
@@ -125,13 +126,9 @@ class QaJobRepository:
                         and qa_conversations.user_id = qa_jobs.user_id
                         and {_not_fenced_clause('qa_conversations')}
                   )
-                  and (
-                      status = 'queued'
-                      or (status = 'running' and lease_expires_at <= ?)
-                  )
+                  and status = 'queued'
                 order by created_at, id
-                """,
-                (timestamp,),
+                """
             ).fetchall()
             for candidate in candidates:
                 updated = conn.execute(
@@ -144,16 +141,14 @@ class QaJobRepository:
                         started_at = coalesce(started_at, ?), updated_at = ?,
                         version = version + 1
                     where id = ? and version = ?
+                      and attempt_count < max_attempts
                       and exists (
                           select 1 from qa_conversations
                           where qa_conversations.id = qa_jobs.conversation_id
                             and qa_conversations.user_id = qa_jobs.user_id
                             and {_not_fenced_clause('qa_conversations')}
                       )
-                      and (
-                          status = 'queued'
-                          or (status = 'running' and lease_expires_at <= ?)
-                      )
+                      and status = 'queued'
                     """,
                     (
                         worker_id,
@@ -163,7 +158,6 @@ class QaJobRepository:
                         timestamp,
                         candidate["id"],
                         candidate["version"],
-                        timestamp,
                     ),
                 )
                 if updated.rowcount:
@@ -546,60 +540,67 @@ class QaJobRepository:
         conn = connect(self.db_path)
         try:
             conn.execute("begin immediate")
-            rows = conn.execute(
-                """
-                select * from qa_jobs
-                where status = 'running' and lease_expires_at <= ?
-                order by created_at, id
-                """,
-                (timestamp,),
-            ).fetchall()
-            for row in rows:
-                if row["cancel_requested_at"] is not None:
-                    self._cancel_running(conn, row, timestamp)
-                elif row["attempt_count"] < row["max_attempts"]:
-                    conn.execute(
-                        """
-                        update qa_jobs
-                        set status = 'queued', stage = 'queued', progress = 0,
-                            lease_owner = null, lease_expires_at = null,
-                            lease_duration_seconds = null, updated_at = ?,
-                            version = version + 1
-                        where id = ? and status = 'running'
-                          and lease_expires_at <= ?
-                        """,
-                        (timestamp, row["id"], timestamp),
-                    )
-                else:
-                    conn.execute(
-                        """
-                        update qa_jobs
-                        set status = 'failed', stage = 'failed',
-                            lease_owner = null, lease_expires_at = null,
-                            lease_duration_seconds = null,
-                            safe_error_code = 'QA_JOB_INTERRUPTED',
-                            finished_at = ?, updated_at = ?, version = version + 1
-                        where id = ? and status = 'running'
-                          and lease_expires_at <= ?
-                        """,
-                        (timestamp, timestamp, row["id"], timestamp),
-                    )
-                    self._finish_assistant(
-                        conn,
-                        row["assistant_message_id"],
-                        row["user_id"],
-                        "failed",
-                        "QA_JOB_INTERRUPTED",
-                        None,
-                        timestamp,
-                    )
+            recovered = self._recover_expired_in_connection(conn, timestamp)
             conn.commit()
-            return len(rows)
+            return recovered
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
+
+    def _recover_expired_in_connection(
+        self, conn: sqlite3.Connection, timestamp: str
+    ) -> int:
+        rows = conn.execute(
+            """
+            select * from qa_jobs
+            where status = 'running' and lease_expires_at <= ?
+            order by created_at, id
+            """,
+            (timestamp,),
+        ).fetchall()
+        for row in rows:
+            if row["cancel_requested_at"] is not None:
+                self._cancel_running(conn, row, timestamp)
+            elif row["attempt_count"] < row["max_attempts"]:
+                conn.execute(
+                    """
+                    update qa_jobs
+                    set status = 'queued', stage = 'queued', progress = 0,
+                        lease_owner = null, lease_expires_at = null,
+                        lease_duration_seconds = null, updated_at = ?,
+                        version = version + 1
+                    where id = ? and status = 'running'
+                      and lease_expires_at <= ?
+                    """,
+                    (timestamp, row["id"], timestamp),
+                )
+            else:
+                conn.execute(
+                    """
+                    update qa_jobs
+                    set status = 'failed', stage = 'failed',
+                        lease_owner = null, lease_expires_at = null,
+                        lease_duration_seconds = null,
+                        safe_error_code = 'QA_JOB_INTERRUPTED',
+                        trace_id = null, finished_at = ?, updated_at = ?,
+                        version = version + 1
+                    where id = ? and status = 'running'
+                      and lease_expires_at <= ?
+                    """,
+                    (timestamp, timestamp, row["id"], timestamp),
+                )
+                self._finish_assistant(
+                    conn,
+                    row["assistant_message_id"],
+                    row["user_id"],
+                    "failed",
+                    "QA_JOB_INTERRUPTED",
+                    None,
+                    timestamp,
+                )
+        return len(rows)
 
     def get(self, user_id: str, job_id: str) -> QaJob | None:
         with connect(self.db_path) as conn:

@@ -117,13 +117,18 @@ class DocumentLibraryService:
         document_id: str,
         *,
         assistant=None,
+        replay_if_missing: bool = False,
     ) -> None:
         temporary_assistant = None
         with runtime.lock:
             history = runtime.history.load()
             records = history.get("documents", [])
             record = self._latest_records(records).get(document_id)
-            if record is None or self._project_record(user_id, record) is None:
+            if record is None:
+                if replay_if_missing:
+                    return
+                raise DocumentNotFoundError()
+            if self._project_record(user_id, record) is None:
                 raise DocumentNotFoundError()
             try:
                 for related in records:

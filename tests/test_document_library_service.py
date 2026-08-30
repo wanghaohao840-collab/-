@@ -473,6 +473,36 @@ def test_delete_missing_and_unowned_document_are_same_not_found(
     assert service_fixture.registry.clear_calls == []
 
 
+def test_fenced_replay_noops_only_for_an_already_absent_document(
+    service_fixture,
+    tmp_path,
+) -> None:
+    document_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    service_fixture.service.perform_document_delete(
+        service_fixture.user_id,
+        service_fixture.registry.session.runtime,
+        document_id,
+        assistant=service_fixture.assistant,
+        replay_if_missing=True,
+    )
+    service_fixture.assistant.delete_document.assert_not_called()
+
+    outside = tmp_path / "other-user" / "outside.md"
+    outside.parent.mkdir()
+    outside.write_text("outside", encoding="utf-8")
+    service_fixture.history.documents = [_record(document_id, outside)]
+    with pytest.raises(DocumentNotFoundError):
+        service_fixture.service.perform_document_delete(
+            service_fixture.user_id,
+            service_fixture.registry.session.runtime,
+            document_id,
+            assistant=service_fixture.assistant,
+            replay_if_missing=True,
+        )
+    service_fixture.assistant.delete_document.assert_not_called()
+
+
 def test_durable_delete_rejects_active_import_before_creating_fence(
     service_fixture,
 ) -> None:

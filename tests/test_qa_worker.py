@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
+import app.qa_job_repository as qa_job_repository_module
 from app.database import connect, initialize_database
 from app.qa_answer_engine import QaAnswerResult, QaEngineError
 from app.qa_context import QaContextBuilder
@@ -259,3 +261,101 @@ def test_worker_processes_deterministic_memory_sync(worker_parts) -> None:
     finally:
         pool.stop()
     assert linked.memory_id == manager.ids[0]
+
+
+def test_live_worker_reconciles_final_attempt_expiry_without_notification(
+    worker_parts,
+    monkeypatch,
+) -> None:
+    qa, jobs, conversation = worker_parts
+    now = datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc)
+    clock = {"value": now.isoformat().replace("+00:00", "Z")}
+    monkeypatch.setattr(
+        qa_job_repository_module, "_utc_now", lambda: clock["value"]
+    )
+    enqueued = jobs.create_summary_turn_and_job(
+        OWNER,
+        conversation.id,
+        "总结",
+        "client-live-expiry",
+        max_attempts=1,
+    )
+    claimed = jobs.claim_next("lost-worker", lease_seconds=30)
+    assert claimed is not None
+    engine = Engine()
+    pool, _ = make_pool(worker_parts, engine)
+
+    pool.start()
+    try:
+        assert jobs.get(OWNER, enqueued.job.id).status == "running"
+        clock["value"] = (now + timedelta(seconds=31)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        terminal = wait_for(
+            lambda: (
+                current
+                if (current := jobs.get(OWNER, enqueued.job.id)).status == "failed"
+                else None
+            )
+        )
+    finally:
+        pool.stop()
+
+    assistant = qa.get_message(OWNER, enqueued.pending.assistant_message.id)
+    assert terminal.safe_error_code == "QA_JOB_INTERRUPTED"
+    assert assistant.status == "failed"
+    assert assistant.safe_error_code == "QA_JOB_INTERRUPTED"
+    assert jobs.get_active_for_conversation(OWNER, conversation.id) is None
+    assert engine.calls == []
+
+
+def test_live_worker_reconciles_cancel_requested_expiry_without_notification(
+    worker_parts,
+    monkeypatch,
+) -> None:
+    qa, jobs, conversation = worker_parts
+    now = datetime(2026, 8, 27, 8, 0, tzinfo=timezone.utc)
+    clock = {"value": now.isoformat().replace("+00:00", "Z")}
+    monkeypatch.setattr(
+        qa_job_repository_module, "_utc_now", lambda: clock["value"]
+    )
+    enqueued = jobs.create_summary_turn_and_job(
+        OWNER,
+        conversation.id,
+        "总结",
+        "client-live-cancelled-expiry",
+        max_attempts=1,
+    )
+    claimed = jobs.claim_next("lost-worker", lease_seconds=30)
+    assert claimed is not None
+    requested = jobs.request_cancel(
+        OWNER,
+        claimed.id,
+        now=(now + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+    )
+    assert requested.status == "running"
+    engine = Engine()
+    pool, _ = make_pool(worker_parts, engine)
+
+    pool.start()
+    try:
+        clock["value"] = (now + timedelta(seconds=31)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        terminal = wait_for(
+            lambda: (
+                current
+                if (current := jobs.get(OWNER, enqueued.job.id)).status
+                == "cancelled"
+                else None
+            )
+        )
+    finally:
+        pool.stop()
+
+    assistant = qa.get_message(OWNER, enqueued.pending.assistant_message.id)
+    assert terminal.safe_error_code is None
+    assert assistant.status == "cancelled"
+    assert assistant.safe_error_code is None
+    assert jobs.get_active_for_conversation(OWNER, conversation.id) is None
+    assert engine.calls == []

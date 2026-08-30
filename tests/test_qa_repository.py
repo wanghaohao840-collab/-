@@ -329,12 +329,18 @@ def test_recent_first_page_contains_latest_answer_beyond_200_messages(
             first_assistant_id = pending.assistant_message.id
         latest_assistant_id = pending.assistant_message.id
 
-    page = repository.list_recent_messages(OWNER, created.id, limit=50)
+    page = repository.list_recent_messages(OWNER, created.id)
     ids = {item.id for item in page.items}
     assert len(page.items) == 50
     assert latest_assistant_id in ids
     assert first_assistant_id not in ids
     assert page.next_cursor is not None
+
+    older = repository.list_recent_messages(
+        OWNER, created.id, cursor=page.next_cursor
+    )
+    assert len(older.items) == 50
+    assert ids.isdisjoint(item.id for item in older.items)
 
 
 def test_recovery_fails_only_orphaned_synchronous_pending(repository) -> None:

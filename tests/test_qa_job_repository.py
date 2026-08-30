@@ -241,3 +241,71 @@ def test_recover_expired_requeues_without_touching_terminal_jobs(repositories) -
     assert jobs.recover_expired(now=iso(NOW + timedelta(seconds=31))) == 1
     assert jobs.get(OWNER, enqueued.job.id).status == "queued"
     assert jobs.recover_expired(now=iso(NOW + timedelta(seconds=32))) == 0
+
+
+def test_claim_pass_terminalizes_expired_final_attempt_and_assistant(
+    repositories,
+) -> None:
+    qa, jobs = repositories
+    created = conversation(qa)
+    enqueued = jobs.create_summary_turn_and_job(
+        OWNER,
+        created.id,
+        "总结",
+        "client-final-expiry",
+        max_attempts=1,
+        now=iso(NOW),
+    )
+    claimed = jobs.claim_next("worker-a", lease_seconds=30, now=iso(NOW))
+    assert claimed is not None
+    assert claimed.attempt_count == claimed.max_attempts == 1
+
+    assert jobs.claim_next(
+        "worker-b", lease_seconds=30, now=iso(NOW + timedelta(seconds=31))
+    ) is None
+
+    terminal = jobs.get(OWNER, enqueued.job.id)
+    assistant = qa.get_message(OWNER, enqueued.pending.assistant_message.id)
+    assert terminal.status == "failed"
+    assert terminal.safe_error_code == "QA_JOB_INTERRUPTED"
+    assert assistant.status == "failed"
+    assert assistant.safe_error_code == "QA_JOB_INTERRUPTED"
+    assert jobs.get_active_for_conversation(OWNER, created.id) is None
+    assert not jobs.heartbeat(
+        claimed.id,
+        "worker-a",
+        progress=50,
+        stage="late",
+        now=iso(NOW + timedelta(seconds=31)),
+    )
+
+
+def test_claim_pass_cancels_expired_cancel_requested_final_attempt(
+    repositories,
+) -> None:
+    qa, jobs = repositories
+    created = conversation(qa)
+    enqueued = jobs.create_summary_turn_and_job(
+        OWNER,
+        created.id,
+        "总结",
+        "client-cancelled-expiry",
+        max_attempts=1,
+        now=iso(NOW),
+    )
+    claimed = jobs.claim_next("worker-a", lease_seconds=30, now=iso(NOW))
+    assert claimed is not None
+    requested = jobs.request_cancel(
+        OWNER, claimed.id, now=iso(NOW + timedelta(seconds=1))
+    )
+    assert requested.status == "running"
+
+    assert jobs.claim_next(
+        "worker-b", lease_seconds=30, now=iso(NOW + timedelta(seconds=31))
+    ) is None
+
+    terminal = jobs.get(OWNER, enqueued.job.id)
+    assistant = qa.get_message(OWNER, enqueued.pending.assistant_message.id)
+    assert terminal.status == "cancelled"
+    assert assistant.status == "cancelled"
+    assert jobs.get_active_for_conversation(OWNER, created.id) is None

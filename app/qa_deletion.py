@@ -201,7 +201,10 @@ class QaDeletionRepository:
                 """
                 select 1 from qa_deletion_fences
                 where user_id = ? and target_type = ? and target_id = ?
-                  and status != 'completed'
+                  and (
+                      status in ('queued', 'running')
+                      or (status = 'failed' and attempt_count < 3)
+                  )
                 """,
                 (user_id, target_type, target_id),
             ).fetchone()
@@ -241,17 +244,14 @@ class QaDeletionRepository:
         conn = connect(self.db_path)
         try:
             conn.execute("begin immediate")
+            self._recover_expired_in_connection(conn, timestamp)
             candidates = conn.execute(
                 """
                 select id from qa_deletion_fences
-                where attempt_count < 3 and (
-                    status in ('queued','failed')
-                    or (status = 'running' and lease_expires_at <= ?)
-                )
+                where attempt_count < 3 and status in ('queued','failed')
                 order by created_at, id
                 limit 1
-                """,
-                (timestamp,),
+                """
             ).fetchall()
             for candidate in candidates:
                 updated = conn.execute(
@@ -260,12 +260,10 @@ class QaDeletionRepository:
                     set status = 'running', attempt_count = attempt_count + 1,
                         lease_owner = ?, lease_expires_at = ?,
                         safe_error_code = null, trace_id = null, updated_at = ?
-                    where id = ? and attempt_count < 3 and (
-                        status in ('queued','failed')
-                        or (status = 'running' and lease_expires_at <= ?)
-                    )
+                    where id = ? and attempt_count < 3
+                      and status in ('queued','failed')
                     """,
-                    (worker_id, expires_at, timestamp, candidate["id"], timestamp),
+                    (worker_id, expires_at, timestamp, candidate["id"]),
                 )
                 if updated.rowcount:
                     row = conn.execute(
@@ -284,18 +282,35 @@ class QaDeletionRepository:
 
     def recover_expired(self, *, now: str | None = None) -> int:
         timestamp = now or _utc_now()
-        with connect(self.db_path) as conn:
-            updated = conn.execute(
-                """
-                update qa_deletion_fences
-                set status = 'failed', lease_owner = null,
-                    lease_expires_at = null, safe_error_code = 'QA_DELETION_INTERRUPTED',
-                    trace_id = null, updated_at = ?
-                where status = 'running' and lease_expires_at <= ?
-                """,
-                (timestamp, timestamp),
-            )
-            return updated.rowcount
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
+            recovered = self._recover_expired_in_connection(conn, timestamp)
+            conn.commit()
+            return recovered
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _recover_expired_in_connection(conn, timestamp: str) -> int:
+        updated = conn.execute(
+            """
+            update qa_deletion_fences
+            set status = 'failed', lease_owner = null,
+                lease_expires_at = null,
+                safe_error_code = 'QA_DELETION_INTERRUPTED', trace_id = null,
+                finished_at = case
+                    when attempt_count >= 3 then ? else finished_at
+                end,
+                updated_at = ?
+            where status = 'running' and lease_expires_at <= ?
+            """,
+            (timestamp, timestamp, timestamp),
+        )
+        return updated.rowcount
 
     def advance_deletion(
         self,
@@ -360,11 +375,22 @@ class QaDeletionRepository:
                 update qa_deletion_fences
                 set status = 'failed', lease_owner = null,
                     lease_expires_at = null, safe_error_code = ?, trace_id = ?,
+                    finished_at = case
+                        when attempt_count >= 3 then ? else finished_at
+                    end,
                     updated_at = ?
                 where id = ? and status = 'running' and lease_owner = ?
                   and lease_expires_at > ?
                 """,
-                (error_code, trace_id, timestamp, deletion_id, worker_id, timestamp),
+                (
+                    error_code,
+                    trace_id,
+                    timestamp,
+                    timestamp,
+                    deletion_id,
+                    worker_id,
+                    timestamp,
+                ),
             )
             if not updated.rowcount:
                 raise QaValidationError(
@@ -634,7 +660,10 @@ class QaDeletionWorker:
 
             if deletion.stage == "memory_removed":
                 self.document_library.perform_document_delete(
-                    deletion.user_id, runtime, deletion.target_id
+                    deletion.user_id,
+                    runtime,
+                    deletion.target_id,
+                    replay_if_missing=True,
                 )
                 if self.legacy_migration is not None:
                     self.legacy_migration.scrub_document(

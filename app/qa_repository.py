@@ -51,12 +51,17 @@ class QaRepository:
         scope = validate_document_candidates(user_id, documents)
         timestamp = now or _utc_now()
         conversation_id = str(uuid4())
-        with connect(self.db_path) as conn:
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
             fenced_document = conn.execute(
                 f"""
                 select 1 from qa_deletion_fences
                 where user_id = ? and target_type = 'document'
-                  and status != 'completed'
+                  and (
+                      status in ('queued', 'running')
+                      or (status = 'failed' and attempt_count < 3)
+                  )
                   and target_id in ({','.join('?' for _ in scope)})
                 limit 1
                 """,
@@ -99,7 +104,14 @@ class QaRepository:
                     for item in scope
                 ],
             )
-            return self._get_conversation(conn, user_id, conversation_id)
+            created = self._get_conversation(conn, user_id, conversation_id)
+            conn.commit()
+            return created
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def list_conversations(
         self,
@@ -1355,7 +1367,13 @@ def _not_fenced_clause(conversation_alias: str) -> str:
     not exists (
         select 1 from qa_deletion_fences deletion_fence
         where deletion_fence.user_id = {conversation_alias}.user_id
-          and deletion_fence.status != 'completed'
+          and (
+              deletion_fence.status in ('queued', 'running')
+              or (
+                  deletion_fence.status = 'failed'
+                  and deletion_fence.attempt_count < 3
+              )
+          )
           and (
               (
                   deletion_fence.target_type = 'conversation'

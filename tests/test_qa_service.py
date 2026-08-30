@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -28,9 +29,13 @@ TOKEN = "owner-token"
 class Sessions:
     def __init__(self):
         self.sessions = {
-            TOKEN: SimpleNamespace(user_id=OWNER, runtime=SimpleNamespace(name="owner")),
+            TOKEN: SimpleNamespace(
+                user_id=OWNER,
+                runtime=SimpleNamespace(name="owner", lock=threading.RLock()),
+            ),
             "other-token": SimpleNamespace(
-                user_id=OTHER, runtime=SimpleNamespace(name="other")
+                user_id=OTHER,
+                runtime=SimpleNamespace(name="other", lock=threading.RLock()),
             ),
         }
 
@@ -146,6 +151,143 @@ def test_create_conversation_preserves_verified_scope_and_is_user_scoped(
         service.get_conversation("other-token", created.id)
     with pytest.raises(QaNotFoundError):
         service.create_conversation(TOKEN, ("other-doc",))
+
+
+def test_create_conversation_waits_for_document_removal_before_scope_snapshot(
+    service_parts,
+) -> None:
+    service = make_service(service_parts)
+    _, _, sessions, library, _ = service_parts
+    runtime = sessions.sessions[TOKEN].runtime
+    creation_lock_attempted = threading.Event()
+
+    class ObservedRuntimeLock:
+        def __init__(self) -> None:
+            self.lock = threading.RLock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "conversation-create":
+                creation_lock_attempted.set()
+            self.lock.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self.lock.release()
+
+    runtime.lock = ObservedRuntimeLock()
+    deletion_holds_runtime = threading.Event()
+    release_deletion = threading.Event()
+    creation_finished = threading.Event()
+    creation_state = {}
+
+    def finish_document_removal() -> None:
+        with runtime.lock:
+            deletion_holds_runtime.set()
+            assert release_deletion.wait(timeout=3)
+            library.items[TOKEN] = ()
+
+    def create_conversation() -> None:
+        try:
+            creation_state["value"] = service.create_conversation(
+                TOKEN, ("doc-1",)
+            )
+        except BaseException as error:
+            creation_state["error"] = error
+        finally:
+            creation_finished.set()
+
+    deleter = threading.Thread(
+        target=finish_document_removal, name="document-remove"
+    )
+    creator = threading.Thread(
+        target=create_conversation, name="conversation-create"
+    )
+    deleter.start()
+    assert deletion_holds_runtime.wait(timeout=1)
+    creator.start()
+    try:
+        assert creation_lock_attempted.wait(timeout=1)
+        assert not creation_finished.is_set()
+    finally:
+        release_deletion.set()
+
+    deleter.join(timeout=3)
+    creator.join(timeout=3)
+    assert not deleter.is_alive()
+    assert not creator.is_alive()
+    assert isinstance(creation_state.get("error"), QaNotFoundError)
+    assert "value" not in creation_state
+
+
+def test_create_conversation_holds_runtime_lock_through_repository_commit(
+    service_parts,
+    monkeypatch,
+) -> None:
+    service = make_service(service_parts)
+    _, repository, sessions, _, _ = service_parts
+    runtime = sessions.sessions[TOKEN].runtime
+    deletion_lock_attempted = threading.Event()
+    deletion_lock_acquired = threading.Event()
+    repository_entered = threading.Event()
+    release_repository = threading.Event()
+    creation_state = {}
+
+    class ObservedRuntimeLock:
+        def __init__(self) -> None:
+            self.lock = threading.RLock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "document-remove":
+                deletion_lock_attempted.set()
+            self.lock.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self.lock.release()
+
+    runtime.lock = ObservedRuntimeLock()
+    original_create = repository.create_conversation
+
+    def hold_repository_commit(*args, **kwargs):
+        repository_entered.set()
+        assert release_repository.wait(timeout=3)
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "create_conversation", hold_repository_commit)
+
+    def create_conversation() -> None:
+        try:
+            creation_state["value"] = service.create_conversation(
+                TOKEN, ("doc-1",)
+            )
+        except BaseException as error:
+            creation_state["error"] = error
+
+    def wait_to_remove_document() -> None:
+        with runtime.lock:
+            deletion_lock_acquired.set()
+
+    creator = threading.Thread(
+        target=create_conversation, name="conversation-create"
+    )
+    deleter = threading.Thread(
+        target=wait_to_remove_document, name="document-remove"
+    )
+    creator.start()
+    assert repository_entered.wait(timeout=1)
+    deleter.start()
+    try:
+        assert deletion_lock_attempted.wait(timeout=1)
+        assert not deletion_lock_acquired.is_set()
+    finally:
+        release_repository.set()
+
+    creator.join(timeout=3)
+    deleter.join(timeout=3)
+    assert not creator.is_alive()
+    assert not deleter.is_alive()
+    assert "error" not in creation_state
+    assert deletion_lock_acquired.is_set()
 
 
 def test_legacy_gradio_submission_uses_shared_qa_domain_once(

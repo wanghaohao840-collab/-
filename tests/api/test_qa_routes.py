@@ -261,6 +261,31 @@ def test_summary_and_deletion_status_resources_are_reconnect_safe(qa_parts) -> N
     assert_safe(polled.text)
 
 
+def test_active_summary_discovery_is_hidden_by_document_deletion_fence(
+    qa_parts,
+) -> None:
+    conversation = create_conversation(qa_parts)
+    summary = qa_parts.client.post(
+        f"/api/v1/qa/conversations/{conversation['conversation_id']}/summary-jobs",
+        headers=csrf(qa_parts),
+        json={"instruction": "总结", "client_request_id": str(uuid4())},
+    )
+    assert summary.status_code == 202
+    deletion = qa_parts.services.qa_deletion_service.request_document(
+        qa_parts.owner_token, qa_parts.document_id
+    )
+    assert deletion is not None
+
+    hidden = qa_parts.client.get(
+        f"/api/v1/qa/conversations/{conversation['conversation_id']}"
+        "/summary-jobs/active"
+    )
+
+    assert hidden.status_code == 404
+    assert hidden.json()["error"]["code"] == "QA_NOT_FOUND"
+    assert_safe(hidden.text)
+
+
 def test_message_route_starts_newest_and_pages_toward_older_history(
     qa_parts,
 ) -> None:

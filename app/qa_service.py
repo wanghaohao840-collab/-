@@ -101,26 +101,27 @@ class QaService:
     ) -> QaConversationAggregate:
         session = self.session_registry.get_session(session_token)
         self._ensure_migrated(session)
-        available = {
-            item.document_id: item
-            for item in self.document_library.list_documents(session_token)
-        }
-        candidates: list[QaDocumentCandidate] = []
-        for document_id in document_ids:
-            item = available.get(str(document_id))
-            if item is None or item.status != "ready":
-                raise QaNotFoundError(str(document_id))
-            candidates.append(
-                QaDocumentCandidate(
-                    item.document_id,
-                    item.name,
-                    str(session.user_id),
-                    item.status,
+        with session.runtime.lock:
+            available = {
+                item.document_id: item
+                for item in self.document_library.list_documents(session_token)
+            }
+            candidates: list[QaDocumentCandidate] = []
+            for document_id in document_ids:
+                item = available.get(str(document_id))
+                if item is None or item.status != "ready":
+                    raise QaNotFoundError(str(document_id))
+                candidates.append(
+                    QaDocumentCandidate(
+                        item.document_id,
+                        item.name,
+                        str(session.user_id),
+                        item.status,
+                    )
                 )
+            return self.repository.create_conversation(
+                str(session.user_id), tuple(candidates), origin=origin
             )
-        return self.repository.create_conversation(
-            str(session.user_id), tuple(candidates), origin=origin
-        )
 
     def create_legacy_single_turn_conversation(
         self, session_token: str, selected_documents
