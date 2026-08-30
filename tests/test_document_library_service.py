@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.coordination import UserMutationCoordinator
 from app.document_library import (
     DocumentDeleteFailedError,
     DocumentImportActiveError,
@@ -605,6 +606,74 @@ def test_structured_assistant_delete_removes_rag_history_questions_and_source(
     )
     assert history.load()["documents"] == []
     assert history.load()["questions"] == [{"document_id": "doc-2"}]
+    assert not source.exists()
+
+
+def test_structured_assistant_delete_keeps_history_until_source_unlink_succeeds(
+    tmp_path,
+):
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    source = documents / "doc.md"
+    source.write_text("content", encoding="utf-8")
+    history = HistoryRepository(tmp_path / "history.json")
+    history.save(
+        {
+            "documents": [
+                {
+                    "document_id": "doc-1",
+                    "document_path": str(source),
+                }
+            ],
+            "questions": [{"document_id": "doc-1"}],
+            "notes": [],
+            "sessions": [],
+        }
+    )
+    unlink_calls = 0
+
+    def fail_once_unlink(path):
+        nonlocal unlink_calls
+        unlink_calls += 1
+        if unlink_calls == 1:
+            raise PermissionError("source is temporarily locked")
+        path.unlink()
+
+    coordinator = UserMutationCoordinator(
+        "user-1",
+        RLock(),
+        history,
+        document_root=documents,
+    )
+    coordinator.safe_unlink = fail_once_unlink
+    rag_execute = Mock(return_value="deleted from rag")
+    assistant = object.__new__(PDFLearningAssistant)
+    assistant.user_id = "user-1"
+    assistant._lock = RLock()
+    assistant.runtime = None
+    assistant.history_repository = history
+    assistant.coordinator = coordinator
+    assistant.rag_tool = SimpleNamespace(execute=rag_execute)
+    assistant.history = history.load()
+
+    with pytest.raises(PermissionError):
+        assistant.delete_document("doc-1")
+
+    interrupted = history.load()
+    assert source.exists()
+    assert [item["document_id"] for item in interrupted["documents"]] == [
+        "doc-1"
+    ]
+    assert interrupted["questions"] == [{"document_id": "doc-1"}]
+
+    result = assistant.delete_document("doc-1")
+
+    assert result.documents_removed == 1
+    assert result.questions_removed == 1
+    assert unlink_calls == 2
+    assert rag_execute.call_count == 2
+    assert history.load()["documents"] == []
+    assert history.load()["questions"] == []
     assert not source.exists()
 
 

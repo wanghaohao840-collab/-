@@ -88,19 +88,38 @@ class QaDeletionRepository:
                 """,
                 (user_id, target_type, target_id),
             ).fetchone()
-            if existing is not None:
+            restart_terminal = bool(
+                existing is not None
+                and existing["status"] == "failed"
+                and existing["attempt_count"] >= 3
+            )
+            if existing is not None and not restart_terminal:
                 conn.commit()
                 return _deletion_from_row(existing)
 
+            previous_conversation_ids = (
+                set(json.loads(existing["conversation_ids_json"]))
+                if restart_terminal
+                else set()
+            )
+            previous_memory_ids = (
+                set(json.loads(existing["memory_ids_json"]))
+                if restart_terminal
+                else set()
+            )
+
             if target_type == "conversation":
-                owned = conn.execute(
-                    "select id from qa_conversations where id = ? and user_id = ?",
-                    (target_id, user_id),
-                ).fetchone()
-                if owned is None:
-                    conn.commit()
-                    return None
-                conversation_ids = (target_id,)
+                if not restart_terminal:
+                    owned = conn.execute(
+                        "select id from qa_conversations where id = ? and user_id = ?",
+                        (target_id, user_id),
+                    ).fetchone()
+                    if owned is None:
+                        conn.commit()
+                        return None
+                conversation_ids = tuple(
+                    sorted(previous_conversation_ids | {target_id})
+                )
             else:
                 rows = conn.execute(
                     """
@@ -118,12 +137,14 @@ class QaDeletionRepository:
                             "QA_DELETION_SCOPE_CHANGED",
                             "document conversation scope changed",
                         )
-                conversation_ids = discovered
+                conversation_ids = tuple(
+                    sorted(previous_conversation_ids | set(discovered))
+                )
 
-            memory_ids: tuple[str, ...] = ()
+            memory_ids = tuple(sorted(previous_memory_ids))
             if conversation_ids:
                 marks = ",".join("?" for _ in conversation_ids)
-                memory_ids = tuple(
+                discovered_memory_ids = {
                     row["memory_id"]
                     for row in conn.execute(
                         f"""
@@ -134,6 +155,9 @@ class QaDeletionRepository:
                         """,
                         (user_id, *conversation_ids),
                     ).fetchall()
+                }
+                memory_ids = tuple(
+                    sorted(previous_memory_ids | discovered_memory_ids)
                 )
                 conn.execute(
                     f"""
@@ -161,27 +185,59 @@ class QaDeletionRepository:
                     (timestamp, timestamp, user_id, *conversation_ids),
                 )
 
-            deletion_id = str(uuid4())
-            conn.execute(
-                """
-                insert into qa_deletion_fences (
-                    id, user_id, target_type, target_id, status, stage,
-                    affected_conversation_count, conversation_ids_json,
-                    memory_ids_json, created_at, updated_at
-                ) values (?, ?, ?, ?, 'queued', 'fenced', ?, ?, ?, ?, ?)
-                """,
-                (
-                    deletion_id,
-                    user_id,
-                    target_type,
-                    target_id,
-                    len(conversation_ids),
-                    json.dumps(conversation_ids),
-                    json.dumps(memory_ids),
-                    timestamp,
-                    timestamp,
-                ),
-            )
+            if restart_terminal:
+                deletion_id = existing["id"]
+                updated = conn.execute(
+                    """
+                    update qa_deletion_fences
+                    set status = 'queued', stage = 'fenced',
+                        affected_conversation_count = ?,
+                        conversation_ids_json = ?, memory_ids_json = ?,
+                        attempt_count = 0, lease_owner = null,
+                        lease_expires_at = null, safe_error_code = null,
+                        trace_id = null, finished_at = null, updated_at = ?
+                    where id = ? and user_id = ? and target_type = ?
+                      and target_id = ? and status = 'failed'
+                      and attempt_count >= 3
+                    """,
+                    (
+                        len(conversation_ids),
+                        json.dumps(conversation_ids),
+                        json.dumps(memory_ids),
+                        timestamp,
+                        deletion_id,
+                        user_id,
+                        target_type,
+                        target_id,
+                    ),
+                )
+                if not updated.rowcount:
+                    raise QaValidationError(
+                        "QA_DELETION_RETRY_CONFLICT",
+                        "deletion retry state changed",
+                    )
+            else:
+                deletion_id = str(uuid4())
+                conn.execute(
+                    """
+                    insert into qa_deletion_fences (
+                        id, user_id, target_type, target_id, status, stage,
+                        affected_conversation_count, conversation_ids_json,
+                        memory_ids_json, created_at, updated_at
+                    ) values (?, ?, ?, ?, 'queued', 'fenced', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        deletion_id,
+                        user_id,
+                        target_type,
+                        target_id,
+                        len(conversation_ids),
+                        json.dumps(conversation_ids),
+                        json.dumps(memory_ids),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
             row = conn.execute(
                 "select * from qa_deletion_fences where id = ?", (deletion_id,)
             ).fetchone()
@@ -503,6 +559,13 @@ class QaDeletionService:
             user_id, "conversation", conversation_id
         )
         if existing is not None:
+            if existing.status == "failed" and existing.attempt_count >= 3:
+                deletion = self.deletion_repository.create_conversation_deletion(
+                    user_id, conversation_id
+                )
+                if deletion is not None:
+                    self.worker_wake.notify()
+                return deletion
             if existing.status != "completed":
                 self.worker_wake.notify()
             return existing
@@ -524,6 +587,12 @@ class QaDeletionService:
             user_id, "document", document_id
         )
         if existing is not None:
+            if existing.status == "failed" and existing.attempt_count >= 3:
+                deletion = self.deletion_repository.create_document_deletion(
+                    user_id, document_id
+                )
+                self.worker_wake.notify()
+                return deletion
             if existing.status != "completed":
                 self.worker_wake.notify()
             return existing

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,15 +10,19 @@ import pytest
 
 import app.qa_deletion as qa_deletion_module
 import app.qa_repository as qa_repository_module
+from app.coordination import UserMutationCoordinator
 from app.database import connect, initialize_database
-from app.document_library import DocumentNotFoundError
+from app.document_library import DocumentLibraryService, DocumentNotFoundError
+from app.history import HistoryRepository
 from app.qa_deletion import (
     QaDeletionRepository,
     QaDeletionService,
     QaDeletionWorker,
 )
 from app.qa_models import QaDocumentCandidate, QaValidationError
+from app.qa_migration import QaLegacyMigrationService
 from app.qa_repository import QaRepository
+from app.storage import UserStorage, write_json_atomic
 
 
 OWNER = "owner"
@@ -527,6 +532,78 @@ def test_live_deletion_worker_terminalizes_expired_final_attempt_fence(
     assert sessions.runtime_registry.acquired == []
 
 
+def test_terminal_processing_failure_can_be_explicitly_requeued_and_resnapshots(
+    deletion_parts,
+) -> None:
+    qa, repository, service, worker, _, documents, _ = deletion_parts
+    original_delete = documents.perform_document_delete
+    first, _ = completed_conversation(qa, memory_id="qa-first")
+    deletion = service.request_document("token", "doc")
+
+    def fail_document_delete(*args, **kwargs):
+        raise PermissionError("source is temporarily locked")
+
+    documents.perform_document_delete = fail_document_delete
+    for expected_attempt in range(1, 4):
+        assert worker.run_once(f"delete-worker-{expected_attempt}")
+        current = repository.get_deletion(OWNER, deletion.id)
+        assert current.status == "failed"
+        assert current.attempt_count == expected_attempt
+
+    with connect(qa.db_path) as conn:
+        terminal = conn.execute(
+            "select * from qa_deletion_fences where id = ?", (deletion.id,)
+        ).fetchone()
+    assert terminal["attempt_count"] == 3
+    assert terminal["finished_at"] is not None
+    assert terminal["safe_error_code"] == "QA_DELETION_FAILED"
+    assert terminal["trace_id"] is not None
+    assert not repository.has_active_fence(OWNER, "document", "doc")
+
+    late, _ = completed_conversation(qa, memory_id="qa-late")
+    assert service.request_document("other", "doc") is None
+    retried = service.request_document("token", "doc")
+
+    assert retried.id == deletion.id
+    assert retried.status == "queued"
+    assert retried.stage == "fenced"
+    assert retried.attempt_count == 0
+    assert retried.safe_error_code is None
+    assert repository.has_active_fence(OWNER, "document", "doc")
+    assert repository.get_deletion(OTHER, retried.id) is None
+    with connect(qa.db_path) as conn:
+        reset = conn.execute(
+            "select * from qa_deletion_fences where id = ?", (retried.id,)
+        ).fetchone()
+    assert reset["created_at"] == terminal["created_at"]
+    assert reset["attempt_count"] == 0
+    assert reset["finished_at"] is None
+    assert reset["safe_error_code"] is None
+    assert reset["trace_id"] is None
+    assert reset["lease_owner"] is None
+    assert reset["lease_expires_at"] is None
+    assert set(json.loads(reset["conversation_ids_json"])) == {first.id, late.id}
+    assert set(json.loads(reset["memory_ids_json"])) == {"qa-first", "qa-late"}
+    with connect(qa.db_path) as conn:
+        assert conn.execute(
+            """
+            select count(*) from qa_deletion_fences
+            where user_id = ? and target_type = 'document' and target_id = ?
+              and status != 'completed'
+            """,
+            (OWNER, "doc"),
+        ).fetchone()[0] == 1
+
+    documents.perform_document_delete = original_delete
+    assert worker.run_once("delete-worker-retry")
+    completed = repository.get_deletion(OWNER, retried.id)
+    assert completed.status == "completed"
+    assert completed.affected_conversation_count == 2
+    assert qa.get_conversation(OWNER, first.id) is None
+    assert qa.get_conversation(OWNER, late.id) is None
+    assert documents.deleted == [(OWNER, "doc")]
+
+
 def test_document_removal_replay_completes_after_post_delete_failure(
     deletion_parts,
 ) -> None:
@@ -574,5 +651,134 @@ def test_document_removal_replay_completes_after_post_delete_failure(
     assert sessions.cleared == [(OWNER, "doc")]
     assert migration.document_calls == [(OWNER, "doc"), (OWNER, "doc")]
     assert memory.removed == [("qa-replay", "episodic")]
+    assert qa.get_conversation(OWNER, conversation.id) is None
+    assert not repository.has_active_fence(OWNER, "document", "doc")
+
+
+def test_document_removal_replay_converges_real_resources_and_legacy_backup(
+    deletion_parts,
+    tmp_path,
+) -> None:
+    qa, repository, _, _, memory, _, old_sessions = deletion_parts
+    storage = UserStorage(tmp_path / "data")
+    paths = storage.ensure_user_dirs(OWNER)
+    source = paths.documents / "doc.md"
+    source.write_text("document body", encoding="utf-8")
+    history = HistoryRepository(paths.history)
+    history.save(
+        {
+            "documents": [
+                {
+                    "document_id": "doc",
+                    "document_name": "doc.md",
+                    "document_path": str(source),
+                    "file_suffix": ".md",
+                    "loaded_at": "2026-08-27T00:00:00Z",
+                }
+            ],
+            "questions": [{"document_id": "doc", "question": "legacy"}],
+            "notes": [],
+            "sessions": [],
+        }
+    )
+    backup_root = storage.data_root / "legacy_backups" / "migration-1"
+    backup_history = backup_root / "source" / "legacy-history.json"
+    backup_history.parent.mkdir(parents=True)
+    HistoryRepository(backup_history).save(history.load())
+    write_json_atomic(
+        backup_root / "manifest.json",
+        {
+            "user_id": OWNER,
+            "files": [
+                {
+                    "kind": "history",
+                    "relative": "legacy-history.json",
+                    "size": backup_history.stat().st_size,
+                    "sha256": "before-replay",
+                }
+            ],
+        },
+    )
+
+    class StatefulRag:
+        def __init__(self):
+            self.documents = {"doc"}
+            self.calls = []
+
+        def execute(self, action, *, document_id):
+            self.calls.append((action, document_id))
+            self.documents.discard(document_id)
+            return "deleted from rag"
+
+    rag = StatefulRag()
+    lock = threading.RLock()
+    runtime = old_sessions.runtime_registry.runtime
+    runtime.lock = lock
+    runtime.paths = paths
+    runtime.history = history
+    runtime.coordinator = UserMutationCoordinator(
+        OWNER, lock, history, document_root=paths.documents
+    )
+    runtime.rag_tool = rag
+    sessions = Sessions(runtime)
+    document_library = DocumentLibraryService(
+        sessions,
+        storage,
+        SimpleNamespace(
+            has_active_task_for_document=lambda user_id, document_id: False
+        ),
+    )
+    service = QaDeletionService(
+        sessions, document_library, qa, repository, Wake()
+    )
+    delegate = QaLegacyMigrationService(qa.db_path, storage)
+
+    class FailOnceAfterPhysicalDelete:
+        def __init__(self):
+            self.document_calls = 0
+
+        def scrub_conversations(self, user_id, active_history, conversation_ids):
+            return 0
+
+        def scrub_document(self, user_id, active_history, document_id):
+            self.document_calls += 1
+            if self.document_calls == 1:
+                raise OSError("injected after physical deletion")
+            return delegate.scrub_document(user_id, active_history, document_id)
+
+    migration = FailOnceAfterPhysicalDelete()
+    worker = QaDeletionWorker(
+        repository,
+        sessions.runtime_registry,
+        document_library,
+        sessions,
+        legacy_migration=migration,
+    )
+    conversation, _ = completed_conversation(qa, memory_id="qa-real-replay")
+    deletion = service.request_document("token", "doc")
+
+    assert worker.run_once("delete-worker-real-1")
+    failed = repository.get_deletion(OWNER, deletion.id)
+    assert failed.status == "failed"
+    assert failed.stage == "memory_removed"
+    assert rag.documents == set()
+    assert rag.calls == [("delete_document", "doc")]
+    assert not source.exists()
+    assert history.load()["documents"] == []
+    assert history.load()["questions"] == []
+    assert HistoryRepository(backup_history).load()["documents"][0][
+        "document_id"
+    ] == "doc"
+    assert repository.has_active_fence(OWNER, "document", "doc")
+
+    assert worker.run_once("delete-worker-real-2")
+    completed = repository.get_deletion(OWNER, deletion.id)
+    assert completed.status == "completed"
+    assert completed.stage == "completed"
+    assert rag.calls == [("delete_document", "doc")]
+    assert HistoryRepository(backup_history).load()["documents"] == []
+    assert HistoryRepository(backup_history).load()["questions"] == []
+    assert sessions.cleared == [(OWNER, "doc")]
+    assert memory.removed == [("qa-real-replay", "episodic")]
     assert qa.get_conversation(OWNER, conversation.id) is None
     assert not repository.has_active_fence(OWNER, "document", "doc")

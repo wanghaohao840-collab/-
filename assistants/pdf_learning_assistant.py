@@ -916,16 +916,13 @@ class PDFLearningAssistant:
                 )
                 if isinstance(rag_result, str) and rag_result.startswith("❌"):
                     raise RuntimeError("RAG document deletion failed")
-            if self.coordinator is not None:
-                removed_docs, removed_questions = self.coordinator.delete_document(document_id)
-                self.history = self.coordinator.load_history()
-            else:
-                removed_docs, removed_questions = self.history_repository.delete_document(document_id)
-                self.history = self.history_repository.load()
-
-            # Unlink source files.  When a coordinator is present every
-            # path must be inside the user document root — rejections
-            # are collected and reported as partial failure.
+            # Unlink source files before removing the History record that
+            # supplies their paths.  A retry may safely repeat the idempotent
+            # RAG delete while History remains present; once History is absent,
+            # every source unlink from that record has already succeeded.
+            # When a coordinator is present every path must be inside the user
+            # document root — rejections are collected and reported as partial
+            # failure without discarding the retry metadata.
             skipped_paths: list[Path] = []
             for path in source_paths:
                 if not path.exists():
@@ -937,6 +934,22 @@ class PDFLearningAssistant:
                         skipped_paths.append(path)
                 else:
                     path.unlink()
+
+            if skipped_paths:
+                return DocumentDeleteResult(
+                    document_id=document_id,
+                    rag_message=str(rag_result),
+                    documents_removed=0,
+                    questions_removed=0,
+                    skipped_source_files=len(skipped_paths),
+                )
+
+            if self.coordinator is not None:
+                removed_docs, removed_questions = self.coordinator.delete_document(document_id)
+                self.history = self.coordinator.load_history()
+            else:
+                removed_docs, removed_questions = self.history_repository.delete_document(document_id)
+                self.history = self.history_repository.load()
 
         return DocumentDeleteResult(
             document_id=document_id,
