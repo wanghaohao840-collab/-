@@ -162,4 +162,3 @@ GET /api/v1/qa/conversations/{conversation_id}/summary-jobs/active
 - 新活动任务端点和最近页语义是加法式产品 API；旧任务 ID 查询继续有效。
 - 后续 SSE/WebSocket 只替换活动资源的通知方式，活动任务发现仍作为首次加载与断线重连的基线读取。
 - 分布式升级时，仓库接口可替换为共享数据库/队列实现，React 不需要改用另一套领域模型。
-
