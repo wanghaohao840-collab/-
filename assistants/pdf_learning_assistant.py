@@ -935,15 +935,6 @@ class PDFLearningAssistant:
                 else:
                     path.unlink()
 
-            if skipped_paths:
-                return DocumentDeleteResult(
-                    document_id=document_id,
-                    rag_message=str(rag_result),
-                    documents_removed=0,
-                    questions_removed=0,
-                    skipped_source_files=len(skipped_paths),
-                )
-
             if self.coordinator is not None:
                 removed_docs, removed_questions = self.coordinator.delete_document(document_id)
                 self.history = self.coordinator.load_history()
@@ -963,17 +954,20 @@ class PDFLearningAssistant:
         with self._write_lock:
             latest = self._load_history()
             source_paths = [Path(item.get("document_path", "")) for item in latest["documents"]]
-            rag_result = self.rag_tool.execute("clear")
-            if self.coordinator is not None:
-                removed_docs, removed_questions = self.coordinator.clear_documents()
-                self.history = self.coordinator.load_history()
+            if hasattr(self.rag_tool, "execute_result"):
+                action_result = self.rag_tool.execute_result("clear")
+                if not action_result.success:
+                    raise RuntimeError("RAG document clearing failed")
+                rag_result = action_result.message
             else:
-                removed_docs, removed_questions = self.history_repository.clear_documents()
-                self.history = self.history_repository.load()
-
-            # Unlink source files.  When a coordinator is present every
-            # path must be inside the user document root — rejections
-            # are collected and reported as partial failure.
+                rag_result = self.rag_tool.execute("clear")
+                if isinstance(rag_result, str) and rag_result.startswith("❌"):
+                    raise RuntimeError("RAG document clearing failed")
+            # As with single-document deletion, retain History path metadata
+            # until every in-scope source unlink has succeeded.  A failed
+            # unlink can then retry the idempotent RAG clear and still recover
+            # all source paths.  Out-of-root paths remain intentionally skipped
+            # under the existing partial-result contract.
             skipped_paths: list[Path] = []
             for path in source_paths:
                 if not path.exists():
@@ -985,6 +979,13 @@ class PDFLearningAssistant:
                         skipped_paths.append(path)
                 else:
                     path.unlink()
+
+            if self.coordinator is not None:
+                removed_docs, removed_questions = self.coordinator.clear_documents()
+                self.history = self.coordinator.load_history()
+            else:
+                removed_docs, removed_questions = self.history_repository.clear_documents()
+                self.history = self.history_repository.load()
 
             self.current_document = None
             self.current_document_id = None

@@ -677,6 +677,133 @@ def test_structured_assistant_delete_keeps_history_until_source_unlink_succeeds(
     assert not source.exists()
 
 
+def test_structured_assistant_clear_keeps_history_until_all_unlinks_succeed(
+    tmp_path,
+):
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    first = documents / "first.md"
+    second = documents / "second.md"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+    history = HistoryRepository(tmp_path / "history.json")
+    history.save(
+        {
+            "documents": [
+                {"document_id": "doc-1", "document_path": str(first)},
+                {"document_id": "doc-2", "document_path": str(second)},
+            ],
+            "questions": [{"document_ids": ["doc-1", "doc-2"]}],
+            "notes": [{"note": "keep"}],
+            "sessions": [],
+        }
+    )
+    failed = False
+
+    def fail_second_once(path):
+        nonlocal failed
+        if path == second and not failed:
+            failed = True
+            raise PermissionError("second source is temporarily locked")
+        path.unlink()
+
+    coordinator = UserMutationCoordinator(
+        "user-1",
+        RLock(),
+        history,
+        document_root=documents,
+    )
+    coordinator.safe_unlink = fail_second_once
+    rag_execute = Mock(return_value="cleared rag")
+    assistant = object.__new__(PDFLearningAssistant)
+    assistant.user_id = "user-1"
+    assistant._lock = RLock()
+    assistant.runtime = None
+    assistant.history_repository = history
+    assistant.coordinator = coordinator
+    assistant.rag_tool = SimpleNamespace(execute=rag_execute)
+    assistant.history = history.load()
+    assistant.current_document = str(second)
+    assistant.current_document_id = "doc-2"
+    assistant.stats = {"documents_loaded": 2, "questions_asked": 1}
+
+    with pytest.raises(PermissionError):
+        assistant.clear_all_documents()
+
+    interrupted = history.load()
+    assert not first.exists()
+    assert second.exists()
+    assert [item["document_id"] for item in interrupted["documents"]] == [
+        "doc-1",
+        "doc-2",
+    ]
+    assert interrupted["questions"] == [{"document_ids": ["doc-1", "doc-2"]}]
+
+    result = assistant.clear_all_documents()
+
+    assert "documents removed: 2" in result
+    assert rag_execute.call_count == 2
+    assert history.load()["documents"] == []
+    assert history.load()["questions"] == []
+    assert history.load()["notes"] == [{"note": "keep"}]
+    assert not second.exists()
+    assert assistant.current_document is None
+    assert assistant.current_document_id is None
+
+
+def test_structured_assistant_clear_stops_before_sources_when_rag_clear_fails(
+    tmp_path,
+):
+    documents = tmp_path / "documents"
+    documents.mkdir()
+    source = documents / "doc.md"
+    source.write_text("content", encoding="utf-8")
+    history = HistoryRepository(tmp_path / "history.json")
+    history.save(
+        {
+            "documents": [
+                {"document_id": "doc-1", "document_path": str(source)}
+            ],
+            "questions": [{"document_id": "doc-1"}],
+            "notes": [{"note": "keep"}],
+            "sessions": [],
+        }
+    )
+    coordinator = UserMutationCoordinator(
+        "user-1",
+        RLock(),
+        history,
+        document_root=documents,
+    )
+    clear_result = SimpleNamespace(
+        success=False,
+        message="RAG clear failed",
+    )
+    rag_execute_result = Mock(return_value=clear_result)
+    assistant = object.__new__(PDFLearningAssistant)
+    assistant.user_id = "user-1"
+    assistant._lock = RLock()
+    assistant.runtime = None
+    assistant.history_repository = history
+    assistant.coordinator = coordinator
+    assistant.rag_tool = SimpleNamespace(execute_result=rag_execute_result)
+    assistant.history = history.load()
+    assistant.current_document = str(source)
+    assistant.current_document_id = "doc-1"
+    assistant.stats = {"documents_loaded": 1, "questions_asked": 1}
+
+    with pytest.raises(RuntimeError, match="RAG document clearing failed"):
+        assistant.clear_all_documents()
+
+    rag_execute_result.assert_called_once_with("clear")
+    assert source.exists()
+    assert history.load()["documents"] == [
+        {"document_id": "doc-1", "document_path": str(source)}
+    ]
+    assert history.load()["questions"] == [{"document_id": "doc-1"}]
+    assert assistant.current_document_id == "doc-1"
+
+
 def test_session_registry_clears_only_exact_same_user_document_selection():
     registry = object.__new__(SessionRegistry)
     registry._lock = __import__("threading").RLock()
