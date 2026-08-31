@@ -58,6 +58,8 @@ owner: "codex-notes-packet-03"
 - Modify: `app/bootstrap.py`
 - Modify: `app/runtime.py`
 - Modify: `app/qa_deletion.py`
+- Modify: `app/note_service.py`
+- Modify: `app/note_repository.py`
 - Modify: `api/app.py`
 - Modify: `api/config.py`
 - Modify: `api/dependencies.py`
@@ -70,6 +72,8 @@ owner: "codex-notes-packet-03"
 - Modify: `tests/api/test_app_lifecycle.py`
 - Create: `tests/api/test_note_routes.py`
 - Create: `tests/test_note_source_deletion.py`
+- Modify: `tests/test_note_service.py`
+- Modify: `tests/test_note_repository.py`
 
 ### Allowed behavior changes
 
@@ -139,7 +143,12 @@ Expected: all selected tests PASS; diff check silent.
 
 Stop with a reality-conflict report if packet 02 is not done, its interfaces differ, source scrubbing cannot occur in the existing fence transaction, lifecycle needs an unowned file, or route conventions changed.
 
-## Implementation handoff
+## Reality-conflict resolution: source-create fence race
+
+- Observed after `af8b2b0`: source resolution and Note insertion use separate transactions. A deletion fence can commit between them, leaving a newly inserted Note with stale source IDs/snapshots; an already-active fence is also collapsed into `NOTE_SOURCE_NOT_FOUND` instead of `NOTE_SOURCE_DELETING`.
+- Resolution: extend this integration packet narrowly to `app/note_service.py`, `app/note_repository.py`, `tests/test_note_service.py`, and `tests/test_note_repository.py`. Add an in-transaction source-fence/deleted-resource guard to Note creation, preserving Packet 02 idempotency semantics. The race must resolve as commit-before-and-scrub or fence-observed-and-409 for both conversation and document/citation sources.
+- Required evidence: real two-connection barrier tests with Note rows for both orderings, both source scopes, deletion replay and stale owner; all source IDs/locator/title/excerpt scrubbed, author body/concept/tags preserved, exactly one latest projection task committed.
+- API source DTO clarification: the approved spec permits a server-resolved safe source DTO on detail responses and requires list responses to omit full excerpts. Request DTOs must reject all snapshot fields. Active-source detail snapshots may remain; tombstones must expose only deletion state and no old title/excerpt/locator/IDs.
 
 ## Implementation handoff
 
@@ -148,6 +157,8 @@ Stop with a reality-conflict report if packet 02 is not done, its interfaces dif
   - `app/bootstrap.py`
   - `app/runtime.py`
   - `app/qa_deletion.py`
+  - `app/note_service.py`
+  - `app/note_repository.py`
   - `api/app.py`
   - `api/config.py`
   - `api/dependencies.py`
@@ -159,25 +170,24 @@ Stop with a reality-conflict report if packet 02 is not done, its interfaces dif
   - `tests/test_note_source_deletion.py`
   - `docs/agent-workflow/task-packets/2026-08-30-notes-vertical-slice/03-notes-api-lifecycle.md`
 - Dependency/interfaces:
-  - Consumed Packet 02 functional head `8305402` (`NoteService`, migration, repository source scrub, projection worker).
-  - Added authenticated `/api/v1/notes` capabilities/list/create/get/patch/delete/clear/projection-retry routes with strict request DTOs and safe response DTOs.
-  - Added `ApplicationServices` Note construction, known-user migration/recovery, ordered worker lifecycle and runtime late injection.
-  - Passed the existing deletion-fence connection into transaction-safe source scrub and latest-version projection enqueue.
+  - Consumed Packet 02 functional head `8305402` and prior Packet 03 integration `af8b2b0`.
+  - Added authenticated Notes routes with strict request DTOs, safe list/detail DTOs, uppercase domain errors, CSRF mutations and feature-off access gating.
+  - Added ordered Note migration/recovery/worker lifecycle, runtime injection and partial-start rollback.
+  - Added an in-transaction source existence/fence guard; existing deletion-fence transactions scrub IDs/locator/title/excerpt, preserve author fields and enqueue one latest projection.
 - Acceptance criteria:
-  - [x] Routes enforce session/CSRF, strict DTOs, ownership and uppercase domain errors.
-  - [x] `NOTES_ROUTE_ENABLED` gates access only; startup migration/recovery remains active.
-  - [x] Note worker lifecycle starts last, stops first, and partial startup rolls back previously started workers.
-  - [x] Conversation source deletion preserves author fields while scrubbing source snapshots and enqueuing the latest projection atomically in the fence transaction.
-  - [x] Existing QA/document/lifecycle regressions remain green.
+  - [x] All routes enforce auth/CSRF, strict DTOs, ownership and approved statuses/errors.
+  - [x] Feature flag gates access only; migration/recovery remains active.
+  - [x] Worker lifecycle and partial rollback pass.
+  - [x] Conversation/document source races resolve as insert-then-scrub or `NOTE_SOURCE_DELETING`; replay/stale-owner paths are covered for both scopes.
+  - [x] Existing QA/document/import/lifecycle regressions remain green.
 - Verification:
-  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/api/test_note_routes.py tests/api/test_app_lifecycle.py tests/test_app_bootstrap.py tests/test_user_runtime.py tests/test_note_source_deletion.py tests/test_qa_deletion.py tests/test_document_library_service.py tests/api/test_qa_routes.py --basetemp=.runtime/pytest-notes-api-final2` — PASS (68 passed in 246.45s)
-  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_note_models.py tests/test_note_repository.py tests/test_note_migration.py tests/test_note_projection.py tests/test_note_service.py --basetemp=.runtime/pytest-notes-domain-api` — PASS (37 passed in 13.00s)
-  - `D:\python_self_agent\venv\Scripts\python.exe -m compileall -q api app` — PASS
-  - `git diff --check` — PASS (line-ending notices only)
+  - Corrected available packet suite (using `tests/test_document_library_service.py`) — PASS (80 passed in 289.69s).
+  - Packet 02 domain regression suite — PASS (37 passed in 13.96s).
+  - `git diff --check` — PASS (line-ending notices only).
 - Deviations:
-  - The packet command names nonexistent `tests/test_document_library.py`; equivalent repository test `tests/test_document_library_service.py` was used. No implementation scope change.
-  - Added compact list-source DTOs so list responses do not return source title/excerpt snapshots; detail responses retain server-resolved source display fields.
+  - The literal packet command names nonexistent `tests/test_document_library.py`; repository reality is `tests/test_document_library_service.py` and that path is used.
+  - Active detail source snapshots remain permitted by the approved spec; list DTOs omit full source snapshots and tombstones expose no source payload.
 - Residual risks:
-  - Two-connection QA fence primitives are covered by the existing QA deletion regression suite; the focused source test verifies the same connection transaction and replay-safe scrub path.
+  - None identified within the amended single-process/SQLite scope; the literal packet command still references a nonexistent document test path.
 - Commit:
-  - `4b6253a`
+  - corrective commit to be recorded below without rewriting `af8b2b0`

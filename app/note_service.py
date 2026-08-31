@@ -5,6 +5,7 @@ import hashlib
 import json
 from typing import Any
 
+from app.database import connect
 from app.note_migration import NoteMigrationService
 from app.note_models import (
     NewNoteSource,
@@ -12,6 +13,7 @@ from app.note_models import (
     NoteFilters,
     NoteNotFoundError,
     NotePage,
+    NoteSourceDeletingError,
     NoteSourceNotFoundError,
     NoteSourceSelector,
     NoteValidationError,
@@ -85,6 +87,7 @@ class NoteService:
                     client_request_id,
                     sources=sources,
                     request_digest=request_digest,
+                    guard_sources=True,
                 )
         self._notify_best_effort()
         return note
@@ -271,6 +274,8 @@ class NoteService:
     def _resolve_source(
         self, user_id: str, selector: NoteSourceSelector
     ) -> NewNoteSource:
+        if self._source_fence_active(user_id, selector):
+            raise NoteSourceDeletingError(selector.qa_message_id)
         message = self.qa_repository.get_message(user_id, selector.qa_message_id)
         if (
             message is None
@@ -317,6 +322,42 @@ class NoteService:
             title_snapshot=citation.document_name,
             excerpt_snapshot=citation.excerpt,
         )
+
+    def _source_fence_active(
+        self, user_id: str, selector: NoteSourceSelector
+    ) -> bool:
+        """Distinguish a fenced source from an absent or foreign source."""
+
+        with connect(self.repository.db_path) as conn:
+            row = conn.execute(
+                """
+                select 1 from qa_deletion_fences f
+                where f.user_id=?
+                  and (f.status in ('queued','running')
+                       or (f.status='failed' and f.attempt_count < 3))
+                  and (
+                    (f.target_type='conversation' and f.target_id=(
+                        select conversation_id from qa_messages
+                        where id=? and user_id=?
+                    ))
+                    or (f.target_type='document' and exists (
+                        select 1 from qa_message_sources s
+                        where s.assistant_message_id=? and s.user_id=?
+                          and s.citation_id=? and s.document_id=f.target_id
+                    ))
+                  )
+                limit 1
+                """,
+                (
+                    user_id,
+                    selector.qa_message_id,
+                    user_id,
+                    selector.qa_message_id,
+                    user_id,
+                    selector.citation_id,
+                ),
+            ).fetchone()
+            return row is not None
 
     def _notify_best_effort(self) -> None:
         try:

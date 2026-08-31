@@ -18,6 +18,8 @@ from app.note_models import (
     NoteNotFoundError,
     NotePage,
     NoteSource,
+    NoteSourceDeletingError,
+    NoteSourceNotFoundError,
     NoteValidationError,
     NoteVersionConflict,
     decode_note_cursor,
@@ -48,6 +50,7 @@ class NoteRepository:
         note_id: str | None = None,
         now: str | None = None,
         request_digest: str | None = None,
+        guard_sources: bool = False,
     ) -> Note:
         conn = connect(self.db_path)
         try:
@@ -63,6 +66,7 @@ class NoteRepository:
                 note_id=note_id,
                 now=now,
                 request_digest=request_digest,
+                guard_sources=guard_sources,
             )
             conn.commit()
             return note
@@ -85,6 +89,7 @@ class NoteRepository:
         note_id: str | None = None,
         now: str | None = None,
         request_digest: str | None = None,
+        guard_sources: bool = False,
     ) -> Note:
         body, normalized_concept, normalized_tags = validate_note_input(
             body_markdown, concept, tags
@@ -133,6 +138,8 @@ class NoteRepository:
             raise
         self._replace_tags(conn, user_id, identifier, normalized_tags)
         for source in sources:
+            if guard_sources:
+                self._guard_source_in_transaction(conn, user_id, source)
             self._insert_source(conn, user_id, identifier, source, timestamp)
         self._replace_fts(conn, user_id, identifier, body, normalized_concept, normalized_tags)
         self._enqueue(conn, user_id, identifier, 1, "upsert", timestamp)
@@ -484,6 +491,78 @@ class NoteRepository:
                 locator_json, source.title_snapshot, source.excerpt_snapshot, timestamp,
             ),
         )
+
+    @staticmethod
+    def _guard_source_in_transaction(
+        conn: sqlite3.Connection, user_id: str, source: NewNoteSource
+    ) -> None:
+        """Validate a resolved source while holding the Note write transaction.
+
+        Source lookup happens through ``QaRepository`` before this method, but
+        the deletion fence can commit in between that read and Note insertion.
+        Rechecking here makes the race deterministic: either this transaction
+        commits and the deletion transaction scrubs it, or the fence is observed
+        and the association is rejected.
+        """
+
+        message = conn.execute(
+            """
+            select id, conversation_id from qa_messages
+            where id=? and conversation_id=? and user_id=?
+              and role='assistant' and status='completed'
+            """,
+            (source.qa_message_id, source.qa_thread_id, user_id),
+        ).fetchone()
+        if message is None:
+            raise NoteSourceNotFoundError(source.qa_message_id or "")
+
+        document_id: str | None = None
+        if source.kind == "qa_citation":
+            citation = conn.execute(
+                """
+                select citation_id, document_id from qa_message_sources
+                where assistant_message_id=? and conversation_id=? and user_id=?
+                  and citation_id=?
+                """,
+                (
+                    source.qa_message_id,
+                    source.qa_thread_id,
+                    user_id,
+                    source.citation_id,
+                ),
+            ).fetchone()
+            if citation is None:
+                raise NoteSourceNotFoundError(source.citation_id or "")
+            document_id = citation["document_id"]
+
+        active = conn.execute(
+            """
+            select 1 from qa_deletion_fences
+            where user_id=?
+              and (
+                status in ('queued','running')
+                or (status='failed' and attempt_count < 3)
+              )
+              and (
+                (target_type='conversation' and target_id=?)
+                or (target_type='document' and target_id=? and exists (
+                    select 1 from qa_conversation_documents
+                    where user_id=? and conversation_id=? and document_id=?
+                ))
+              )
+            limit 1
+            """,
+            (
+                user_id,
+                source.qa_thread_id,
+                document_id,
+                user_id,
+                source.qa_thread_id,
+                document_id,
+            ),
+        ).fetchone()
+        if active is not None:
+            raise NoteSourceDeletingError(source.qa_message_id or "")
 
     @staticmethod
     def _replace_fts(
