@@ -120,6 +120,43 @@ def test_recall_reserves_a_result_for_note_service_fts_hits(tmp_path):
     assert recalled.count("[历史文档]") + recalled.count("[历史问答]") + recalled.count("[历史笔记]") == 3
 
 
+def test_recall_uses_full_limit_for_note_only_results(tmp_path):
+    assistant_instance, notes, _memory, history = assistant(tmp_path)
+    history.save({"documents": [], "questions": [], "notes": [], "sessions": []})
+    notes.items = tuple(
+        SimpleNamespace(concept="NotesOnly", body_markdown=f"note-{index}")
+        for index in range(6)
+    )
+
+    recalled = assistant_instance.recall("NotesOnly", limit=5)
+
+    assert recalled.count("[历史笔记]") == 5
+    assert "note-4" in recalled
+    assert "note-5" not in recalled
+
+
+def test_recall_backfills_sparse_legacy_results_with_notes(tmp_path):
+    assistant_instance, notes, _memory, history = assistant(tmp_path)
+    history.save({
+        "documents": [{"document_name": "Sparse RAG document", "document_path": "doc.md"}],
+        "questions": [],
+        "notes": [],
+        "sessions": [],
+    })
+    notes.items = tuple(
+        SimpleNamespace(concept="RAG", body_markdown=f"note-{index}")
+        for index in range(6)
+    )
+
+    recalled = assistant_instance.recall("RAG", limit=5)
+
+    assert "[历史文档] Sparse RAG document" in recalled
+    assert recalled.count("[历史文档]") + recalled.count("[历史问答]") + recalled.count("[历史笔记]") == 5
+    assert recalled.count("[历史笔记]") == 4
+    assert "note-3" in recalled
+    assert "note-4" not in recalled
+
+
 def test_missing_note_service_fails_safely_without_legacy_note_writes_or_reads(tmp_path):
     assistant_instance, _notes, memory, history = assistant(tmp_path, with_note_service=False)
     before = history.path.read_bytes()

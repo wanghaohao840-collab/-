@@ -591,10 +591,24 @@ class PDFLearningAssistant:
                 for item in note_page.items[:limit]
             ]
 
-        # Reserve at least one slot for FTS results so document/question hits
-        # cannot consume the entire bounded result set before Notes are shown.
-        note_limit = min(len(note_hits), max(1, limit // 2)) if note_hits else 0
-        combined_hits = legacy_hits[:max(limit - note_limit, 0)] + note_hits[:note_limit]
+        # When both sources match, reserve one item for each (where capacity
+        # permits), then fill the remaining bounded capacity from either
+        # source.  This keeps FTS Notes visible without leaving unused slots.
+        result_limit = max(limit, 0)
+        if legacy_hits and note_hits:
+            legacy_limit = 1 if result_limit > 1 else 0
+            note_limit = 1 if result_limit else 0
+            remaining = result_limit - legacy_limit - note_limit
+            legacy_limit += min(len(legacy_hits) - legacy_limit, remaining)
+            remaining = result_limit - legacy_limit - note_limit
+            note_limit += min(len(note_hits) - note_limit, remaining)
+        elif legacy_hits:
+            legacy_limit = min(len(legacy_hits), result_limit)
+            note_limit = 0
+        else:
+            legacy_limit = 0
+            note_limit = min(len(note_hits), result_limit)
+        combined_hits = legacy_hits[:legacy_limit] + note_hits[:note_limit]
         lines = [
             "一、当前记忆系统检索结果",
             "学习笔记已通过 NoteService 检索，Memory 仅作为可恢复投影。"
