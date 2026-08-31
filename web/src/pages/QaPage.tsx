@@ -6,6 +6,7 @@ import { ConversationList, MessageList, QaComposer, QaOverlay, SourcePanel, Summ
 import { QaDeleteDialog } from "../components/QaWorkspace/QaDeleteDialog";
 import { QaDrawer } from "../components/QaWorkspace/QaDrawer";
 import { useDocumentsQuery } from "../features/documents/queries";
+import { useNotesCapabilities } from "../features/notes/queries";
 import { newClientRequestId, useQaActiveSummary, useQaCapabilities, useQaConversation, useQaConversations, useQaDeletion, useQaJob, useQaMessages, useQaMutations } from "../features/qa/queries";
 import type { QaMessage, QaSource } from "../features/qa/types";
 
@@ -16,7 +17,9 @@ export function QaPage() {
   const selectedId = params.get("conversation") ?? undefined;
   const handoffIds = useMemo(() => (params.get("documents") ?? "").split(",").filter(Boolean), [params]);
   const capabilities = useQaCapabilities();
+  const notesCapabilities = useNotesCapabilities();
   const enabled = capabilities.data?.enabled !== false;
+  const notesEnabled = notesCapabilities.data?.enabled !== false;
   const conversations = useQaConversations(enabled);
   const conversation = useQaConversation(enabled ? selectedId : undefined);
   const messages = useQaMessages(enabled ? selectedId : undefined);
@@ -100,7 +103,7 @@ export function QaPage() {
     <div className="qa-workspace">
       {conversations.isPending ? <aside className="qa-conversations" role="status">正在加载对话…</aside> : <ConversationList items={items} selectedId={selectedId} onSelect={selectConversation} onNew={() => setCreateOpen(true)} hasMore={Boolean(conversations.hasNextPage)} loadingMore={conversations.isFetchingNextPage} onLoadMore={() => void conversations.fetchNextPage()} />}
       <main className="qa-thread">
-        {selectedId ? <>{messages.isPending ? <div className="qa-welcome" role="status">正在加载消息…</div> : <MessageList messages={currentMessages} onSources={showSources} onRetry={(item) => mutations.retry.mutate({ messageId: item.message_id, conversationId: item.conversation_id, clientRequestId: newClientRequestId() })} busy={busy} hasOlder={Boolean(messages.hasNextPage)} loadingOlder={messages.isFetchingNextPage} onLoadOlder={() => void messages.fetchNextPage()} />}<QaComposer busy={busy} documentCount={conversation.data?.documents.length ?? 0} onSubmit={(question, mode) => mutations.ask.mutate({ conversationId: selectedId, question, mode, clientRequestId: newClientRequestId() })} /></> : <div className="qa-welcome"><h2>建立第一个对话</h2><p>文档范围创建后保持固定，避免后续回答悄悄改变证据边界。</p><Button onClick={() => setCreateOpen(true)}>选择文档</Button></div>}
+        {selectedId ? <>{messages.isPending ? <div className="qa-welcome" role="status">正在加载消息…</div> : <MessageList messages={currentMessages} onSources={showSources} onRetry={(item) => mutations.retry.mutate({ messageId: item.message_id, conversationId: item.conversation_id, clientRequestId: newClientRequestId() })} busy={busy} hasOlder={Boolean(messages.hasNextPage)} loadingOlder={messages.isFetchingNextPage} onLoadOlder={() => void messages.fetchNextPage()} notesEnabled={enabled && notesEnabled} />}<QaComposer busy={busy} documentCount={conversation.data?.documents.length ?? 0} onSubmit={(question, mode) => mutations.ask.mutate({ conversationId: selectedId, question, mode, clientRequestId: newClientRequestId() })} /></> : <div className="qa-welcome"><h2>建立第一个对话</h2><p>文档范围创建后保持固定，避免后续回答悄悄改变证据边界。</p><Button onClick={() => setCreateOpen(true)}>选择文档</Button></div>}
       </main>
       <SourcePanel sources={sources} />
     </div>

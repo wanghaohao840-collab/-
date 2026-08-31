@@ -74,6 +74,36 @@ describe("QA workspace components", () => {
     expect(screen.getByRole("button", { name: "重试回答" })).toBeDisabled();
   });
 
+  it("offers identifier-only answer and citation note actions only for completed answers", () => {
+    const completed: QaMessage = {
+      ...failed,
+      message_id: "answer-1",
+      status: "completed",
+      content: "答案正文不应进入 URL",
+      sources: [source],
+    };
+    const pending: QaMessage = { ...failed, message_id: "pending-1", status: "pending", sources: [source] };
+    render(<MessageList messages={[completed, failed, pending]} onSources={vi.fn()} onRetry={vi.fn()} />);
+
+    expect(screen.getByRole("link", { name: "记为笔记" })).toHaveAttribute(
+      "href",
+      "/notes?source_kind=qa_answer&qa_message_id=answer-1",
+    );
+    expect(screen.getByRole("link", { name: "记录此引用" })).toHaveAttribute(
+      "href",
+      "/notes?source_kind=qa_citation&qa_message_id=answer-1&citation_id=citation-1",
+    );
+    expect(screen.getByRole("link", { name: "记为笔记" })).not.toHaveAttribute("href", expect.stringContaining("答案正文"));
+    expect(screen.queryAllByRole("link", { name: "记为笔记" })).toHaveLength(1);
+  });
+
+  it("hides note actions when the Notes route is disabled", () => {
+    const completed: QaMessage = { ...failed, status: "completed", content: "答案", sources: [source] };
+    render(<MessageList messages={[completed]} notesEnabled={false} onSources={vi.fn()} onRetry={vi.fn()} />);
+    expect(screen.queryByRole("link", { name: "记为笔记" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "记录此引用" })).not.toBeInTheDocument();
+  });
+
   it("renders a decorative cue only while summary work is active", () => {
     const job: QaJob = { job_id: "job-1", conversation_id: "conversation-1", input_message_id: "input-1", assistant_message_id: "assistant-1", status: "running", stage: "summarizing", progress: 40, cancel_requested_at: null, attempt_count: 1, max_attempts: 3, safe_error_code: null, trace_id: null, created_at: "now", started_at: "now", finished_at: null, updated_at: "now" };
     const { rerender } = render(<SummaryStatus job={job} onCancel={vi.fn()} />);

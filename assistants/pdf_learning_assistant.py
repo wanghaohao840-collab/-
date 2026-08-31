@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,6 +116,7 @@ class PDFLearningAssistant:
         self.history_repository = getattr(runtime, "history", None)
         self.report_service = getattr(runtime, "reports", None)
         self.coordinator = getattr(runtime, "coordinator", None)
+        self.note_service = getattr(runtime, "note_service", None)
         self.history_path = Path(getattr(self.history_repository, "path", self._resolve_history_path(user_id)))
         if self.history_repository is None:
             self.history_repository = HistoryRepository(self.history_path)
@@ -530,6 +532,17 @@ class PDFLearningAssistant:
         if not note.strip():
             return "❌ 笔记内容不能为空"
 
+        note_service = getattr(self, "note_service", None)
+        if note_service is not None:
+            saved = note_service.create_for_user(
+                self.user_id,
+                body_markdown=note,
+                concept=concept,
+                tags=(),
+                client_request_id=f"legacy-{self.session_id}-{uuid.uuid4().hex}",
+            )
+            return f"✅ 保存成功\n- note_id: {saved.id}\n- 投影状态: {saved.projection_state}"
+
         self.stats["notes_added"] += 1
 
         content = note
@@ -558,7 +571,17 @@ class PDFLearningAssistant:
         return result
 
     def clear_all_notes(self) -> str:
-        """清空全部学习笔记：只清理学习历史中的 notes，不影响 PDF 文档和问答历史"""
+        """清空当前用户的学习笔记，不影响 PDF 文档和问答历史。"""
+
+        note_service = getattr(self, "note_service", None)
+        if note_service is not None:
+            removed_notes = note_service.clear_for_user(self.user_id)
+            return (
+                "✅ 已清空全部学习笔记\n\n"
+                f"- 删除学习笔记: {removed_notes} 条\n"
+                "- PDF 文档和问答历史未删除\n"
+                "- 当前 RAG 知识库未删除"
+            )
 
         latest = self._load_latest_history()
         removed_notes = len(latest.get("notes", []))
@@ -584,12 +607,52 @@ class PDFLearningAssistant:
         )
 
     def recall(self, query: str, limit: int = 5) -> str:
-        """回忆历史学习内容：同时查询 MemoryTool 和本地学习历史 JSON"""
+        """回忆历史学习内容，并将笔记查询交给 NoteService。"""
 
         if not query or not query.strip():
             return "❌ 回忆关键词不能为空"
 
         query = query.strip()
+
+        note_service = getattr(self, "note_service", None)
+        if note_service is not None:
+            note_page = note_service.search_for_user(
+                self.user_id, query, limit=limit
+            )
+            history = self._load_latest_history()
+            history_hits = []
+
+            for item in history.get("documents", []):
+                text = f"{item.get('document_name', '')} {item.get('document_path', '')}"
+                if query in text:
+                    history_hits.append(
+                        f"[历史文档] {item.get('document_name')} | {item.get('loaded_at')}"
+                    )
+
+            for item in history.get("questions", []):
+                question = str(item.get("question", ""))
+                answer = str(item.get("answer", ""))
+                if query in question or query in answer:
+                    short_answer = answer[:300].replace("\n", " ")
+                    history_hits.append(
+                        f"[历史问答] 问题：{question}\n回答摘要：{short_answer}..."
+                    )
+
+            for item in note_page.items[:limit]:
+                concept = getattr(item, "concept", None) or "未命名概念"
+                body = getattr(item, "body_markdown", "")
+                history_hits.append(f"[历史笔记] 【{concept}】{body}")
+
+            lines = [
+                "一、当前记忆系统检索结果",
+                "学习笔记已通过 NoteService 检索，Memory 仅作为可恢复投影。",
+                "\n二、本地历史记录检索结果",
+            ]
+            if history_hits:
+                lines.extend(f"{i}. {item}" for i, item in enumerate(history_hits[:limit], 1))
+            else:
+                lines.append(f"未在本地历史记录中找到与「{query}」相关的内容")
+            return "\n".join(lines)
 
         # 1. 先查当前运行中的 MemoryTool
         memory_result = self.memory_tool.execute(
@@ -656,6 +719,12 @@ class PDFLearningAssistant:
 
         memory_summary = self.memory_tool.execute("summary")
         rag_stats = self.rag_tool.execute("stats")
+        note_service = getattr(self, "note_service", None)
+        notes_count = (
+            note_service.count_for_user(self.user_id)
+            if note_service is not None
+            else self.stats["notes_added"]
+        )
 
         return (
             "📘 PDF 学习助手统计:\n"
@@ -665,7 +734,7 @@ class PDFLearningAssistant:
             f"- 当前文档ID: {self.current_document_id or '暂无'}\n"
             f"- 已导入文档数: {self.stats['documents_loaded']}\n"
             f"- 提问次数: {len(qa_turns) if qa_turns is not None else self.stats['questions_asked']}\n"
-            f"- 学习笔记数: {self.stats['notes_added']}\n\n"
+            f"- 学习笔记数: {notes_count}\n\n"
             f"{memory_summary}\n\n"
             f"{rag_stats}"
         )
@@ -683,11 +752,16 @@ class PDFLearningAssistant:
             if qa_turns is None
             else list(qa_turns)
         )
-        notes = self.history.get("notes", [])
+        note_service = getattr(self, "note_service", None)
+        if note_service is not None:
+            note_count = note_service.count_for_user(self.user_id)
+            recent_notes = note_service.recent_for_user(self.user_id, limit=10)
+        else:
+            note_count = len(self.history.get("notes", []))
+            recent_notes = self.history.get("notes", [])[-10:]
 
         recent_documents = documents[-5:]
         recent_questions = questions[-10:]
-        recent_notes = notes[-10:]
 
         doc_text = "\n".join(
             [
@@ -704,12 +778,20 @@ class PDFLearningAssistant:
             ]
         ) or "暂无问答记录"
 
-        note_text = "\n".join(
-            [
-                f"{i + 1}. 【{item.get('concept') or '未命名概念'}】{item.get('note')}"
-                for i, item in enumerate(recent_notes)
-            ]
-        ) or "暂无学习笔记"
+        if self.note_service is not None:
+            note_text = "\n".join(
+                [
+                    f"{i + 1}. 【{getattr(item, 'concept', None) or '未命名概念'}】{getattr(item, 'body_markdown', '')}"
+                    for i, item in enumerate(recent_notes)
+                ]
+            ) or "暂无学习笔记"
+        else:
+            note_text = "\n".join(
+                [
+                    f"{i + 1}. 【{item.get('concept') or '未命名概念'}】{item.get('note')}"
+                    for i, item in enumerate(recent_notes)
+                ]
+            ) or "暂无学习笔记"
 
         report = f"""
     📘 PDF 智能学习报告
@@ -720,7 +802,7 @@ class PDFLearningAssistant:
     - 当前文档: {self.current_document or "暂无"}
     - 历史导入文档数: {len(documents)}
     - 历史提问次数: {len(questions)}
-    - 历史学习笔记数: {len(notes)}
+    - 历史学习笔记数: {note_count}
 
     二、最近导入的文档
     {doc_text}

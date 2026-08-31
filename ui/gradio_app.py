@@ -1367,10 +1367,10 @@ def _build_demo(
 
             note_btn = gr.Button("保存笔记")
 
-            clear_notes_btn = gr.Button("清空全部学习笔记")
+            clear_notes_btn = gr.Button("清空全部笔记（不影响文档和问答）")
 
             note_output = gr.Textbox(
-                label="保存 / 清空结果",
+                label="笔记操作结果（文档和问答不会删除）",
                 lines=8
             )
 
