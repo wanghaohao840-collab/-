@@ -77,7 +77,7 @@ describe("QA workspace components", () => {
   it("offers identifier-only answer and citation note actions only for completed answers", () => {
     const completed: QaMessage = {
       ...failed,
-      message_id: "answer-1",
+      message_id: "answer & 1",
       status: "completed",
       content: "答案正文不应进入 URL",
       sources: [source],
@@ -87,11 +87,11 @@ describe("QA workspace components", () => {
 
     expect(screen.getByRole("link", { name: "记为笔记" })).toHaveAttribute(
       "href",
-      "/notes?source_kind=qa_answer&qa_message_id=answer-1",
+      "/notes?source_kind=qa_answer&qa_message_id=answer+%26+1",
     );
     expect(screen.getByRole("link", { name: "记录此引用" })).toHaveAttribute(
       "href",
-      "/notes?source_kind=qa_citation&qa_message_id=answer-1&citation_id=citation-1",
+      "/notes?source_kind=qa_citation&qa_message_id=answer+%26+1&citation_id=citation-1",
     );
     expect(screen.getByRole("link", { name: "记为笔记" })).not.toHaveAttribute("href", expect.stringContaining("答案正文"));
     expect(screen.queryAllByRole("link", { name: "记为笔记" })).toHaveLength(1);

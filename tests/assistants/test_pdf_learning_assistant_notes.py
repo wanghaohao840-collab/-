@@ -6,12 +6,13 @@ from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
 class NoteServiceSpy:
-    def __init__(self):
+    def __init__(self, items=None):
         self.created = []
         self.cleared = []
         self.searches = []
         self.counts = []
         self.recent_calls = []
+        self.items = items or (SimpleNamespace(concept="RAG", body_markdown="fts note"),)
 
     def create_for_user(self, user_id, **kwargs):
         self.created.append((user_id, kwargs))
@@ -23,7 +24,7 @@ class NoteServiceSpy:
 
     def search_for_user(self, user_id, query, *, limit=20):
         self.searches.append((user_id, query, limit))
-        return SimpleNamespace(items=(SimpleNamespace(concept="RAG", body_markdown="fts note"),))
+        return SimpleNamespace(items=self.items)
 
     def count_for_user(self, user_id):
         self.counts.append(user_id)
@@ -43,7 +44,7 @@ class NoWriteMemory:
         return "memory result"
 
 
-def assistant(tmp_path: Path):
+def assistant(tmp_path: Path, *, with_note_service=True):
     root = tmp_path / "user"
     root.mkdir(parents=True)
     history = HistoryRepository(root / "history.json")
@@ -58,7 +59,7 @@ def assistant(tmp_path: Path):
         history=history,
         reports=None,
         coordinator=None,
-        note_service=note_service,
+        note_service=note_service if with_note_service else None,
     )
     return PDFLearningAssistant(user_id="alice", runtime=runtime), note_service, memory, history
 
@@ -97,3 +98,41 @@ def test_supported_recall_stats_report_use_note_fact_source_and_keep_legacy_docs
     assert "历史学习笔记数: 2" in report
     assert "recent note" in report
     assert notes.recent_calls == [("alice", 10)]
+
+
+def test_recall_reserves_a_result_for_note_service_fts_hits(tmp_path):
+    assistant_instance, notes, _memory, history = assistant(tmp_path)
+    history.save({
+        "documents": [
+            {"document_name": f"RAG document {index}", "document_path": f"doc-{index}.md"}
+            for index in range(5)
+        ],
+        "questions": [{"question": "RAG question", "answer": "RAG answer"}],
+        "notes": [],
+        "sessions": [],
+    })
+    notes.items = (SimpleNamespace(concept="RAG", body_markdown="FTS result"),)
+
+    recalled = assistant_instance.recall("RAG", limit=3)
+
+    assert notes.searches == [("alice", "RAG", 3)]
+    assert "[历史笔记] 【RAG】FTS result" in recalled
+    assert recalled.count("[历史文档]") + recalled.count("[历史问答]") + recalled.count("[历史笔记]") == 3
+
+
+def test_missing_note_service_fails_safely_without_legacy_note_writes_or_reads(tmp_path):
+    assistant_instance, _notes, memory, history = assistant(tmp_path, with_note_service=False)
+    before = history.path.read_bytes()
+
+    assert "笔记服务不可用" in assistant_instance.add_note("new body", concept="RAG")
+    assert "笔记服务不可用" in assistant_instance.clear_all_notes()
+    recalled = assistant_instance.recall("RAG", limit=5)
+    assert "笔记服务不可用" in recalled
+    assert "[历史文档]" in recalled
+    assert "[历史问答]" in recalled
+    assert "[历史笔记]" not in recalled
+    assert "学习笔记数: 服务不可用" in assistant_instance.get_stats()
+    assert "笔记服务不可用，未读取旧笔记" in assistant_instance.generate_report()
+
+    assert history.path.read_bytes() == before
+    assert not [call for call in memory.calls if call[0] in {"add", "clear", "search"}]

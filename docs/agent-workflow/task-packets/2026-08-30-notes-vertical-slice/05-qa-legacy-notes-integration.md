@@ -64,6 +64,8 @@ React Notes 已可独立使用，但产品闭环还要求 QA 来源入口和 leg
 - Create: `tests/assistants/test_pdf_learning_assistant_notes.py`
 - Create: `tests/ui/test_note_handlers.py`
 - Create: `tests/integration/test_note_legacy_cutover.py`
+- Modify: `tests/test_assistant_user_isolation.py`
+- Modify: `tests/test_p0_data_integrity.py`
 
 ### Allowed behavior changes
 
@@ -146,6 +148,11 @@ Stop with a reality-conflict report if NoteService trusted interfaces differ, su
 - `QaWorkspace.MessageList` cannot determine whether the Notes route is enabled; the existing capability-query seam is owned by `web/src/pages/QaPage.tsx`.
 - Resolution: extend this packet boundary narrowly to `web/src/pages/QaPage.tsx` so it can read `useNotesCapabilities()` and pass the resulting availability flag to the message list. No other QA page behavior may change.
 
+## Reality-conflict resolution: obsolete JSON Note regression fixtures
+
+- `tests/test_assistant_user_isolation.py` and `tests/test_p0_data_integrity.py` construct legacy runtimes without `NoteService` and explicitly assert that `add_note()` writes `history.json`. Those assertions contradict the accepted permanent cutover in this packet and make the exact verification command require the forbidden fallback.
+- Resolution: extend this packet boundary only to those two tests. Replace Note-specific fixtures/assertions with the shared repository-backed `NoteService`/application-service path, or assert explicit safe unavailability where the test is solely about an intentionally service-less runtime. Preserve their document deletion, report snapshot, concurrency and user-isolation intent; do not weaken unrelated assertions.
+
 ## Implementation handoff
 
 - Status: done
@@ -160,26 +167,31 @@ Stop with a reality-conflict report if NoteService trusted interfaces differ, su
   - `tests/assistants/test_pdf_learning_assistant_notes.py`
   - `tests/integration/test_note_legacy_cutover.py`
   - `tests/ui/test_note_handlers.py`
+  - `tests/test_assistant_user_isolation.py`
+  - `tests/test_p0_data_integrity.py`
   - `docs/agent-workflow/task-packets/2026-08-30-notes-vertical-slice/05-qa-legacy-notes-integration.md`
 - Dependency/interfaces:
   - Consumed Packet 03 runtime-injected trusted `NoteService` facade from `4e4abb5` and `5086aca`.
   - Consumed Packet 04 identifier-only `/notes` prefill navigation contract from `57f516b`/`801b8f4`.
-  - Completed QA answers now expose keyboard-labeled answer/citation links with only stable QA/citation identifiers; Notes capability-off, pending, and failed states expose no action.
-  - Supported legacy runtime operations create, clear, FTS-search, count, and list recent Notes through `NoteService`; documents/questions retain their existing history behavior.
+  - Completed QA answers expose keyboard-labeled answer/citation links with only stable QA/citation identifiers only after a successful Notes capability response explicitly returns `enabled: true`; disabled, pending, failed, and error states expose no action.
+  - Supported legacy runtime operations create, clear, FTS-search, count, and list recent Notes through `NoteService`; missing-service operations fail explicitly without JSON/Memory Note fallback, while document/question history recall remains available.
+  - Recall reserves bounded space for at least one `NoteService` FTS hit when present, so document/question history cannot starve Notes; it never scans legacy JSON Notes.
+  - Authenticated `/api/v1/notes` integration coverage proves the React list contract sees assistant-created rows and a later assistant session recalls an API-created row.
+  - The approved regression-fixture extension moves Note-specific isolation, concurrency, and report-snapshot assertions to real `ApplicationServices`/`NoteService` runtimes without weakening their original guarantees.
 - Acceptance criteria:
-  - [x] Completed answer/citation actions open identifier-only Notes drafts; pending, failed, and route-disabled states do not expose actions.
+  - [x] Completed answer/citation actions open identifier-only Notes drafts; disabled, pending, and error capability states, plus pending/failed QA states, do not expose actions.
   - [x] Legacy assistant creates rows visible through the shared SQLite-backed `NoteService` and leaves legacy history Notes unchanged.
   - [x] Legacy clear/recall/stats/report use active Note rows while preserving document/question recall and report behavior.
-  - [x] Supported paths do not issue random `learning_note` Memory writes or broad Memory clears; Notes projection remains the sole Memory writer.
+  - [x] Supported paths and explicit missing-service behavior do not issue random `learning_note` Memory writes, JSON Note writes, or broad Memory clears; Notes projection remains the sole Memory writer.
   - [x] Cross-user and multi-session integration coverage confirms shared same-user rows and user-scoped clear.
 - Verification:
-  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/integration/test_note_legacy_cutover.py tests/assistants/test_pdf_learning_assistant_notes.py tests/ui/test_note_handlers.py tests/test_assistant_user_isolation.py tests/test_p0_data_integrity.py --basetemp=.runtime/pytest-notes-cross-entry` — PASS (12 passed in 54.52s).
-  - `Set-Location web; npm test -- --run src/components/QaWorkspace/QaWorkspace.test.tsx src/pages/QaPage.test.tsx src/pages/NotesPage.test.tsx` — PASS (18 files, 153 tests).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/integration/test_note_legacy_cutover.py tests/assistants/test_pdf_learning_assistant_notes.py tests/ui/test_note_handlers.py tests/test_assistant_user_isolation.py tests/test_p0_data_integrity.py --basetemp=.runtime/pytest-notes-cross-entry` — PASS (15 passed in 88.22s).
+  - `Set-Location web; npm test -- --run src/components/QaWorkspace/QaWorkspace.test.tsx src/pages/QaPage.test.tsx src/pages/NotesPage.test.tsx` — PASS (18 files, 155 tests).
   - `Set-Location web; npm run typecheck` — PASS.
   - `git diff --check` — PASS.
 - Deviations:
   - The repository `test` script expands the supplied frontend paths to the full `src tests` suite; the final verification passed all 18 files.
 - Residual risks:
-  - One earlier execution of the same frontend command intermittently failed in unowned `src/auth/ProtectedRoute.test.tsx` before a retry passed all 153 tests. No Packet 05 code touches that test; rerun the frontend suite if test-environment stability is required before release.
+  - The repository frontend command expands to the full `src tests` suite. Two earlier attempts exposed existing focus-timing failures in unowned `src/auth/AuthProvider.test.tsx` and `src/auth/ProtectedRoute.test.tsx`; the final identical retry passed all 155 tests. No Packet 05 files touch either test.
 - Commit:
-  - `34718e9` — implementation and verification tests.
+  - Pending final review-fix commit.

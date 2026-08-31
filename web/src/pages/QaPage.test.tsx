@@ -35,7 +35,7 @@ type RenderPageOptions = {
   activeJob?: QaJob | null;
   jobResult?: QaJob;
   conversations?: (typeof conversation)[];
-  notesEnabled?: boolean;
+  notesCapability?: "enabled" | "disabled" | "pending" | "error";
 };
 
 function renderPage(
@@ -50,7 +50,11 @@ function renderPage(
     const url = String(input);
     if (url === "/api/v1/auth/session") return Promise.resolve(response({ username: "reader", csrf_token: "csrf" }));
     if (url === "/api/v1/qa/capabilities") return Promise.resolve(response({ enabled }));
-    if (url === "/api/v1/notes/capabilities") return Promise.resolve(response({ enabled: options.notesEnabled ?? true }));
+    if (url === "/api/v1/notes/capabilities") {
+      if (options.notesCapability === "pending") return new Promise<Response>(() => undefined);
+      if (options.notesCapability === "error") return Promise.resolve(response({ error: { code: "notes_unavailable", message: "Notes unavailable", retryable: false, field_errors: {} } }, 503));
+      return Promise.resolve(response({ enabled: options.notesCapability !== "disabled" }));
+    }
     if (url === "/api/v1/documents") return Promise.resolve(response({ items: [{ document_id: "doc-1", name: "研究.md", file_suffix: ".md", size_bytes: 1, loaded_at: "now", status: "ready" }] }));
     if (url === "/api/v1/qa/conversations?limit=20") return Promise.resolve(response({ items: conversationItems, next_cursor: null }));
     const selectedConversation = conversationItems.find(
@@ -112,7 +116,14 @@ describe("QaPage", () => {
   });
 
   it("hides note actions when the Notes route is disabled", async () => {
-    renderPage(true, `/qa?conversation=${conversation.conversation_id}`, [completedMessage], { notesEnabled: false });
+    renderPage(true, `/qa?conversation=${conversation.conversation_id}`, [completedMessage], { notesCapability: "disabled" });
+    expect(await screen.findByText("服务器证据")).toBeVisible();
+    expect(screen.queryByRole("link", { name: "记为笔记" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "记录此引用" })).not.toBeInTheDocument();
+  });
+
+  it.each(["pending", "error"] as const)("fails closed while Notes capability is %s", async (notesCapability) => {
+    renderPage(true, `/qa?conversation=${conversation.conversation_id}`, [completedMessage], { notesCapability });
     expect(await screen.findByText("服务器证据")).toBeVisible();
     expect(screen.queryByRole("link", { name: "记为笔记" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "记录此引用" })).not.toBeInTheDocument();

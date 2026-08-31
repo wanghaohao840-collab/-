@@ -19,7 +19,7 @@ export function QaPage() {
   const capabilities = useQaCapabilities();
   const notesCapabilities = useNotesCapabilities();
   const enabled = capabilities.data?.enabled !== false;
-  const notesEnabled = notesCapabilities.data?.enabled !== false;
+  const notesEnabled = notesCapabilities.isSuccess && notesCapabilities.data.enabled === true;
   const conversations = useQaConversations(enabled);
   const conversation = useQaConversation(enabled ? selectedId : undefined);
   const messages = useQaMessages(enabled ? selectedId : undefined);
