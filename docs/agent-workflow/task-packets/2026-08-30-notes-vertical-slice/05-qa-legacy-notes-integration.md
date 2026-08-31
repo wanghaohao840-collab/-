@@ -194,4 +194,4 @@ Stop with a reality-conflict report if NoteService trusted interfaces differ, su
 - Residual risks:
   - The repository frontend command expands to the full `src tests` suite. Two earlier attempts exposed existing focus-timing failures in unowned `src/auth/AuthProvider.test.tsx` and `src/auth/ProtectedRoute.test.tsx`; the final identical retry passed all 155 tests. No Packet 05 files touch either test.
 - Commit:
-  - Pending final review-fix commit.
+  - `57fc2c0` — closes the independent review findings and updates regression coverage.
