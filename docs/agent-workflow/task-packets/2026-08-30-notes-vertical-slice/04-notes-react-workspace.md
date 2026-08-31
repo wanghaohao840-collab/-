@@ -194,8 +194,8 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - [x] Desktop/tablet/mobile layouts use media queries at 1200px and 768px; mobile filter/clear actions use 44px minimum targets; every local overlay traps focus, closes on Escape and restores focus.
   - [x] Exact dependencies are pinned to `react-markdown@10.1.0`, `remark-gfm@4.0.1`, `rehype-sanitize@6.0.0`.
 - Verification:
-  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 34 tests).
-  - `npm test -- --run` — PASS (18 files, 149 tests).
+  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 35 tests).
+  - `npm test -- --run` — PASS (18 files, 150 tests).
   - `npm run typecheck` — PASS.
   - `npm run lint` — PASS.
   - `npm run build` — PASS (Vite production build; existing chunk-size warning only).
@@ -214,6 +214,7 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - Clear removes all cached Note detail records before list invalidation; source locator copy reports both success and failure without blocking the drawer.
   - Fresh-note drafts establish an empty baseline immediately, so unsaved create navigation is guarded; popstate tests cover both cancel-and-restore and confirm-and-proceed paths.
   - A shared discard gate now owns internal selection, desktop/mobile filter commits, Back, and programmatic QA CTA navigation; canceled operations preserve URL, selection and draft, while confirmed operations intentionally clear selection or leave the route.
+  - Fresh create consumes the returned Note before committing the URL selection through a discard-bypass callback; the regression confirms one create request, no prompt, saved selection, pristine draft and disabled repeat Save.
 - Local browser smoke — local `/notes` navigation reached the authenticated login gate; no unauthenticated Notes screenshot is claimed. Responsive DOM/a11y tests cover the three approved layout states.
 - Deviations:
   - `web/src/layout/navigation.ts` required no change because its Notes item already matched the approved label/order.
@@ -226,3 +227,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - `f94460f` — history restoration safety refinement.
   - `83aee11` — new-note baseline and history regression coverage.
   - `616b988` — third-review shared discard-navigation guard and regression coverage.
+  - Final-review create-save ordering commit pending.

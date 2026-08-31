@@ -10,7 +10,7 @@ import "./notes-workspace.css";
 export type NoteSaveInput = { body_markdown: string; concept: string | null; tags: string[]; expected_version?: number; client_request_id?: string };
 type Props = {
   items: NoteListItem[]; selectedNote?: Note; selectedId?: string; selectedLoading?: boolean; selectedError?: unknown; hasMore?: boolean; loadingMore?: boolean; saving?: boolean; actionError?: unknown;
-  onSelect: (id: string) => boolean | void; onSave: (input: NoteSaveInput) => Promise<Note | undefined> | Note | undefined; onCreate: () => boolean | void; onDelete: () => void; onClear: () => Promise<unknown> | unknown; onRetryProjection: () => Promise<unknown> | unknown; onLoadMore?: () => void; onReload?: () => Promise<Note | undefined> | Note | undefined; onBack?: () => boolean | void; clearing?: boolean; onOpenQa?: () => boolean | void;
+  onSelect: (id: string) => boolean | void; onSave: (input: NoteSaveInput) => Promise<Note | undefined> | Note | undefined; onCommitted?: (id: string) => void; onCreate: () => boolean | void; onDelete: () => void; onClear: () => Promise<unknown> | unknown; onRetryProjection: () => Promise<unknown> | unknown; onLoadMore?: () => void; onReload?: () => Promise<Note | undefined> | Note | undefined; onBack?: () => boolean | void; clearing?: boolean; onOpenQa?: () => boolean | void;
   queryValue?: string; tagsValue?: string; sourceValue?: string; onFilterChange?: (key: "query" | "tags" | "source_kind", value: string) => void; onDirtyChange?: (dirty: boolean) => void;
 };
 
@@ -25,7 +25,7 @@ function NotesOverlay({ label, onClose, returnFocusTo, children }: { label: stri
   return <div className="notes-overlay"><button className="notes-overlay__scrim" aria-label={`关闭${label}遮罩`} onClick={onClose} /><section ref={panel} className="notes-dialog" role="dialog" aria-modal="true" aria-label={label}>{children}</section></div>;
 }
 
-export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoading = false, selectedError, hasMore = false, loadingMore = false, saving = false, actionError, onSelect, onSave, onCreate, onDelete, onClear, onRetryProjection, onLoadMore = () => undefined, onReload, onBack, clearing = false, onOpenQa = () => undefined, queryValue = "", tagsValue = "", sourceValue = "", onFilterChange, onDirtyChange }: Props) {
+export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoading = false, selectedError, hasMore = false, loadingMore = false, saving = false, actionError, onSelect, onSave, onCommitted, onCreate, onDelete, onClear, onRetryProjection, onLoadMore = () => undefined, onReload, onBack, clearing = false, onOpenQa = () => undefined, queryValue = "", tagsValue = "", sourceValue = "", onFilterChange, onDirtyChange }: Props) {
   const [draft, setDraft] = useState<EditorDraft>(selectedNote ? { body_markdown: selectedNote.body_markdown, concept: selectedNote.concept ?? "", tags: selectedNote.tags } : emptyDraft);
   const [baseVersion, setBaseVersion] = useState<number | undefined>(selectedNote?.version);
   const [sourceOpen, setSourceOpen] = useState(false);
@@ -53,7 +53,7 @@ export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoadin
 
   async function save() {
     setSaveError(undefined);
-    try { overlayReturn.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; const saved = await onSave({ body_markdown: draft.body_markdown, concept: draft.concept.trim() || null, tags: draft.tags, ...(selectedNote ? { expected_version: baseVersion } : { client_request_id: crypto.randomUUID() }) }); if (saved) { const next = { body_markdown: saved.body_markdown, concept: saved.concept ?? "", tags: saved.tags }; setDraft(next); baseline.current = next; setBaseVersion(saved.version); setHydratedId(saved.id); } }
+    try { overlayReturn.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; const wasNew = !selectedNote; const saved = await onSave({ body_markdown: draft.body_markdown, concept: draft.concept.trim() || null, tags: draft.tags, ...(selectedNote ? { expected_version: baseVersion } : { client_request_id: crypto.randomUUID() }) }); if (saved) { const next = { body_markdown: saved.body_markdown, concept: saved.concept ?? "", tags: saved.tags }; setDraft(next); baseline.current = next; setBaseVersion(saved.version); setHydratedId(saved.id); if (wasNew) onCommitted?.(saved.id); } }
     catch (error) { if (error instanceof ApiError && error.code === "NOTE_VERSION_CONFLICT") setConflictOpen(true); else setSaveError(message(error, "保存失败，请重试")); }
   }
   function select(id: string) { if (onSelect(id) !== false) setListView(false); }

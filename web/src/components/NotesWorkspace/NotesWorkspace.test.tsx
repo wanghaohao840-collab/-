@@ -24,8 +24,9 @@ describe("NotesWorkspace", () => {
     const user = userEvent.setup();
     const saved = { ...note, body_markdown: "# 已保存内容", version: 2 };
     const save = vi.fn().mockResolvedValue(saved);
+    const onCommitted = vi.fn();
     const dirtyStates: boolean[] = [];
-    render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={save} onDirtyChange={(dirty) => dirtyStates.push(dirty)} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
+    render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={save} onCommitted={onCommitted} onDirtyChange={(dirty) => dirtyStates.push(dirty)} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
     const body = screen.getByLabelText("笔记正文");
     await user.clear(body);
     await user.type(body, "# 已保存内容");
@@ -33,6 +34,7 @@ describe("NotesWorkspace", () => {
     expect(await screen.findByText("已保存")).toBeVisible();
     expect(screen.getByRole("button", { name: "保存笔记" })).toBeDisabled();
     expect(dirtyStates.at(-1)).toBe(false);
+    expect(onCommitted).not.toHaveBeenCalled();
   });
 
   it("uses a non-empty concept before the first non-empty Markdown line", () => {

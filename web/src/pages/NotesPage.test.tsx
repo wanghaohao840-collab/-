@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { render, screen } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
+import * as noteQueries from "../features/notes/queries";
 import { NotesPage, historyRestoreDelta, notesListFilters, validatedPrefillSource } from "./NotesPage";
 
 vi.mock("../auth/AuthProvider", () => ({ useAuth: () => ({ request: vi.fn().mockResolvedValue({ enabled: true, items: [], next_cursor: null }) }) }));
@@ -89,6 +90,33 @@ describe("NotesPage", () => {
     expect(window.location.search).not.toContain("note=");
     confirm.mockRestore();
     window.confirm = originalConfirm;
+    window.history.replaceState({}, "", originalUrl);
+  });
+
+  it("consumes a successful fresh create before committing URL selection", async () => {
+    const user = userEvent.setup();
+    const originalUrl = window.location.href;
+    window.history.replaceState({ idx: 30 }, "", "/notes?note=new");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const created = { id: "created-1", body_markdown: "draft", concept: null, tags: [], sources: [], version: 1, projection_state: "ready" as const, created_at: "2026-01-01", updated_at: "2026-01-01", deleted_at: null };
+    const create = vi.fn().mockResolvedValue(created);
+    const mutationStub = { create: { isPending: false, error: null, mutateAsync: create }, update: { isPending: false, error: null, mutateAsync: vi.fn() }, remove: { isPending: false, error: null, mutateAsync: vi.fn() }, clear: { isPending: false, error: null, mutateAsync: vi.fn() }, retryProjection: { isPending: false, error: null, mutateAsync: vi.fn() } };
+    const mutations = vi.spyOn(noteQueries, "useNoteMutations").mockReturnValue(mutationStub as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><BrowserRouter><NotesPage /></BrowserRouter></QueryClientProvider>);
+    const body = await screen.findByLabelText("笔记正文");
+    await user.type(body, "draft");
+    await user.click(screen.getByRole("button", { name: "保存笔记" }));
+    expect(create).toHaveBeenCalledOnce();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(await screen.findByText("已保存")).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存笔记" })).toBeDisabled();
+    expect(window.location.pathname).toBe("/notes");
+    expect(window.location.search).toContain("note=created-1");
+    await user.click(screen.getByRole("button", { name: "保存笔记" }));
+    expect(create).toHaveBeenCalledOnce();
+    mutations.mockRestore();
+    confirm.mockRestore();
     window.history.replaceState({}, "", originalUrl);
   });
 });
