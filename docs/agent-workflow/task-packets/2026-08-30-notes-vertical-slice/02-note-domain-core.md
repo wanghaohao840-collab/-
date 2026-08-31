@@ -240,6 +240,7 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - `431f714` — ownership-scoped deletion and projection convergence.
   - `fde935d` — preserve retryability when projection lease loss rejects
     failure handling.
+  - `c79d3ad` — direct projection regression for cross-user legacy cleanup.
 - Corrective files delivered in this amended boundary:
   - `app/note_projection.py`
   - `hello_agents/memory/manager.py`
