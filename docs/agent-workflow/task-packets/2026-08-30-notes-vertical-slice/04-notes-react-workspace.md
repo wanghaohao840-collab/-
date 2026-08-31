@@ -194,8 +194,8 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - [x] Desktop/tablet/mobile layouts use media queries at 1200px and 768px; mobile filter/clear actions use 44px minimum targets; every local overlay traps focus, closes on Escape and restores focus.
   - [x] Exact dependencies are pinned to `react-markdown@10.1.0`, `remark-gfm@4.0.1`, `rehype-sanitize@6.0.0`.
 - Verification:
-  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 26 tests).
-  - `npm test -- --run` — PASS (18 files, 141 tests).
+  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 32 tests).
+  - `npm test -- --run` — PASS (18 files, 147 tests).
   - `npm run typecheck` — PASS.
   - `npm run lint` — PASS.
   - `npm run build` — PASS (Vite production build; existing chunk-size warning only).
@@ -208,6 +208,10 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - Internal selection, browser Back, beforeunload and AppShell/SPA navigation are guarded; remote 404/deletion preserves a copyable local draft.
   - Mobile filter/clear surfaces, cursor load-more, empty CTA, derived first-heading titles, counts/badges/pills, projection retry/tombstones and source locator copy are covered.
   - Markdown rejects credentialized and protocol-relative absolute URLs, and external links use `noopener noreferrer`.
+  - Successful create/update consumes the returned Note to clear the dirty state; source creation requires fully validated QA identifiers and normal source filters remain manual-note creation.
+  - Browser Back cancellation restores the existing history entry with a calculated `history.go` delta; projection retry failures are caught and surfaced without unhandled rejections.
+  - Empty state exposes both explicit “新建笔记” and “从 QA 记录” actions; list count is labeled as loaded rows rather than an unsupported total.
+  - Clear removes all cached Note detail records before list invalidation; source locator copy reports both success and failure without blocking the drawer.
 - Local browser smoke — local `/notes` navigation reached the authenticated login gate; no unauthenticated Notes screenshot is claimed. Responsive DOM/a11y tests cover the three approved layout states.
 - Deviations:
   - `web/src/layout/navigation.ts` required no change because its Notes item already matched the approved label/order.
@@ -216,3 +220,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
 - Commit:
   - `4643ee0` — corrective implementation and tests.
   - `6971d5f` — final exact handoff metadata.
+  - Second-review corrective commit pending.

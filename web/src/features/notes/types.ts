@@ -2,6 +2,12 @@ export type NoteProjectionState = "pending" | "ready" | "failed";
 export type NoteSourceKind = "qa_message" | "qa_citation";
 export type NoteSourceSelectorKind = "qa_answer" | "qa_citation";
 
+export type NotePrefillSource = {
+  kind: NoteSourceSelectorKind;
+  qa_message_id: string;
+  citation_id?: string;
+};
+
 export type NoteSource = {
   id: string | null;
   kind: NoteSourceKind;
@@ -55,11 +61,7 @@ export type NoteCreateInput = {
   concept?: string | null;
   tags?: string[];
   client_request_id: string;
-  source?: {
-    kind: NoteSourceSelectorKind;
-    qa_message_id: string;
-    citation_id?: string;
-  } | null;
+  source?: NotePrefillSource | null;
 };
 
 export type NoteUpdateInput = {

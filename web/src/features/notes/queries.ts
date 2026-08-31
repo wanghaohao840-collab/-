@@ -52,7 +52,7 @@ export function useNoteMutations() {
   const create = useMutation({ mutationFn: (apiInput: NoteCreateInput) => api.createNote(request, apiInput), onSuccess: (note) => { client.setQueryData(notesKeys.detail(note.id), note); invalidateLists(); } });
   const update = useMutation({ mutationFn: ({ id, input }: { id: string; input: Parameters<typeof api.updateNote>[2] }) => api.updateNote(request, id, input), onSuccess: (note) => { client.setQueryData(notesKeys.detail(note.id), note); invalidateLists(); } });
   const remove = useMutation({ mutationFn: ({ id, input }: { id: string; input: Parameters<typeof api.deleteNote>[2] }) => api.deleteNote(request, id, input), onSuccess: (_value, variables) => { client.removeQueries({ queryKey: notesKeys.detail(variables.id), exact: true }); invalidateLists(); } });
-  const clear = useMutation({ mutationFn: () => api.clearNotes(request), onSuccess: invalidateLists });
+  const clear = useMutation({ mutationFn: () => api.clearNotes(request), onSuccess: () => { client.removeQueries({ queryKey: ["notes", "detail"] }); invalidateLists(); } });
   const retryProjection = useMutation({ mutationFn: () => api.retryNoteProjections(request), onSuccess: invalidateLists });
   return { create, update, remove, clear, retryProjection };
 }

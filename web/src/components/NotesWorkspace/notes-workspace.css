@@ -34,8 +34,10 @@
 .notes-source li small { color: var(--color-text-secondary); }
 .notes-source__deleted { color: var(--color-text-secondary); }
 .notes-source__copy { display: block; min-height: 44px; margin-top: var(--space-2); padding: 0 var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-md); color: var(--color-brand-700); background: var(--color-surface); cursor: pointer; }
+.notes-source__feedback { display: block; margin-top: var(--space-1); color: var(--color-text-secondary); }
 .notes-list__empty h3 { margin: var(--space-6) 0 var(--space-2); }
 .notes-list__empty p { margin: 0; color: var(--color-text-secondary); }
+.notes-list__empty-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
 .notes-loading { padding: var(--space-3) var(--space-4); color: var(--color-text-secondary); }
 .notes-error button { min-height: 44px; margin-left: var(--space-2); border: 0; color: var(--color-brand-700); background: transparent; text-decoration: underline; cursor: pointer; }
 .notes-error span { margin-left: var(--space-2); }
