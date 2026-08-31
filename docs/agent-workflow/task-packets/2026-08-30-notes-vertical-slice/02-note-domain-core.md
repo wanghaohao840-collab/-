@@ -237,7 +237,7 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - `f20f204` — Note domain core.
   - `bfdbccd` — projection/replay semantics and initial conflict resolution.
   - `213a447` — exact semantic deletion seam.
-  - Corrective ownership/convergence commit — recorded after commit below.
+  - `431f714` — ownership-scoped deletion and projection convergence.
 - Corrective files delivered in this amended boundary:
   - `app/note_projection.py`
   - `hello_agents/memory/manager.py`
