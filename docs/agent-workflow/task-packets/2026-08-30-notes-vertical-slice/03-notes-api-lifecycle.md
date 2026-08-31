@@ -193,4 +193,4 @@ Stop with a reality-conflict report if packet 02 is not done, its interfaces dif
   - None identified within the amended single-process/SQLite scope; the literal packet command still references a nonexistent document test path.
 - Commit:
   - `4e4abb5` (first corrective; `af8b2b0` preserved)
-  - corrective follow-up commit to be recorded below
+  - `5086aca` (post-read fence TOCTOU, lease/replay, API/lifecycle and tombstone corrective tests)
