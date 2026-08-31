@@ -221,3 +221,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - `4643ee0` — corrective implementation and tests.
   - `6971d5f` — final exact handoff metadata.
   - `dd9e27c` — second-review corrective implementation and tests.
+  - `f94460f` — history restoration safety refinement.
