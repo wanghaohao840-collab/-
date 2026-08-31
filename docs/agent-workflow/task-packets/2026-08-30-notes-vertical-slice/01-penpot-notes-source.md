@@ -208,4 +208,5 @@ Stop and report `blocked` if Penpot cannot be fresh-read/direct-exported, the fi
   - None for this design-source packet. Later runtime packets must use authenticated records and must not copy illustrative values from these boards into seed/fallback data.
 - Commit:
   - Initial delivery: `17abfd8` (`design: add learning notes source boards`).
-  - Corrective delivery: this new corrective commit; its exact hash is returned in the final handoff response after commit creation.
+  - Visual and contract correction: `e4d6ea7` (`fix: separate notes conflict preservation copy`).
+  - Evidence follow-up: the current commit is reported in `.superpowers/sdd/notes-task-01-report.md` and the final handoff response; the packet does not embed its own hash because that would make the commit self-referential.

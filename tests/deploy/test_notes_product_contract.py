@@ -1,4 +1,5 @@
 import re
+from itertools import combinations
 from pathlib import Path
 from struct import unpack
 
@@ -106,8 +107,36 @@ def test_notes_handoff_binds_shared_ids_and_conflict_intersection_audit():
         if name in CONFLICT_SIBLINGS:
             sibling_rows[name] = (penpot_id, (int(x), int(y), int(width), int(height)))
     assert sibling_rows == CONFLICT_SIBLINGS
+
+    rectangles = [record[1] for record in sibling_rows.values()]
+
+    def intersects(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+        first_x, first_y, first_width, first_height = first
+        second_x, second_y, second_width, second_height = second
+        return (
+            first_x < second_x + second_width
+            and first_x + first_width > second_x
+            and first_y < second_y + second_height
+            and first_y + first_height > second_y
+        )
+
+    pairs = list(combinations(rectangles, 2))
+    intersection_count = sum(intersects(first, second) for first, second in pairs)
+    assert len(pairs) == 3
+    assert intersection_count == 0
+
+    action_names = ("复制本地草稿 action", "重新加载服务器版本 action")
+    action_row_bottom = max(
+        sibling_rows[name][1][1] + sibling_rows[name][1][3] for name in action_names
+    )
+    preservation_top = sibling_rows["本地草稿保留说明"][1][1]
+    computed_gap = preservation_top - action_row_bottom
+    assert computed_gap == 16
+
     audit = re.search(
         r"all `(\d+)` unique sibling pairs.*?`(\d+)` intersections.*?minimum vertical gap is `(\d+) px`",
         section,
     )
-    assert audit and tuple(map(int, audit.groups())) == (3, 0, 16)
+    assert audit and tuple(map(int, audit.groups())) == (
+        len(pairs), intersection_count, computed_gap,
+    )
