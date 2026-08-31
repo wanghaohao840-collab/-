@@ -61,12 +61,15 @@ owner: "codex-notes-packet-02"
 - Create: `app/note_projection.py`
 - Create: `app/note_service.py`
 - Modify: `hello_agents/memory/types/semantic.py`
+- Modify: `hello_agents/memory/manager.py`
+- Modify: `hello_agents/memory/storage/vector_store.py`
 - Create: `tests/test_note_models.py`
 - Create: `tests/test_note_repository.py`
 - Create: `tests/test_note_migration.py`
 - Create: `tests/test_note_projection.py`
 - Create: `tests/test_note_service.py`
 - Modify: `tests/memory/test_semantic_vector_store_protocol.py`
+- Modify: `tests/memory/storage/test_qdrant_vector_store.py`
 
 ### Allowed behavior changes
 
@@ -144,6 +147,7 @@ Use the standard reality-conflict report and stop if an existing schema/source s
 - Observed after commit `bfdbccd`: `MemoryManager.remove_memory()` correctly delegates to a module-level exact `remove()`, but the real `SemanticMemory` module does not implement that method. Delete and legacy-cleanup tasks therefore fail truthfully yet cannot converge.
 - Impact: leaving the worker in durable retry is safer than false completion, but it does not satisfy the approved exact-delete and cleanup invariants.
 - Resolution: extend this packet boundary narrowly to `hello_agents/memory/types/semantic.py` and `tests/memory/test_semantic_vector_store_protocol.py`. Implement exact-ID removal from both the semantic cache and vector store, preserve other users/points, and return a truthful boolean. Do not add broad metadata deletion or change other Memory APIs.
+- Follow-up review resolution: ownership and retry convergence require the manager to pass its authenticated `user_id`, the Qdrant adapter to intersect logical IDs with payload filters and report confirmed matches, and projection deletion to treat an already-absent user-scoped target as converged. The amended boundary therefore also includes `hello_agents/memory/manager.py`, `hello_agents/memory/storage/vector_store.py`, and `tests/memory/storage/test_qdrant_vector_store.py`. The public removal API may add a backward-compatible `missing_ok` option; default missing behavior must remain unchanged.
 - Acceptance evidence: a real `SemanticMemory` + `MemoryManager.remove_memory()` integration test must prove stable note deletion and exact legacy cleanup can converge; Packet 02 projection tests must no longer document permanent unsupported deletion as expected behavior.
 
 ## Implementation handoff
@@ -190,7 +194,7 @@ Use the standard reality-conflict report and stop if an existing schema/source s
 
 ## Corrective handoff after exact semantic-deletion reality conflict
 
-- Status: done (corrective fixes applied; no scope expansion).
+- Status: done (corrective fixes applied; amended boundary completed).
 - Findings addressed:
   - `SemanticMemory.remove(memory_id)` now preflights the logical vector ID,
     deletes only that exact point with the VectorStore `_id` filter, and evicts
@@ -207,6 +211,41 @@ Use the standard reality-conflict report and stop if an existing schema/source s
     retry/failure handling and never release an unacquired runtime.
   - Migration excludes stable `note:{user_id}:{note_id}` projection IDs from
     the legacy-memory scan.
+- Follow-up review findings addressed:
+  - `MemoryManager.remove_memory()` passes its authenticated `user_id` into
+    `SemanticMemory.remove()`, which rejects cross-user cache/vector targets.
+    `missing_ok` is opt-in, so the legacy missing result remains `False` by
+    default while the projection worker can converge on an already-absent
+    user-scoped target.
+  - Qdrant deletion translates logical IDs into the stored logical-ID payload
+    predicate and intersects that predicate with all payload/user filters;
+    returned counts are confirmed matches, never the requested-ID count.
+  - Projection checks every ownership-sensitive `complete()` result and leaves
+    lost-lease work retryable. Legacy cleanup uses desired-absent deletion so a
+    successful delete followed by ledger/lease loss replays safely; a
+    cross-user point cannot mark the ledger clean.
+  - Tests cover manager/semantic cross-user preservation, concurrent desired-
+    absent disappearance, Qdrant exact/filter deletion with a concrete mock
+    client, missing deletion, and projection replay after completion lease loss.
+- Amended scope expansion (approved by the follow-up reality review):
+  - Production: `hello_agents/memory/manager.py` and
+    `hello_agents/memory/storage/vector_store.py` in addition to the original
+    semantic deletion seam.
+  - Tests: `tests/memory/storage/test_qdrant_vector_store.py` in addition to
+    the original semantic and Packet 02 projection tests.
+- Cumulative implementation commits:
+  - `f20f204` — Note domain core.
+  - `bfdbccd` — projection/replay semantics and initial conflict resolution.
+  - `213a447` — exact semantic deletion seam.
+  - Corrective ownership/convergence commit — recorded after commit below.
+- Corrective files delivered in this amended boundary:
+  - `app/note_projection.py`
+  - `hello_agents/memory/manager.py`
+  - `hello_agents/memory/storage/vector_store.py`
+  - `hello_agents/memory/types/semantic.py`
+  - `tests/test_note_projection.py`
+  - `tests/memory/test_semantic_vector_store_protocol.py`
+  - `tests/memory/storage/test_qdrant_vector_store.py`
 - Verification:
   - Packet suite: `37 passed in 43.41s`.
   - Semantic/vector and related memory tests: `19 passed in 0.99s`.

@@ -24,6 +24,12 @@ class FailingDeleteVectorStore(RecordingVectorStore):
         raise RuntimeError("vector delete failed")
 
 
+class DisappearingDeleteVectorStore(RecordingVectorStore):
+    def delete_by_filter(self, collection_name, filters):
+        super().delete_by_filter(collection_name, filters)
+        return 0
+
+
 def _semantic_config(tmp_path, collection="semantic"):
     return MemoryConfig(
         database_path=str(tmp_path / "memory.db"),
@@ -120,6 +126,40 @@ def test_memory_manager_remove_memory_uses_real_semantic_memory(monkeypatch, tmp
     manager.close()
 
 
+def test_memory_manager_remove_memory_is_user_scoped(monkeypatch, tmp_path):
+    store = RecordingVectorStore()
+    monkeypatch.setattr(
+        "hello_agents.memory.storage.qdrant_store.QdrantConnectionManager.get_instance",
+        lambda **_: store,
+    )
+    manager = MemoryManager(
+        config=_semantic_config(tmp_path, "scoped-semantic"),
+        user_id="alice",
+        enable_working=False,
+        enable_episodic=False,
+        enable_semantic=True,
+    )
+    bob_id = "note:bob:legacy"
+    manager.add_memory(
+        "bob note",
+        memory_type="semantic",
+        metadata={"user_id": "bob", "knowledge_type": "learning_note"},
+        memory_id=bob_id,
+    )
+
+    assert manager.remove_memory(
+        bob_id, memory_type="semantic", missing_ok=True
+    ) is False
+    assert store.count("scoped-semantic", {"_id": [bob_id]}) == 1
+    assert bob_id in manager.memory_types["semantic"].memories
+
+    assert manager.remove_memory(
+        "missing", memory_type="semantic", missing_ok=True
+    ) is True
+    assert manager.remove_memory("missing", memory_type="semantic") is False
+    manager.close()
+
+
 def test_semantic_memory_remove_preserves_cache_when_vector_delete_fails(tmp_path):
     store = FailingDeleteVectorStore()
     memory = SemanticMemory(_semantic_config(tmp_path), storage_backend=store)
@@ -134,3 +174,19 @@ def test_semantic_memory_remove_preserves_cache_when_vector_delete_fails(tmp_pat
     assert memory.remove(item.id) is False
     assert item.id in memory.memories
     assert store.count("semantic", {"_id": [item.id]}) == 1
+
+
+def test_semantic_memory_missing_ok_converges_after_concurrent_disappearance(tmp_path):
+    store = DisappearingDeleteVectorStore()
+    memory = SemanticMemory(_semantic_config(tmp_path), storage_backend=store)
+    item = MemoryItem(
+        content="concurrent disappearance is retry-safe",
+        memory_type="semantic",
+        id="note:alice:disappearing",
+        metadata={"user_id": "alice"},
+    )
+    memory.add(item)
+
+    assert memory.remove(item.id, user_id="alice", missing_ok=True) is True
+    assert item.id not in memory.memories
+    assert store.count("semantic", {"_id": [item.id]}) == 0

@@ -36,8 +36,8 @@ class FakeManager:
         self.calls.append(("upsert", kwargs["memory_id"], kwargs))
         return kwargs["memory_id"]
 
-    def remove_memory(self, memory_id, *, memory_type):
-        self.calls.append(("remove", memory_id, memory_type))
+    def remove_memory(self, memory_id, *, memory_type, missing_ok=False):
+        self.calls.append(("remove", memory_id, memory_type, missing_ok))
         return True
 
 
@@ -109,8 +109,8 @@ def test_false_legacy_remove_retries_without_marking_ledger_cleaned(tmp_path: Pa
         )
 
     class FalseManager(FakeManager):
-        def remove_memory(self, memory_id, *, memory_type):
-            self.calls.append(("remove", memory_id, memory_type))
+        def remove_memory(self, memory_id, *, memory_type, missing_ok=False):
+            self.calls.append(("remove", memory_id, memory_type, missing_ok))
             return False
 
     manager = FalseManager()
@@ -187,7 +187,7 @@ def test_stale_upsert_after_delete_is_noop_and_cannot_revive(tmp_path: Path) -> 
     assert worker.run_once() is True
     assert manager.calls == []
     assert worker.run_once() is True
-    assert manager.calls == [("remove", f"note:alice:{note.id}", "semantic")]
+    assert manager.calls == [("remove", f"note:alice:{note.id}", "semantic", True)]
 
 
 def test_failure_does_not_change_note_fact_and_retry_is_bounded(tmp_path: Path) -> None:
@@ -228,3 +228,40 @@ def test_worker_does_not_project_after_heartbeat_ownership_loss(tmp_path: Path) 
 
     assert worker.run_once() is True
     assert manager.calls == []
+
+
+def test_successful_delete_replays_after_completion_lease_loss(tmp_path: Path) -> None:
+    db, notes, tasks = setup_domain(tmp_path)
+    note = notes.create("alice", "body", None, (), "r")
+    manager = FakeManager()
+    runtime = SimpleNamespace(
+        user_id="alice", lock=RLock(),
+        memory_tool=SimpleNamespace(memory_manager=manager),
+    )
+    worker = NoteProjectionWorker(
+        tasks, notes, RuntimeRegistry(runtime), DefaultNoteMemoryProjection(),
+        worker_id="lease-loss", lease_seconds=1,
+    )
+    assert worker.run_once() is True
+    notes.soft_delete("alice", note.id, expected_version=1)
+
+    original_complete = tasks.complete
+    lost = True
+
+    def lose_first_completion(task_id, owner, **kwargs):
+        nonlocal lost
+        if lost:
+            lost = False
+            return False
+        return original_complete(task_id, owner, **kwargs)
+
+    tasks.complete = lose_first_completion  # type: ignore[method-assign]
+    assert worker.run_once() is True
+    with connect(db) as conn:
+        conn.execute(
+            "update note_projection_tasks set lease_expires_at='2026-01-01T00:00:00Z'"
+        )
+    assert tasks.recover_expired(now="2026-01-01T00:00:01Z") == 1
+    assert worker.run_once() is True
+    assert tasks.list_for_note("alice", note.id)[-1].status == "completed"
+    assert [call[0] for call in manager.calls].count("remove") == 2

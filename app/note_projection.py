@@ -339,7 +339,9 @@ class DefaultNoteMemoryProjection:
 
     def remove(self, runtime: UserRuntime, note_id: str) -> bool:
         return bool(runtime.memory_tool.memory_manager.remove_memory(
-            f"note:{runtime.user_id}:{note_id}", memory_type="semantic"
+            f"note:{runtime.user_id}:{note_id}",
+            memory_type="semantic",
+            missing_ok=True,
         ))
 
 
@@ -415,7 +417,8 @@ class NoteProjectionWorker:
                         or note.deleted_at is not None
                         or note.version != task.note_version
                     ):
-                        self.tasks.complete(task.id, self.worker_id)
+                        if not self.tasks.complete(task.id, self.worker_id):
+                            return True
                         return True
                     self.projection.upsert(runtime, note)
                     legacy_id = self.tasks.legacy_memory_to_clean(
@@ -448,11 +451,13 @@ class NoteProjectionWorker:
                         and note.deleted_at is None
                         and note.version > task.note_version
                     ):
-                        self.tasks.complete(task.id, self.worker_id)
+                        if not self.tasks.complete(task.id, self.worker_id):
+                            return True
                         return True
                     if not self.projection.remove(runtime, task.note_id):
                         raise RuntimeError("exact note memory removal is unavailable")
-                self.tasks.complete(task.id, self.worker_id)
+                if not self.tasks.complete(task.id, self.worker_id):
+                    return True
         except Exception:
             self.tasks.fail_or_retry(
                 task.id, self.worker_id, "PROJECTION_FAILED"

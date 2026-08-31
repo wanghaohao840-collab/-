@@ -119,23 +119,31 @@ class SemanticMemory(BaseMemory):
 
         return memory_item.id
 
-    def remove(self, memory_id: str) -> bool:
+    def remove(
+        self,
+        memory_id: str,
+        *,
+        user_id: Optional[str] = None,
+        missing_ok: bool = False,
+    ) -> bool:
         """Remove one exact semantic memory from cache and vector storage."""
 
         if not memory_id:
             return False
 
         memory_id = str(memory_id)
-        cached = memory_id in self.memories
+        cached_item = self.memories.get(memory_id)
+        cached = cached_item is not None
 
         # VectorStore exposes logical IDs through scroll for both the in-memory
         # and Qdrant adapters.  Qdrant's physical point ID is intentionally not
         # used here because it is a UUID derived from the logical memory ID.
         try:
-            vector_exists = any(
-                str(point.id) == memory_id
+            matching_points = [
+                point
                 for point in self.vector_store.scroll(self.vector_collection)
-            )
+                if str(point.id) == memory_id
+            ]
         except Exception as error:
             logger.warning(
                 "Unable to inspect semantic memory %s before removal: %s",
@@ -144,14 +152,27 @@ class SemanticMemory(BaseMemory):
             )
             return False
 
-        if not cached and not vector_exists:
-            return False
+        if user_id is not None:
+            cached_user = (
+                cached_item.metadata.get("user_id") if cached_item is not None else None
+            )
+            if cached and cached_user != user_id:
+                return False
+            for point in matching_points:
+                if (point.payload or {}).get("user_id") != user_id:
+                    return False
 
-        if vector_exists:
+        if not cached and not matching_points:
+            return missing_ok
+
+        if matching_points:
             try:
                 removed = self.vector_store.delete_by_filter(
                     self.vector_collection,
-                    {"_id": [memory_id]},
+                    {
+                        "_id": [memory_id],
+                        **({"user_id": user_id} if user_id is not None else {}),
+                    },
                 )
             except Exception as error:
                 logger.warning(
@@ -161,8 +182,26 @@ class SemanticMemory(BaseMemory):
                 )
                 return False
 
-            if removed != 1:
-                return False
+            if removed != len(matching_points):
+                if not missing_ok:
+                    return False
+                # A concurrent worker may have removed the owned target after
+                # the preflight.  Re-check ownership before converging.
+                try:
+                    remaining = [
+                        point
+                        for point in self.vector_store.scroll(self.vector_collection)
+                        if str(point.id) == memory_id
+                    ]
+                except Exception:
+                    return False
+                if user_id is not None and any(
+                    (point.payload or {}).get("user_id") != user_id
+                    for point in remaining
+                ):
+                    return False
+                if remaining:
+                    return False
 
         self.memories.pop(memory_id, None)
         return True

@@ -522,13 +522,23 @@ class QdrantVectorStore:
         collection_name: str,
         filters: Optional[VectorFilter] = None,
     ) -> int:
-        removed = self.count(collection_name, filters)
-        if filters and "_id" in filters:
-            point_ids = list(filters["_id"])
-            removed = len(point_ids)
-            selector = self._point_ids_selector(point_ids)
-        else:
-            selector = self._filter_selector(self._filter(filters))
+        # Logical IDs are stored in payload because Qdrant point IDs are
+        # normalized UUIDs.  Keep the logical-ID predicate in the same filter
+        # as user/type predicates; a PointIdsList would otherwise bypass them.
+        effective_filters = dict(filters or {})
+        if "_id" in effective_filters:
+            raw_ids = effective_filters["_id"]
+            if isinstance(raw_ids, (list, tuple, set, frozenset)):
+                logical_ids = [str(value) for value in raw_ids]
+            else:
+                logical_ids = [str(raw_ids)]
+            effective_filters.pop("_id")
+            effective_filters[self.LOGICAL_ID_PAYLOAD_KEY] = logical_ids
+
+        confirmed = self.count(collection_name, effective_filters)
+        selector = self._filter_selector(self._filter(effective_filters))
+        if confirmed == 0:
+            return 0
         self._call(
             "delete",
             self.client.delete,
@@ -536,7 +546,7 @@ class QdrantVectorStore:
             points_selector=selector,
             wait=True,
         )
-        return removed
+        return confirmed
 
     def scroll(
         self,
@@ -619,7 +629,7 @@ class QdrantVectorStore:
         conditions = []
         for key, value in filters.items():
             if key == "_id":
-                continue
+                key = self.LOGICAL_ID_PAYLOAD_KEY
             if isinstance(value, VectorRange):
                 bounds = value.bounds()
                 if self.models:
