@@ -459,9 +459,12 @@ class NoteProjectionWorker:
                 if not self.tasks.complete(task.id, self.worker_id):
                     return True
         except Exception:
-            self.tasks.fail_or_retry(
+            if not self.tasks.fail_or_retry(
                 task.id, self.worker_id, "PROJECTION_FAILED"
-            )
+            ):
+                # The lease may have been reclaimed while projection failed;
+                # the replacement owner owns the retry decision.
+                return True
         finally:
             if acquired:
                 try:
