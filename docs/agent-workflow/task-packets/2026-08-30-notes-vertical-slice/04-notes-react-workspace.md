@@ -227,4 +227,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - `f94460f` — history restoration safety refinement.
   - `83aee11` — new-note baseline and history regression coverage.
   - `616b988` — third-review shared discard-navigation guard and regression coverage.
-  - Final-review create-save ordering commit pending.
+  - `57f516b` — final-review create-save ordering and fresh-create regression.
