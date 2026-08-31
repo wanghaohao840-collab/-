@@ -187,21 +187,25 @@ Stop and report `blocked` if Penpot cannot be fresh-read/direct-exported, the fi
   - `tests/design/test_penpot_component_map.mjs`
 - Acceptance criteria:
   - [x] Fifteen exact-dimension PNGs decode and match their named viewports.
-  - [x] Handoff contains revision `151`, exact page/board/shared-component IDs, sample-data boundary and zero-overflow/link evidence.
+  - [x] Handoff contains final revision `152`, exact page/board/shared-component IDs, sample-data boundary and zero-overflow/link evidence.
   - [x] Component map validates against schema; the Notes design test pins the freshly read Button, TextField, AppShell, Drawer and Dialog IDs already recorded in the map.
   - [x] Mobile audits report 6/5/11/7/7/5 named actions with zero interactive targets below 44×44.
+  - [x] The conflict-state preservation message is separated from both 44 px actions by 16 px; all three foreground sibling pairs have zero intersections.
   - [x] No product-code or other packet file changed; the pre-existing `.superpowers/sdd/progress.md` worktree change was preserved and excluded.
 - Verification:
   - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_notes_product_contract.py --basetemp=.runtime/pytest-notes-penpot-red` — EXPECTED FAIL (`2 failed`; missing exports and handoff records).
-  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_notes_product_contract.py --basetemp=.runtime/pytest-notes-penpot` — PASS (`2 passed`).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_notes_product_contract.py --basetemp=.runtime/pytest-notes-penpot` — PASS (`2 passed`) for the original delivery.
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_notes_product_contract.py --basetemp=.runtime/pytest-notes-penpot-corrective-red` — EXPECTED FAIL (`2 failed, 1 passed`; revision/shared-ID/audit evidence not yet recorded).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/deploy/test_notes_product_contract.py --basetemp=.runtime/pytest-notes-penpot-corrective-green` — PASS (`3 passed`).
   - `node --test tests/design/test_penpot_handoff.mjs tests/design/test_penpot_component_map.mjs` — PASS (`10 passed`).
   - `git diff --check` — PASS (silent except existing line-ending notices).
-  - Penpot final fresh read — PASS at revision `151`: 15 exact boards, no duplicates, zero broken component links, zero visible text/actual bounds overflow, zero overlay-order violations and zero undersized mobile actions.
-  - Direct export/original-size inspection — PASS for all 15 exact board IDs and PNG paths.
+  - Penpot final fresh read — PASS at revision `152`: file/page IDs unchanged; conflict board `1099f839-63e4-80b7-8008-9095ca611a4f` remains `390×844`; action bounds are `(64,11460,140,44)` and `(212,11460,140,44)`; preservation bounds are `(40,11520,310,30)` with actual text bounds contained.
+  - Direct export/original-size inspection — PASS: only `mobile-notes-conflict.png` was re-exported from revision `152`; it decodes at `390×844` and visibly preserves both actions and the 16 px separation. The other fourteen direct exports were unchanged.
 - Deviations:
   - The original callable-tool reality conflict was resolved through the official local `@penpot/mcp@stable` 2.15.4 HTTP endpoint while the connected plugin remained open; acceptance criteria were not weakened.
   - No Notes-specific component-map entry was added because Packet 01 may not create product code and all Notes boards use existing shared components. The existing map IDs were fresh-read and pinned by the new design test.
 - Residual risks:
   - None for this design-source packet. Later runtime packets must use authenticated records and must not copy illustrative values from these boards into seed/fallback data.
 - Commit:
-  - This Packet 01 delivery commit; its exact hash is recorded in `.superpowers/sdd/notes-task-01-report.md` and the final handoff response after commit creation.
+  - Initial delivery: `17abfd8` (`design: add learning notes source boards`).
+  - Corrective delivery: this new corrective commit; its exact hash is returned in the final handoff response after commit creation.

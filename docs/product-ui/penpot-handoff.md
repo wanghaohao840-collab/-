@@ -222,7 +222,7 @@ The local MCP bridge used plugin 2.17.0 against Penpot 2.17.2 and displayed a pa
 
 ## Learning Notes vertical slice
 
-Validated on 2026-08-31 against Penpot 2.17.2 at final saved source revision `151`. These fifteen top-level boards are the implementation authority for the Notes slice. Page IDs identify the owning page; board IDs identify the exact direct-export source.
+Validated on 2026-08-31 against Penpot 2.17.2 at final saved source revision `152`. These fifteen top-level boards are the implementation authority for the Notes slice. Page IDs identify the owning page; board IDs identify the exact direct-export source.
 
 | Board | Page / page ID | Viewport | Penpot board ID | Direct export |
 |---|---|---:|---|---|
@@ -246,6 +246,14 @@ Validated on 2026-08-31 against Penpot 2.17.2 at final saved source revision `15
 
 The boards use linked instances of the established shared library, not detached replacements. The freshly read component-map IDs are Button `9b1e7a6b-703c-8060-8008-70741d401776`, TextField `9b1e7a6b-703c-8060-8008-70744c2d6556`, AppShell `9b1e7a6b-703c-8060-8008-7075be5192e9`, Drawer `9b1e7a6b-703c-8060-8008-70750e4567f4`, and Dialog `size=md` `9b1e7a6b-703c-8060-8008-7074ad832f95`. AppShell instances bind desktop `9b1e7a6b-703c-8060-8008-707574c1a629`, tablet `9b1e7a6b-703c-8060-8008-707593dd9adbe`, and mobile `9b1e7a6b-703c-8060-8008-7075b44513a2`; Button primary binds `9b1e7a6b-703c-8060-8008-70740e0b1a82`. Empty boards also reuse EmptyState `9b1e7a6b-703c-8060-8008-707540e5d3c1`. No Notes-specific library component was introduced because the slice is fully expressed by these shared primitives; `tests/design/test_penpot_component_map.mjs` pins the five runtime-mapped shared IDs used by Notes.
 
+| Shared component | Fresh-read Penpot ID |
+|---|---|
+| `Button` | `9b1e7a6b-703c-8060-8008-70741d401776` |
+| `TextField` | `9b1e7a6b-703c-8060-8008-70744c2d6556` |
+| `AppShell` | `9b1e7a6b-703c-8060-8008-7075be5192e9` |
+| `Drawer` | `9b1e7a6b-703c-8060-8008-70750e4567f4` |
+| `Dialog / md` | `9b1e7a6b-703c-8060-8008-7074ad832f95` |
+
 Visible geometry and styling bind the existing `color.canvas`, `color.surface`, `color.border`, `color.brand.100`, `color.brand.600`, `color.brand.700`, `color.text.primary`, `color.warning`, `color.danger`, `radius.md`, `radius.lg`, `radius.pill`, and `space.2` semantic tokens. Status meaning is always repeated in text and is not conveyed by color alone.
 
 ### State, responsive and interaction contract
@@ -262,8 +270,18 @@ Notes boards use illustrative sample data only; production renders authenticated
 
 ### Fresh-read, cleanup and export evidence
 
-At revision `151`, page-scoped fresh readback found exactly 5 desktop, 4 tablet and 6 mobile Notes boards, with no duplicate board names. Root-link counts were 5/4/6/6/5 for desktop Default/Source deleted/Projection failed/Clear confirm/Empty, 5/7/6/5 for tablet Default/Sources drawer/Projection failed/Empty, and 4/6/8/8/7/6 for mobile List/Editor/Filters drawer/Sources drawer/Version conflict/Empty. Full instance readback found zero broken component links on every board. Visible text-bounds overflow, visible actual-bounds overflow and overlay-order violations were zero on all fifteen boards. The mobile audit found 6/5/11/7/7/5 named actions respectively, with zero below 44 × 44.
+At revision `152`, fresh readback confirmed the same seven page IDs and all fifteen Notes board records, including `Mobile / Notes / Version conflict` at `390 × 844` with board ID `1099f839-63e4-80b7-8008-9095ca611a4f`. The comprehensive page-scoped audit from revision `151` remains valid for the fourteen unchanged boards: exactly 5 desktop, 4 tablet and 6 mobile Notes boards, no duplicate board names, root-link counts of 5/4/6/6/5 for desktop Default/Source deleted/Projection failed/Clear confirm/Empty, 5/7/6/5 for tablet Default/Sources drawer/Projection failed/Empty, and 4/6/8/8/7/6 for mobile List/Editor/Filters drawer/Sources drawer/Version conflict/Empty. Full instance readback found zero broken component links on every board. Visible text-bounds overflow, visible actual-bounds overflow and overlay-order violations were zero on all fifteen boards. The mobile audit found 6/5/11/7/7/5 named actions respectively, with zero below 44 × 44.
+
+Revision `152` extends the conflict-state audit to the three foreground siblings whose geometric overlap is not detected by containment-only checks:
+
+| Conflict sibling | Penpot shape ID | Final bounds |
+|---|---|---|
+| `复制本地草稿 action` | `1099f839-63e4-80b7-8008-9095d05fe01e` | `x=64, y=11460, w=140, h=44` |
+| `重新加载服务器版本 action` | `1099f839-63e4-80b7-8008-9095d05fe01c` | `x=212, y=11460, w=140, h=44` |
+| `本地草稿保留说明` | `1099f839-63e4-80b7-8008-9095d0effbbf` | `x=40, y=11520, w=310, h=30` |
+
+The final audit checks all `3` unique sibling pairs and records `0` intersections; the two actions end at `y=11504`, the preservation message begins at `y=11520`, and the minimum vertical gap is `16 px`. Fresh text readback reports actual bounds `x=97.5, y=11525.703125, w=195, h=18.5`, fully contained in both the formal text box and the mobile board.
 
 Two final visual cleanup passes were applied before export: EmptyState instances now use the Notes-specific visible “新建笔记” label with a 44 px action instead of inherited legacy-route copy; projection-failure boards now separate the warning, concept chips and editor body with explicit gaps, and the stray desktop concept label was removed. Typography uses the established 1.2 line-height rhythm, and the compact mobile EmptyState copy remains constrained within its card.
 
-All fifteen PNGs were exported directly from the final Penpot board IDs, decoded at their exact named dimensions, and inspected at original size for clipping, overlay order, missing glyphs, touch geometry, failure clarity, tombstone privacy and sample-data labeling. No browser-only visual divergence is approved yet; implementation packets must compare authenticated runtime data against these exports while preserving the state meaning and responsive structure above.
+All fifteen PNGs were exported directly from their recorded Penpot board IDs and decode at their exact named dimensions. Fourteen unchanged exports retain their revision-`151` pixels; `mobile-notes-conflict.png` alone was directly re-exported from revision `152` after the spacing correction. The revised `390 × 844` PNG was inspected at original size and shows the two 44 px conflict actions, preservation message and 16 px separation without clipping, overlap, missing glyphs or obscured actions. No browser-only visual divergence is approved yet; implementation packets must compare authenticated runtime data against these exports while preserving the state meaning and responsive structure above.
