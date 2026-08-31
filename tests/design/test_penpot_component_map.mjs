@@ -155,3 +155,21 @@ test("every component ID has been freshly verified", () => {
     assert.equal(component.verified, true, `${component.penpotName} requires Penpot readback`);
   }
 });
+
+test("Notes boards bind the freshly read shared component IDs", () => {
+  const mapping = readJson(mappingPath);
+  const byName = new Map(
+    mapping.components.map((component) => [component.penpotName, component.penpotId]),
+  );
+  const notesSharedComponents = {
+    Button: "9b1e7a6b-703c-8060-8008-70741d401776",
+    TextField: "9b1e7a6b-703c-8060-8008-70744c2d6556",
+    AppShell: "9b1e7a6b-703c-8060-8008-7075be5192e9",
+    Drawer: "9b1e7a6b-703c-8060-8008-70750e4567f4",
+    "Dialog / md": "9b1e7a6b-703c-8060-8008-7074ad832f95",
+  };
+
+  for (const [name, penpotId] of Object.entries(notesSharedComponents)) {
+    assert.equal(byName.get(name), penpotId, `${name} must retain its fresh Notes binding`);
+  }
+});

@@ -219,3 +219,51 @@ The runtime uses authenticated, imported records, so filenames, questions and ci
 Real-browser acceptance covers document handoff, fixed scope, answer/reload persistence, reference copying, summary progress/cancel, failure/retry, cross-user safe `404`, durable deletion, drawer Escape/focus return, zero horizontal overflow and Axe WCAG 2 A/AA + 2.1 A/AA with zero serious/critical findings. QA ordinary supporting copy uses `color.text.primary`; the approved secondary token remains unused for small ordinary QA text.
 
 The local MCP bridge used plugin 2.17.0 against Penpot 2.17.2 and displayed a patch-level compatibility warning. Read, write, component-link, bounds and direct-export operations all succeeded and were fresh-read after the final visual cleanup; the warning is tooling provenance, not an approved product-design deviation.
+
+## Learning Notes vertical slice
+
+Validated on 2026-08-31 against Penpot 2.17.2 at final saved source revision `151`. These fifteen top-level boards are the implementation authority for the Notes slice. Page IDs identify the owning page; board IDs identify the exact direct-export source.
+
+| Board | Page / page ID | Viewport | Penpot board ID | Direct export |
+|---|---|---:|---|---|
+| `Desktop / Notes / Default` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `1099f839-63e4-80b7-8008-90947129dd57` | [`desktop-notes.png`](reference/penpot/desktop-notes.png) |
+| `Desktop / Notes / Source deleted` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `1099f839-63e4-80b7-8008-909480e7b254` | [`desktop-notes-source-deleted.png`](reference/penpot/desktop-notes-source-deleted.png) |
+| `Desktop / Notes / Projection failed` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `1099f839-63e4-80b7-8008-90948ee9cad4` | [`desktop-notes-projection-failed.png`](reference/penpot/desktop-notes-projection-failed.png) |
+| `Desktop / Notes / Clear confirm` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `1099f839-63e4-80b7-8008-90949f99978b` | [`desktop-notes-clear.png`](reference/penpot/desktop-notes-clear.png) |
+| `Desktop / Notes / Empty` | `02 Desktop` / `9b1e7a6b-703c-8060-8008-7071c3463d87` | 1440 × 1024 | `1099f839-63e4-80b7-8008-9094b0a45de7` | [`desktop-notes-empty.png`](reference/penpot/desktop-notes-empty.png) |
+| `Tablet / Notes / Default` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `1099f839-63e4-80b7-8008-90951951e0df` | [`tablet-notes.png`](reference/penpot/tablet-notes.png) |
+| `Tablet / Notes / Sources drawer` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `1099f839-63e4-80b7-8008-9095231ebdf8` | [`tablet-notes-sources.png`](reference/penpot/tablet-notes-sources.png) |
+| `Tablet / Notes / Projection failed` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `1099f839-63e4-80b7-8008-90952f8a7d54` | [`tablet-notes-projection-failed.png`](reference/penpot/tablet-notes-projection-failed.png) |
+| `Tablet / Notes / Empty` | `03 Tablet` / `9b1e7a6b-703c-8060-8008-7071c9876902` | 1024 × 768 | `1099f839-63e4-80b7-8008-90953a56062e` | [`tablet-notes-empty.png`](reference/penpot/tablet-notes-empty.png) |
+| `Mobile / Notes / List` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `1099f839-63e4-80b7-8008-9095af8eb216` | [`mobile-notes.png`](reference/penpot/mobile-notes.png) |
+| `Mobile / Notes / Editor` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `1099f839-63e4-80b7-8008-9095b5a6954a` | [`mobile-notes-editor.png`](reference/penpot/mobile-notes-editor.png) |
+| `Mobile / Notes / Filters drawer` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `1099f839-63e4-80b7-8008-9095bb0121d8` | [`mobile-notes-filters.png`](reference/penpot/mobile-notes-filters.png) |
+| `Mobile / Notes / Sources drawer` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `1099f839-63e4-80b7-8008-9095c19ccceb` | [`mobile-notes-sources.png`](reference/penpot/mobile-notes-sources.png) |
+| `Mobile / Notes / Version conflict` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `1099f839-63e4-80b7-8008-9095ca611a4f` | [`mobile-notes-conflict.png`](reference/penpot/mobile-notes-conflict.png) |
+| `Mobile / Notes / Empty` | `04 Mobile` / `9b1e7a6b-703c-8060-8008-7071c9888df9` | 390 × 844 | `1099f839-63e4-80b7-8008-9095d15efe2b` | [`mobile-notes-empty.png`](reference/penpot/mobile-notes-empty.png) |
+
+### Shared component and token bindings
+
+The boards use linked instances of the established shared library, not detached replacements. The freshly read component-map IDs are Button `9b1e7a6b-703c-8060-8008-70741d401776`, TextField `9b1e7a6b-703c-8060-8008-70744c2d6556`, AppShell `9b1e7a6b-703c-8060-8008-7075be5192e9`, Drawer `9b1e7a6b-703c-8060-8008-70750e4567f4`, and Dialog `size=md` `9b1e7a6b-703c-8060-8008-7074ad832f95`. AppShell instances bind desktop `9b1e7a6b-703c-8060-8008-707574c1a629`, tablet `9b1e7a6b-703c-8060-8008-707593dd9adbe`, and mobile `9b1e7a6b-703c-8060-8008-7075b44513a2`; Button primary binds `9b1e7a6b-703c-8060-8008-70740e0b1a82`. Empty boards also reuse EmptyState `9b1e7a6b-703c-8060-8008-707540e5d3c1`. No Notes-specific library component was introduced because the slice is fully expressed by these shared primitives; `tests/design/test_penpot_component_map.mjs` pins the five runtime-mapped shared IDs used by Notes.
+
+Visible geometry and styling bind the existing `color.canvas`, `color.surface`, `color.border`, `color.brand.100`, `color.brand.600`, `color.brand.700`, `color.text.primary`, `color.warning`, `color.danger`, `radius.md`, `radius.lg`, `radius.pill`, and `space.2` semantic tokens. Status meaning is always repeated in text and is not conveyed by color alone.
+
+### State, responsive and interaction contract
+
+- Desktop keeps the 248 px navigation and 64 px top bar, then exposes the Notes list, editor and read-only source column simultaneously. The source-deleted state renders only the tombstone text “来源已删除”; deleted filename, page, citation and excerpt data are absent.
+- Tablet keeps the 72 px rail and a two-column list/editor workspace. Sources use the linked right Drawer, move focus into the drawer, trap focus while open, close on `Escape`, and return focus to the source trigger.
+- Mobile is intentionally list → editor rather than a compressed multi-column canvas. Filters and sources use bottom drawers above the 64 px bottom navigation. Named actions are at least 44 × 44 and preserve visible focus treatment.
+- Projection failure is a non-blocking warning with an explicit retry action. Note reading, editing, source viewing and deletion remain available; a projection failure never substitutes for or rolls back the saved note.
+- Clear confirm uses the linked medium Dialog and explicitly limits the destructive action to Notes; documents and QA records are not deleted. The source-deleted tombstone remains non-destructive to the note itself.
+- Version conflict preserves the local Markdown draft and offers “复制本地草稿” or “重新加载版本”. Implementation must never silently merge or overwrite the local draft.
+- Empty states expose “新建笔记” and “从 QA 记录”. The latter starts an explicit user action and does not seed a production note automatically.
+
+Notes boards use illustrative sample data only; production renders authenticated server records and never seeds these values.
+
+### Fresh-read, cleanup and export evidence
+
+At revision `151`, page-scoped fresh readback found exactly 5 desktop, 4 tablet and 6 mobile Notes boards, with no duplicate board names. Root-link counts were 5/4/6/6/5 for desktop Default/Source deleted/Projection failed/Clear confirm/Empty, 5/7/6/5 for tablet Default/Sources drawer/Projection failed/Empty, and 4/6/8/8/7/6 for mobile List/Editor/Filters drawer/Sources drawer/Version conflict/Empty. Full instance readback found zero broken component links on every board. Visible text-bounds overflow, visible actual-bounds overflow and overlay-order violations were zero on all fifteen boards. The mobile audit found 6/5/11/7/7/5 named actions respectively, with zero below 44 × 44.
+
+Two final visual cleanup passes were applied before export: EmptyState instances now use the Notes-specific visible “新建笔记” label with a 44 px action instead of inherited legacy-route copy; projection-failure boards now separate the warning, concept chips and editor body with explicit gaps, and the stray desktop concept label was removed. Typography uses the established 1.2 line-height rhythm, and the compact mobile EmptyState copy remains constrained within its card.
+
+All fifteen PNGs were exported directly from the final Penpot board IDs, decoded at their exact named dimensions, and inspected at original size for clipping, overlay order, missing glyphs, touch geometry, failure clarity, tombstone privacy and sample-data labeling. No browser-only visual divergence is approved yet; implementation packets must compare authenticated runtime data against these exports while preserving the state meaning and responsive structure above.
