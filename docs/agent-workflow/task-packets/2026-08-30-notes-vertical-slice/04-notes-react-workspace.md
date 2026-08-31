@@ -225,4 +225,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - `dd9e27c` — second-review corrective implementation and tests.
   - `f94460f` — history restoration safety refinement.
   - `83aee11` — new-note baseline and history regression coverage.
-  - Third-review corrective commit pending.
+  - `616b988` — third-review shared discard-navigation guard and regression coverage.
