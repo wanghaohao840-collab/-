@@ -167,6 +167,7 @@ Stop with a reality-conflict report if packet 02 is not done, its interfaces dif
   - `api/routes/notes.py`
   - `tests/test_app_bootstrap.py`
   - `tests/api/test_note_routes.py`
+  - `tests/api/test_app_lifecycle.py`
   - `tests/test_note_source_deletion.py`
   - `docs/agent-workflow/task-packets/2026-08-30-notes-vertical-slice/03-notes-api-lifecycle.md`
 - Dependency/interfaces:
@@ -181,13 +182,15 @@ Stop with a reality-conflict report if packet 02 is not done, its interfaces dif
   - [x] Conversation/document source races resolve as insert-then-scrub or `NOTE_SOURCE_DELETING`; replay/stale-owner paths are covered for both scopes.
   - [x] Existing QA/document/import/lifecycle regressions remain green.
 - Verification:
-  - Corrected available packet suite (using `tests/test_document_library_service.py`) — PASS (80 passed in 289.69s).
-  - Packet 02 domain regression suite — PASS (37 passed in 13.96s).
+  - Corrected available packet suite (using `tests/test_document_library_service.py`) — PASS (87 passed in 307.28s).
+  - Packet 02 domain regression suite — PASS (37 passed in 13.85s).
   - `git diff --check` — PASS (line-ending notices only).
+  - Third corrective evidence: deterministic post-read fence TOCTOU checks for conversation and document/citation; lease-expiry reclaim plus stale-owner/replay scrub checks; real API active-fence 409, source detail/tombstone sanitization, invalid cursor/query, projection-unavailable mapping, and route-off migration/recovery ordering — all included in the 87-test pass.
 - Deviations:
   - The literal packet command names nonexistent `tests/test_document_library.py`; repository reality is `tests/test_document_library_service.py` and that path is used.
   - Active detail source snapshots remain permitted by the approved spec; list DTOs omit full source snapshots and tombstones expose no source payload.
 - Residual risks:
   - None identified within the amended single-process/SQLite scope; the literal packet command still references a nonexistent document test path.
 - Commit:
-  - `4e4abb5` (corrective; `af8b2b0` preserved)
+  - `4e4abb5` (first corrective; `af8b2b0` preserved)
+  - corrective follow-up commit to be recorded below

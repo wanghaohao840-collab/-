@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from api.app import create_api_app
 from api.config import ApiConfig
+from app.bootstrap import ApplicationServices
 
 from tests.api.test_auth_routes import FakeServices, FakeSessionRegistry
 
@@ -53,3 +54,22 @@ def test_api_config_is_frozen():
 
     with pytest.raises(FrozenInstanceError):
         config.cookie_secure = True
+
+
+def test_route_off_does_not_skip_note_migration_or_projection_recovery(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTES_ROUTE_ENABLED", "false")
+    services = ApplicationServices.create(tmp_path / "data")
+    calls = []
+    services.note_migration.migrate_known_users = lambda: calls.append("migrate")
+    services.note_projection_repository.recover_expired = lambda: calls.append("recover")
+    for worker in (
+        services.import_worker_pool,
+        services.qa_worker_pool,
+        services.qa_deletion_worker,
+        services.note_projection_worker,
+    ):
+        worker.start = lambda: calls.append("start")
+        worker.stop = lambda: calls.append("stop")
+    with TestClient(create_api_app(services)) as client:
+        assert client.app.state.api_config.notes_route_enabled is False
+    assert calls[:2] == ["migrate", "recover"]

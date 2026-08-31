@@ -55,7 +55,7 @@ class NoteCapabilitiesResponse(BaseModel):
 class NoteSourceResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    id: str
+    id: str | None
     kind: Literal["qa_message", "qa_citation"]
     deleted: bool
     qa_thread_id: str | None
@@ -87,7 +87,7 @@ class NoteResponse(BaseModel):
 class NoteListSourceResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    id: str
+    id: str | None
     kind: Literal["qa_message", "qa_citation"]
     deleted: bool
     document_id: str | None
@@ -129,6 +129,21 @@ class NoteProjectionRetryResponse(BaseModel):
 
 
 def source_response(source: NoteSource) -> NoteSourceResponse:
+    if source.deleted:
+        return NoteSourceResponse(
+            id=None,
+            kind=source.kind,
+            deleted=True,
+            qa_thread_id=None,
+            qa_message_id=None,
+            citation_id=None,
+            document_id=None,
+            locator=None,
+            title_snapshot=None,
+            excerpt_snapshot=None,
+            created_at=source.created_at,
+            source_deleted_at=source.source_deleted_at,
+        )
     return NoteSourceResponse(
         id=source.id,
         kind=source.kind,
@@ -170,7 +185,7 @@ def note_page_response(page: NotePage) -> NotePageResponse:
                 tags=list(note.tags),
                 sources=[
                     NoteListSourceResponse(
-                        id=source.id,
+                        id=None if source.deleted else source.id,
                         kind=source.kind,
                         deleted=source.deleted,
                         document_id=source.document_id,

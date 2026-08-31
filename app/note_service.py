@@ -282,6 +282,12 @@ class NoteService:
             or message.role != "assistant"
             or message.status != "completed"
         ):
+            # A fenced QA read is intentionally hidden by QaRepository.  The
+            # fence may have committed after the first check and immediately
+            # before this read, so distinguish that race from an absent/foreign
+            # source before returning the safe not-found error.
+            if self._source_fence_active(user_id, selector):
+                raise NoteSourceDeletingError(selector.qa_message_id)
             raise NoteSourceNotFoundError(selector.qa_message_id)
         if selector.kind == "qa_answer":
             return NewNoteSource(

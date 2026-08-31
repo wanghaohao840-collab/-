@@ -128,7 +128,7 @@ def test_source_create_after_fence_is_distinguished_from_absent_source(tmp_path,
     db = tmp_path / f"{scope}.db"
     initialize_database(db)
     _user(db)
-    _, conversation, message_id = _seed_completed_answer(db)
+    qa, conversation, message_id = _seed_completed_answer(db)
     deletions = QaDeletionRepository(db, NoteRepository(db))
     target = conversation.id if scope == "conversation" else "doc"
     if scope == "conversation":
@@ -137,10 +137,50 @@ def test_source_create_after_fence_is_distinguished_from_absent_source(tmp_path,
     else:
         deletions.create_document_deletion("alice", target)
         selector = NoteSourceSelector(kind="qa_citation", qa_message_id=message_id, citation_id="citation")
+    service = NoteService(NoteRepository(db), _Migration(), qa, _Worker())
     with pytest.raises(NoteSourceDeletingError):
-        _source_service(db).create(
+        service.create(
             SimpleNamespace(user_id="alice"), body_markdown="body", concept="concept",
             tags=("tag",), client_request_id="create", source=selector,
+        )
+
+
+@pytest.mark.parametrize("scope", ["conversation", "document"])
+def test_source_read_toctou_rechecks_fence_after_hidden_qa_read(tmp_path, scope, monkeypatch):
+    db = tmp_path / f"toctou-{scope}.db"
+    initialize_database(db)
+    _user(db)
+    qa, conversation, message_id = _seed_completed_answer(db)
+    deletions = QaDeletionRepository(db)
+    target = conversation.id if scope == "conversation" else "doc"
+    selector = (
+        NoteSourceSelector(kind="qa_answer", qa_message_id=message_id)
+        if scope == "conversation"
+        else NoteSourceSelector(kind="qa_citation", qa_message_id=message_id, citation_id="citation")
+    )
+    fence_committed = Event()
+
+    def hidden_qa_read(user_id, source_id):
+        state = {}
+        def create_fence():
+            state["deletion"] = (
+                deletions.create_conversation_deletion(user_id, target)
+                if scope == "conversation"
+                else deletions.create_document_deletion(user_id, target)
+            )
+            fence_committed.set()
+        deleter = Thread(target=create_fence, name="toctou-fence")
+        deleter.start()
+        assert fence_committed.wait(timeout=3)
+        deleter.join(timeout=3)
+        return None
+
+    monkeypatch.setattr(qa, "get_message", hidden_qa_read)
+    service = NoteService(NoteRepository(db), _Migration(), qa, _Worker())
+    with pytest.raises(NoteSourceDeletingError):
+        service.create(
+            SimpleNamespace(user_id="alice"), body_markdown="body", concept=None,
+            tags=(), client_request_id="toctou", source=selector,
         )
 
 
@@ -266,13 +306,18 @@ def test_source_scrub_rejects_stale_owner_and_replays_safely(tmp_path, scope):
         if scope == "conversation"
         else deletions.create_document_deletion("alice", target)
     )
-    claimed = deletions.claim_next_deletion("owner", lease_seconds=300)
+    claimed = deletions.claim_next_deletion("owner", lease_seconds=1)
     assert claimed is not None
     assert deletions.remove_qa_rows(deletion.id, "stale-owner") is False
     before = notes.get("alice", note.id)
     assert before.sources[0].deleted is False
-    assert deletions.remove_qa_rows(deletion.id, "owner") is True
-    assert deletions.remove_qa_rows(deletion.id, "owner") is False
+    expired = "2099-01-01T00:00:00Z"
+    assert deletions.remove_qa_rows(deletion.id, "owner", now=expired) is False
+    assert deletions.recover_expired(now=expired) == 1
+    reclaimed = deletions.claim_next_deletion("new-owner", now=expired, lease_seconds=300)
+    assert reclaimed is not None
+    assert deletions.remove_qa_rows(deletion.id, "new-owner", now=expired) is True
+    assert deletions.remove_qa_rows(deletion.id, "new-owner", now=expired) is False
     after = notes.get("alice", note.id)
     assert after.version == 2 and after.body_markdown == "body"
     assert after.sources[0].deleted is True
