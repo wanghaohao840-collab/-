@@ -242,8 +242,7 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - `fde935d` — preserve retryability when projection lease loss rejects
     failure handling.
   - `c79d3ad` — direct projection regression for cross-user legacy cleanup.
-  - Current corrective commit (this commit; hash reported by the controller)
-    — explicit user-scoped desired-absent legacy cleanup and real
+  - `8305402` — explicit user-scoped desired-absent legacy cleanup and real
     MemoryManager/SemanticMemory replay coverage after ledger lease loss.
 - Corrective files delivered in this amended boundary:
   - `app/note_projection.py`
@@ -259,6 +258,6 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - QA regressions: `20 passed in 18.01s`.
   - `git diff --check`: PASS.
 - Commit:
-  - This handoff and its production/tests changes are delivered in the
-    current corrective commit; the exact hash is reported by the controller
-    after commit creation.
+  - Functional corrective head: `8305402`.
+  - The subsequent documentation-only commit records that already-created
+    functional hash and does not change runtime behavior.
