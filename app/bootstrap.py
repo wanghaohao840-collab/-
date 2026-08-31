@@ -27,6 +27,14 @@ from app.qa_observability import InProcessQaTelemetry
 from app.qa_repository import QaRepository
 from app.qa_service import QaService
 from app.qa_worker import QaWorkerPool
+from app.note_migration import NoteMigrationService
+from app.note_projection import (
+    DefaultNoteMemoryProjection,
+    NoteProjectionRepository,
+    NoteProjectionWorker,
+)
+from app.note_repository import NoteRepository
+from app.note_service import NoteService
 from app.session import SessionRegistry
 from app.storage import UserStorage
 
@@ -56,6 +64,11 @@ class ApplicationServices:
     qa_deletion_service: QaDeletionService
     qa_deletion_worker: QaDeletionWorker
     qa_service: QaService
+    note_repository: NoteRepository
+    note_migration: NoteMigrationService
+    note_projection_repository: NoteProjectionRepository
+    note_projection_worker: NoteProjectionWorker
+    note_service: NoteService
     _started: bool = field(default=False, init=False, repr=False)
     _lifecycle_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
@@ -91,8 +104,23 @@ class ApplicationServices:
         )
         session_registry.runtime_registry.set_import_task_service(import_service)
         qa_repository = QaRepository(db_path)
+        note_repository = NoteRepository(db_path)
+        note_migration = NoteMigrationService(
+            db_path, storage, note_repository, session_registry.runtime_registry
+        )
+        note_projection_repository = NoteProjectionRepository(db_path)
+        note_projection_worker = NoteProjectionWorker(
+            note_projection_repository,
+            note_repository,
+            session_registry.runtime_registry,
+            DefaultNoteMemoryProjection(),
+        )
+        note_service = NoteService(
+            note_repository, note_migration, qa_repository, note_projection_worker
+        )
+        session_registry.runtime_registry.set_note_service(note_service)
         qa_job_repository = QaJobRepository(db_path)
-        qa_deletion_repository = QaDeletionRepository(db_path)
+        qa_deletion_repository = QaDeletionRepository(db_path, note_repository)
         qa_legacy_migration = QaLegacyMigrationService(db_path, storage)
         qa_telemetry = InProcessQaTelemetry()
         answer_engine = qa_answer_engine or RagQaAnswerEngine()
@@ -158,12 +186,19 @@ class ApplicationServices:
             qa_deletion_service=qa_deletion_service,
             qa_deletion_worker=qa_deletion_worker,
             qa_service=qa_service,
+            note_repository=note_repository,
+            note_migration=note_migration,
+            note_projection_repository=note_projection_repository,
+            note_projection_worker=note_projection_worker,
+            note_service=note_service,
         )
 
     def start(self) -> None:
         with self._lifecycle_lock:
             if self._started:
                 return
+            self.note_migration.migrate_known_users()
+            self.note_projection_repository.recover_expired()
             self.qa_job_repository.recover_expired()
             self.qa_deletion_repository.recover_expired()
             self.qa_repository.recover_interrupted_questions()
@@ -175,6 +210,8 @@ class ApplicationServices:
                 started.append(self.qa_worker_pool)
                 self.qa_deletion_worker.start()
                 started.append(self.qa_deletion_worker)
+                self.note_projection_worker.start()
+                started.append(self.note_projection_worker)
             except Exception:
                 for worker in reversed(started):
                     worker.stop()
@@ -187,6 +224,7 @@ class ApplicationServices:
                 return
             first_error: Exception | None = None
             for worker in (
+                self.note_projection_worker,
                 self.qa_deletion_worker,
                 self.qa_worker_pool,
                 self.import_worker_pool,

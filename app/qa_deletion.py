@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.database import connect
 from app.qa_models import QaDeletion, QaDeletionTarget, QaValidationError
+from app.note_repository import NoteRepository
 
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,9 @@ class _DeletionPayload:
 class QaDeletionRepository:
     """Durable, user-scoped deletion fences with opaque cleanup payloads."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, note_repository: NoteRepository | None = None) -> None:
         self.db_path = Path(db_path)
+        self.note_repository = note_repository
 
     def create_conversation_deletion(
         self, user_id: str, conversation_id: str, *, now: str | None = None
@@ -509,6 +511,15 @@ class QaDeletionRepository:
                 conn.commit()
                 return False
             conversation_ids = tuple(json.loads(row["conversation_ids_json"]))
+            if self.note_repository is not None:
+                if row["target_type"] == "document":
+                    self.note_repository.scrub_sources_in_transaction(
+                        conn, user_id=row["user_id"], document_id=row["target_id"], deleted_at=timestamp
+                    )
+                else:
+                    self.note_repository.scrub_sources_in_transaction(
+                        conn, user_id=row["user_id"], thread_id=row["target_id"], deleted_at=timestamp
+                    )
             if conversation_ids:
                 marks = ",".join("?" for _ in conversation_ids)
                 conn.execute(

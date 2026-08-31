@@ -122,9 +122,16 @@ def _validation_field_errors(exc: RequestValidationError) -> dict[str, str]:
 
 
 async def handle_validation_error(
-    _request: Request,
+    request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
+    if request.url.path.startswith("/api/v1/notes"):
+        return error_response(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "NOTE_VALIDATION_ERROR",
+            "笔记请求无效",
+            field_errors=_validation_field_errors(exc),
+        )
     return error_response(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
         "validation_error",

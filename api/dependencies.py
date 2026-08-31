@@ -8,6 +8,7 @@ from api.config import ApiConfig
 from app.document_library import DocumentLibraryService
 from app.import_service import ImportTaskService
 from app.qa_service import QaService
+from app.note_service import NoteService
 from app.session import SessionRegistry, UserSession
 
 
@@ -25,6 +26,12 @@ def get_import_service(request: Request) -> ImportTaskService:
 
 def get_qa_service(request: Request) -> QaService:
     return request.app.state.services.qa_service
+
+
+def get_note_service(request: Request) -> NoteService | None:
+    # Keep disabled-route capability checks usable with lightweight hosts that
+    # have not constructed the optional Note facade.
+    return getattr(request.app.state.services, "note_service", None)
 
 
 def get_session_token(request: Request) -> str | None:

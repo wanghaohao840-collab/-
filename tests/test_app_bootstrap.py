@@ -263,3 +263,38 @@ def test_ui_initialization_refreshes_shared_service_aliases(tmp_path, monkeypatc
     assert gradio_app.services is first
     assert gradio_app.session_registry is first.session_registry
     assert gradio_app.import_worker_pool is first.import_worker_pool
+
+
+def test_note_lifecycle_is_last_started_and_first_stopped_on_partial_failure(tmp_path):
+    services = ApplicationServices.create(tmp_path / "data")
+    calls = []
+    services.note_migration.migrate_known_users = lambda: calls.append("notes.migrate")
+    services.note_projection_repository.recover_expired = lambda: calls.append("notes.recover")
+    services.qa_job_repository.recover_expired = lambda: calls.append("qa.jobs.recover")
+    services.qa_deletion_repository.recover_expired = lambda: calls.append("qa.deletions.recover")
+    services.qa_repository.recover_interrupted_questions = lambda: calls.append("qa.questions.recover")
+    services.import_worker_pool.start = lambda: calls.append("import.start")
+    services.qa_worker_pool.start = lambda: calls.append("qa.start")
+    services.qa_deletion_worker.start = lambda: calls.append("deletion.start")
+    services.note_projection_worker.start = lambda: (_ for _ in ()).throw(RuntimeError("notes start failed"))
+    services.import_worker_pool.stop = lambda: calls.append("import.stop")
+    services.qa_worker_pool.stop = lambda: calls.append("qa.stop")
+    services.qa_deletion_worker.stop = lambda: calls.append("deletion.stop")
+
+    with pytest.raises(RuntimeError, match="notes start failed"):
+        services.start()
+
+    assert calls == [
+        "notes.migrate",
+        "notes.recover",
+        "qa.jobs.recover",
+        "qa.deletions.recover",
+        "qa.questions.recover",
+        "import.start",
+        "qa.start",
+        "deletion.start",
+        "deletion.stop",
+        "qa.stop",
+        "import.stop",
+    ]
+    assert services._started is False
