@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from threading import RLock
 from types import SimpleNamespace
+from uuid import uuid4
 
 from app.database import connect, initialize_database
 from app.note_projection import (
@@ -11,6 +12,8 @@ from app.note_projection import (
     NoteProjectionWorker,
 )
 from app.note_repository import NoteRepository
+from hello_agents.memory.base import MemoryConfig, MemoryItem
+from hello_agents.memory.manager import MemoryManager
 
 
 class RuntimeRegistry:
@@ -57,7 +60,8 @@ def test_expired_final_attempt_is_terminalized_and_stale_owner_rejected(tmp_path
         conn.execute("update note_projection_tasks set attempt_count=3, lease_expires_at='2026-01-01T00:00:00Z'")
 
     assert tasks.claim_next("new", now="2026-01-01T00:00:02Z") is None
-    assert tasks.get(claimed.id).status == "failed"
+    assert tasks.get("alice", claimed.id).status == "failed"
+    assert tasks.get("bob", claimed.id) is None
     assert tasks.complete(claimed.id, "old", now="2026-01-01T00:00:02Z") is False
 
 
@@ -92,6 +96,83 @@ def test_worker_uses_stable_id_and_cleans_exact_legacy_only_after_upsert(tmp_pat
     assert tasks.list_for_note("alice", note.id)[0].status == "completed"
     with connect(db) as conn:
         assert conn.execute("select legacy_memory_cleaned_at from note_legacy_imports").fetchone()[0]
+
+
+def test_false_legacy_remove_retries_without_marking_ledger_cleaned(tmp_path: Path) -> None:
+    db, notes, tasks = setup_domain(tmp_path)
+    tasks.max_attempts = 1
+    note = notes.create("alice", "body", "c", ("tag",), "r")
+    with connect(db) as conn:
+        conn.execute(
+            "insert into note_legacy_imports (user_id, legacy_import_key, note_id, source_digest, legacy_memory_id, imported_at) values ('alice','k',?,'d','legacy-id','t')",
+            (note.id,),
+        )
+
+    class FalseManager(FakeManager):
+        def remove_memory(self, memory_id, *, memory_type):
+            self.calls.append(("remove", memory_id, memory_type))
+            return False
+
+    manager = FalseManager()
+    runtime = SimpleNamespace(user_id="alice", lock=RLock(), memory_tool=SimpleNamespace(memory_manager=manager))
+    worker = NoteProjectionWorker(
+        tasks, notes, RuntimeRegistry(runtime), DefaultNoteMemoryProjection(), worker_id="worker"
+    )
+
+    assert worker.run_once() is True
+    task = tasks.list_for_note("alice", note.id)[0]
+    assert task.status == "failed"
+    assert task.last_error_code == "PROJECTION_FAILED"
+    with connect(db) as conn:
+        assert conn.execute("select legacy_memory_cleaned_at from note_legacy_imports").fetchone()[0] is None
+
+
+def test_default_projection_reports_actual_semantic_remove_unsupported(tmp_path: Path) -> None:
+    # The repository's real SemanticMemory currently has no remove() method;
+    # MemoryManager therefore returns False instead of pretending deletion.
+    manager = MemoryManager(
+        config=MemoryConfig(qdrant_collection=f"note-projection-{uuid4()}"),
+        user_id="alice",
+        enable_working=False,
+        enable_episodic=False,
+        enable_semantic=True,
+    )
+    memory_id = "note:alice:stable"
+    manager.memory_types["semantic"].memories[memory_id] = MemoryItem(
+        content="still present", memory_type="semantic", id=memory_id
+    )
+    runtime = SimpleNamespace(
+        user_id="alice",
+        memory_tool=SimpleNamespace(memory_manager=manager),
+    )
+
+    assert DefaultNoteMemoryProjection().remove(runtime, "stable") is False
+    assert memory_id in manager.memory_types["semantic"].memories
+    manager.close()
+
+
+def test_runtime_acquire_failure_is_recorded_without_release(tmp_path: Path) -> None:
+    db, notes, tasks = setup_domain(tmp_path)
+    tasks.max_attempts = 1
+    note = notes.create("alice", "body", None, (), "r")
+
+    class FailingRegistry:
+        released = 0
+
+        def acquire_background(self, user_id):
+            raise RuntimeError("runtime unavailable")
+
+        def release_background(self, user_id):
+            self.released += 1
+
+    registry = FailingRegistry()
+    worker = NoteProjectionWorker(
+        tasks, notes, registry, DefaultNoteMemoryProjection(), worker_id="worker"
+    )
+
+    assert worker.run_once() is True
+    assert tasks.list_for_note("alice", note.id)[0].status == "failed"
+    assert registry.released == 0
 
 
 def test_stale_upsert_after_delete_is_noop_and_cannot_revive(tmp_path: Path) -> None:

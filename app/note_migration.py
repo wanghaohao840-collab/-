@@ -178,6 +178,7 @@ def _legacy_memory_items(runtime: object) -> dict[str, object]:
         str(memory_id): item
         for memory_id, item in memories.items()
         if getattr(item, "metadata", {}).get("knowledge_type") == "learning_note"
+        and not str(memory_id).startswith(f"note:{runtime.user_id}:")
     }
 
 

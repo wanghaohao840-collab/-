@@ -237,10 +237,11 @@ class NoteProjectionRepository:
                 )
         return len(rows)
 
-    def get(self, task_id: str) -> NoteProjectionTask | None:
+    def get(self, user_id: str, task_id: str) -> NoteProjectionTask | None:
         with connect(self.db_path) as conn:
             row = conn.execute(
-                "select 1 from note_projection_tasks where id=?", (task_id,)
+                "select 1 from note_projection_tasks where id=? and user_id=?",
+                (task_id, user_id),
             ).fetchone()
             return self._get_in_connection(conn, task_id) if row is not None else None
 
@@ -315,7 +316,7 @@ class NoteProjectionRepository:
 class NoteMemoryProjection(Protocol):
     def upsert(self, runtime: UserRuntime, note: Note) -> None: ...
 
-    def remove(self, runtime: UserRuntime, note_id: str) -> None: ...
+    def remove(self, runtime: UserRuntime, note_id: str) -> bool: ...
 
 
 class DefaultNoteMemoryProjection:
@@ -336,10 +337,10 @@ class DefaultNoteMemoryProjection:
             memory_id=memory_id,
         )
 
-    def remove(self, runtime: UserRuntime, note_id: str) -> None:
-        runtime.memory_tool.memory_manager.remove_memory(
+    def remove(self, runtime: UserRuntime, note_id: str) -> bool:
+        return bool(runtime.memory_tool.memory_manager.remove_memory(
             f"note:{runtime.user_id}:{note_id}", memory_type="semantic"
-        )
+        ))
 
 
 class NoteProjectionWorker:
@@ -394,8 +395,11 @@ class NoteProjectionWorker:
         )
         if task is None:
             return False
-        runtime = self.runtime_registry.acquire_background(task.user_id)
+        runtime = None
+        acquired = False
         try:
+            runtime = self.runtime_registry.acquire_background(task.user_id)
+            acquired = True
             lock = getattr(runtime, "lock", None)
             with lock if lock is not None else nullcontext():
                 if not self.tasks.heartbeat(
@@ -424,16 +428,20 @@ class NoteProjectionWorker:
                             lease_seconds=self.lease_seconds,
                         ):
                             return True
-                        runtime.memory_tool.memory_manager.remove_memory(
+                        if not runtime.memory_tool.memory_manager.remove_memory(
                             legacy_id, memory_type="semantic"
-                        )
-                        self.tasks.mark_legacy_cleaned(
+                        ):
+                            raise RuntimeError(
+                                "exact legacy memory removal is unavailable"
+                            )
+                        if not self.tasks.mark_legacy_cleaned(
                             task.id,
                             self.worker_id,
                             task.user_id,
                             task.note_id,
                             legacy_id,
-                        )
+                        ):
+                            raise RuntimeError("legacy cleanup lease was lost")
                 else:
                     if (
                         note is not None
@@ -442,14 +450,21 @@ class NoteProjectionWorker:
                     ):
                         self.tasks.complete(task.id, self.worker_id)
                         return True
-                    self.projection.remove(runtime, task.note_id)
+                    if not self.projection.remove(runtime, task.note_id):
+                        raise RuntimeError("exact note memory removal is unavailable")
                 self.tasks.complete(task.id, self.worker_id)
         except Exception:
             self.tasks.fail_or_retry(
                 task.id, self.worker_id, "PROJECTION_FAILED"
             )
         finally:
-            self.runtime_registry.release_background(task.user_id)
+            if acquired:
+                try:
+                    self.runtime_registry.release_background(task.user_id)
+                except Exception:
+                    # A release failure must not terminate the polling loop;
+                    # the durable task outcome has already been recorded.
+                    pass
         return True
 
     def _loop(self) -> None:

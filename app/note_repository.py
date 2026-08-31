@@ -47,6 +47,7 @@ class NoteRepository:
         sources: tuple[NewNoteSource, ...] = (),
         note_id: str | None = None,
         now: str | None = None,
+        request_digest: str | None = None,
     ) -> Note:
         conn = connect(self.db_path)
         try:
@@ -61,6 +62,7 @@ class NoteRepository:
                 sources=sources,
                 note_id=note_id,
                 now=now,
+                request_digest=request_digest,
             )
             conn.commit()
             return note
@@ -82,6 +84,7 @@ class NoteRepository:
         sources: tuple[NewNoteSource, ...] = (),
         note_id: str | None = None,
         now: str | None = None,
+        request_digest: str | None = None,
     ) -> Note:
         body, normalized_concept, normalized_tags = validate_note_input(
             body_markdown, concept, tags
@@ -91,7 +94,9 @@ class NoteRepository:
             raise NoteValidationError("client_request_id is required")
         if len(sources) > 10:
             raise NoteValidationError("sources must contain at most 10 values")
-        digest = _request_digest(body, normalized_concept, normalized_tags, sources)
+        digest = request_digest or _request_digest(
+            body, normalized_concept, normalized_tags, sources
+        )
         existing = conn.execute(
             "select id, request_digest from notes where user_id=? and client_request_id=?",
             (user_id, request_id),
@@ -132,6 +137,31 @@ class NoteRepository:
         self._replace_fts(conn, user_id, identifier, body, normalized_concept, normalized_tags)
         self._enqueue(conn, user_id, identifier, 1, "upsert", timestamp)
         return self._get(conn, user_id, identifier, include_deleted=True)
+
+    def get_by_client_request_id(
+        self, user_id: str, client_request_id: str, request_digest: str
+    ) -> Note | None:
+        """Return an idempotent replay before resolving external sources.
+
+        The digest is supplied by the caller because a source selector is part
+        of the create payload.  Keeping this lookup user-scoped lets callers
+        safely replay a request even after the referenced QA row is deleted.
+        """
+
+        request_id = str(client_request_id or "").strip()
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                select id, request_digest from notes
+                where user_id=? and client_request_id=?
+                """,
+                (user_id, request_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["request_digest"] != request_digest:
+                raise NoteIdempotencyConflict(request_id)
+            return self._get(conn, user_id, row["id"], include_deleted=True)
 
     def get(self, user_id: str, note_id: str) -> Note | None:
         with connect(self.db_path) as conn:

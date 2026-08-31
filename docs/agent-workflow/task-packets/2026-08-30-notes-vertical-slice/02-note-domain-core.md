@@ -178,3 +178,27 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - The source-scrub primitive is intentionally not wired into `app/qa_deletion.py` in this packet; Packet 03 owns that integration and the two-connection fence race test.
 - Commit:
   - `not committed` (handoff recorded immediately before creating the single Packet 02 task commit; final hash is reported to the controller).
+
+## Corrective handoff after independent re-review
+
+- Status: done (corrective fixes applied; no scope expansion).
+- Findings addressed:
+  - Exact Memory removal now propagates `False`; projection tasks retry/fail
+    without completion or legacy-ledger cleanup when the runtime does not
+    support exact deletion. The real `MemoryManager`/`SemanticMemory` behavior
+    is covered by regression tests.
+  - Note create idempotency is checked from a stable client payload digest
+    before QA source resolution, including replay after source deletion.
+  - Projection task lookup requires the owning `user_id`; cross-user reads
+    return not-found. Runtime acquisition failures are routed through durable
+    retry/failure handling and never release an unacquired runtime.
+  - Migration excludes stable `note:{user_id}:{note_id}` projection IDs from
+    the legacy-memory scan.
+- Verification:
+  - Packet suite: `37 passed in 46.17s`.
+  - QA regressions: `20 passed in 14.68s`.
+  - `git diff --check`: PASS.
+- Commit:
+  - Corrective changes are committed as a new commit immediately after
+    `f20f2040b46472918a746167c88b635adb65a854`; final hash is reported to the
+    controller.

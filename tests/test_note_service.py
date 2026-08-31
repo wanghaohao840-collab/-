@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 
 from app.database import connect, initialize_database
-from app.note_models import NoteFilters, NoteNotFoundError, NoteSourceSelector
+from app.note_models import (
+    NoteFilters,
+    NoteIdempotencyConflict,
+    NoteNotFoundError,
+    NoteSourceSelector,
+)
 from app.note_repository import NoteRepository
 from app.note_service import NoteService
 from app.qa_repository import QaRepository
@@ -83,6 +88,28 @@ def test_answer_source_and_cross_user_source_resolution(service) -> None:
         facade.create(
             session(), body_markdown="private", concept=None, tags=(), client_request_id="cross",
             source=NoteSourceSelector(kind="qa_citation", qa_message_id="message-bob", citation_id="citation-bob"),
+        )
+
+
+def test_create_replay_checks_idempotency_before_deleted_qa_lookup(service) -> None:
+    facade, _, _ = service
+    selector = NoteSourceSelector(kind="qa_answer", qa_message_id="message-alice")
+    first = facade.create(
+        session(), body_markdown="answer note", concept="RAG", tags=("qa",),
+        client_request_id="deleted-source-replay", source=selector,
+    )
+    with connect(facade.repository.db_path) as conn:
+        conn.execute("delete from qa_messages where id='message-alice' and user_id='alice'")
+
+    replay = facade.create(
+        session(), body_markdown="answer note", concept="RAG", tags=("qa",),
+        client_request_id="deleted-source-replay", source=selector,
+    )
+    assert replay == first
+    with pytest.raises(NoteIdempotencyConflict):
+        facade.create(
+            session(), body_markdown="different", concept="RAG", tags=("qa",),
+            client_request_id="deleted-source-replay", source=selector,
         )
 
 

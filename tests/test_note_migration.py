@@ -64,6 +64,7 @@ def test_migration_matches_exact_legacy_memory_but_leaves_unmatched(tmp_path: Pa
     memories = {
         "legacy-exact": SimpleNamespace(content="wrapped body", metadata={"knowledge_type": "learning_note", "concept": "c", "session_id": "s"}),
         "legacy-other": SimpleNamespace(content="other", metadata={"knowledge_type": "learning_note", "concept": "c", "session_id": "s"}),
+        "note:alice:already-projected": SimpleNamespace(content="body", metadata={"knowledge_type": "learning_note", "note_id": "already-projected"}),
     }
     runtime = SimpleNamespace(
         user_id="alice", lock=__import__("threading").RLock(),

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import hashlib
+import json
 from typing import Any
 
 from app.note_migration import NoteMigrationService
@@ -13,6 +15,7 @@ from app.note_models import (
     NoteSourceNotFoundError,
     NoteSourceSelector,
     NoteValidationError,
+    validate_note_input,
 )
 from app.note_projection import NoteProjectionWorker
 from app.note_repository import NoteRepository
@@ -57,21 +60,32 @@ class NoteService:
         source: NoteSourceSelector | None = None,
     ) -> Note:
         self.migration.ensure_user_migrated(session.user_id)
+        body, normalized_concept, normalized_tags = validate_note_input(
+            body_markdown, concept, tags
+        )
+        request_digest = _service_request_digest(
+            body, normalized_concept, normalized_tags, source
+        )
         lock = getattr(getattr(session, "runtime", None), "lock", None)
         with lock if lock is not None else nullcontext():
-            sources = (
-                (self._resolve_source(session.user_id, source),)
-                if source is not None
-                else ()
+            note = self.repository.get_by_client_request_id(
+                session.user_id, client_request_id, request_digest
             )
-            note = self.repository.create(
-                session.user_id,
-                body_markdown,
-                concept,
-                tags,
-                client_request_id,
-                sources=sources,
-            )
+            if note is None:
+                sources = (
+                    (self._resolve_source(session.user_id, source),)
+                    if source is not None
+                    else ()
+                )
+                note = self.repository.create(
+                    session.user_id,
+                    body,
+                    normalized_concept,
+                    normalized_tags,
+                    client_request_id,
+                    sources=sources,
+                    request_digest=request_digest,
+                )
         self._notify_best_effort()
         return note
 
@@ -311,3 +325,29 @@ class NoteService:
             # SQLite + outbox commit is the reliability boundary.  A missed
             # wakeup is recovered by polling/restart and must not fail a save.
             return
+
+
+def _service_request_digest(
+    body: str,
+    concept: str | None,
+    tags: tuple[str, ...],
+    source: NoteSourceSelector | None,
+) -> str:
+    """Fingerprint the client payload without dereferencing a QA source."""
+
+    payload = {
+        "body_markdown": body,
+        "concept": concept,
+        "tags": list(tags),
+        "source": (
+            {
+                "kind": source.kind,
+                "qa_message_id": source.qa_message_id,
+                "citation_id": source.citation_id,
+            }
+            if source is not None
+            else None
+        ),
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
