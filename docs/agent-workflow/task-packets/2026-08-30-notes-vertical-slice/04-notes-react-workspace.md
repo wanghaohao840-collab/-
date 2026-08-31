@@ -214,4 +214,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
 - Residual risks:
   - The workspace does not alter the shared QA components; QA-to-Notes navigation remains Packet 05 scope.
 - Commit:
-  - Corrective commit pending after handoff metadata update.
+  - `4643ee0` — corrective implementation, tests and handoff update.
