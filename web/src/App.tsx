@@ -6,6 +6,7 @@ import { navigationItems } from "./layout/navigation";
 import { LoginPage } from "./pages/LoginPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
 import { MigrationPage } from "./pages/MigrationPage";
+import { NotesPage } from "./pages/NotesPage";
 import { QaPage } from "./pages/QaPage";
 import { RegisterPage } from "./pages/RegisterPage";
 
@@ -23,6 +24,7 @@ export function App() {
               element={
                 item.path === "/documents" ? <DocumentsPage /> :
                 item.path === "/qa" ? <QaPage /> : (
+                  item.path === "/notes" ? <NotesPage /> :
                   <MigrationPage heading={item.heading} />
                 )
               }
