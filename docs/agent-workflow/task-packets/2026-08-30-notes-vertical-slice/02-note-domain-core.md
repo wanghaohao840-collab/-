@@ -238,6 +238,8 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - `bfdbccd` — projection/replay semantics and initial conflict resolution.
   - `213a447` — exact semantic deletion seam.
   - `431f714` — ownership-scoped deletion and projection convergence.
+  - `fde935d` — preserve retryability when projection lease loss rejects
+    failure handling.
 - Corrective files delivered in this amended boundary:
   - `app/note_projection.py`
   - `hello_agents/memory/manager.py`
