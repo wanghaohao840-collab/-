@@ -261,6 +261,94 @@ create table if not exists qa_legacy_imports (
     completed_at text not null
 );
 
+create table if not exists notes (
+    id text primary key,
+    user_id text not null references users(id) on delete cascade,
+    body_markdown text not null check(length(body_markdown) between 1 and 20000),
+    concept text check(concept is null or length(concept) <= 120),
+    version integer not null default 1 check(version > 0),
+    projection_state text not null default 'pending'
+        check(projection_state in ('pending','ready','failed')),
+    client_request_id text not null,
+    request_digest text not null,
+    created_at text not null,
+    updated_at text not null,
+    deleted_at text,
+    unique(user_id, id),
+    unique(user_id, client_request_id)
+);
+create index if not exists ix_notes_user_current
+on notes(user_id, deleted_at, updated_at desc, id desc);
+
+create table if not exists note_tags (
+    user_id text not null,
+    note_id text not null,
+    normalized_tag text not null,
+    display_tag text not null check(length(display_tag) between 1 and 32),
+    primary key(user_id, note_id, normalized_tag),
+    foreign key(note_id, user_id) references notes(id, user_id) on delete cascade
+);
+create index if not exists ix_note_tags_lookup
+on note_tags(user_id, normalized_tag, note_id);
+
+create table if not exists note_sources (
+    id text primary key,
+    user_id text not null,
+    note_id text not null,
+    source_kind text not null check(source_kind in ('qa_message','qa_citation')),
+    qa_thread_id text,
+    qa_message_id text,
+    citation_id text,
+    document_id text,
+    locator_json text,
+    title_snapshot text,
+    excerpt_snapshot text,
+    source_deleted_at text,
+    created_at text not null,
+    foreign key(note_id, user_id) references notes(id, user_id) on delete cascade
+);
+create index if not exists ix_note_sources_note
+on note_sources(user_id, note_id, created_at, id);
+create index if not exists ix_note_sources_document
+on note_sources(user_id, document_id) where source_deleted_at is null;
+create index if not exists ix_note_sources_thread
+on note_sources(user_id, qa_thread_id) where source_deleted_at is null;
+
+create table if not exists note_projection_tasks (
+    id text primary key,
+    user_id text not null,
+    note_id text not null,
+    note_version integer not null check(note_version > 0),
+    operation text not null check(operation in ('upsert','delete')),
+    status text not null check(status in ('queued','running','failed','completed')),
+    attempt_count integer not null default 0 check(attempt_count >= 0),
+    available_at text not null,
+    lease_owner text,
+    lease_expires_at text,
+    last_error_code text,
+    created_at text not null,
+    finished_at text,
+    unique(user_id, note_id, note_version, operation),
+    foreign key(note_id, user_id) references notes(id, user_id) on delete cascade
+);
+create index if not exists ix_note_projection_scheduler
+on note_projection_tasks(status, available_at, lease_expires_at, created_at, id);
+create index if not exists ix_note_projection_note
+on note_projection_tasks(user_id, note_id, note_version);
+
+create table if not exists note_legacy_imports (
+    user_id text not null,
+    legacy_import_key text not null,
+    note_id text not null,
+    source_digest text not null,
+    legacy_memory_id text,
+    imported_at text not null,
+    legacy_memory_cleaned_at text,
+    primary key(user_id, legacy_import_key),
+    unique(user_id, note_id),
+    foreign key(note_id, user_id) references notes(id, user_id) on delete cascade
+);
+
 create table if not exists data_migrations (
     id integer primary key autoincrement,
     migration_key text not null unique,
@@ -289,10 +377,27 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
 def initialize_database(db_path: Path | str) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+        _verify_fts5(conn)
         _upgrade_import_tasks_for_cancellation(conn)
         # F1: idempotent upgrade for existing databases missing
         # the conflict_summary column.
         _ensure_column(conn, "data_migrations", "conflict_summary", "text")
+
+
+def _verify_fts5(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute(
+            """
+            create virtual table if not exists notes_fts using fts5(
+                note_id unindexed, user_id unindexed, body_markdown, concept, tags_text
+            )
+            """
+        )
+        conn.execute("select rowid from notes_fts limit 1").fetchall()
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "SQLite FTS5 support is required for learning notes"
+        ) from exc
 
 
 def _upgrade_import_tasks_for_cancellation(conn: sqlite3.Connection) -> None:
