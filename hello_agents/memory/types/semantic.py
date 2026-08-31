@@ -119,6 +119,54 @@ class SemanticMemory(BaseMemory):
 
         return memory_item.id
 
+    def remove(self, memory_id: str) -> bool:
+        """Remove one exact semantic memory from cache and vector storage."""
+
+        if not memory_id:
+            return False
+
+        memory_id = str(memory_id)
+        cached = memory_id in self.memories
+
+        # VectorStore exposes logical IDs through scroll for both the in-memory
+        # and Qdrant adapters.  Qdrant's physical point ID is intentionally not
+        # used here because it is a UUID derived from the logical memory ID.
+        try:
+            vector_exists = any(
+                str(point.id) == memory_id
+                for point in self.vector_store.scroll(self.vector_collection)
+            )
+        except Exception as error:
+            logger.warning(
+                "Unable to inspect semantic memory %s before removal: %s",
+                memory_id,
+                type(error).__name__,
+            )
+            return False
+
+        if not cached and not vector_exists:
+            return False
+
+        if vector_exists:
+            try:
+                removed = self.vector_store.delete_by_filter(
+                    self.vector_collection,
+                    {"_id": [memory_id]},
+                )
+            except Exception as error:
+                logger.warning(
+                    "Unable to remove semantic vector %s: %s",
+                    memory_id,
+                    type(error).__name__,
+                )
+                return False
+
+            if removed != 1:
+                return False
+
+        self.memories.pop(memory_id, None)
+        return True
+
     def retrieve(self, query: str, limit: int = 5, **kwargs) -> List[MemoryItem]:
         """检索语义记忆"""
 

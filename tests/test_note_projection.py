@@ -12,7 +12,7 @@ from app.note_projection import (
     NoteProjectionWorker,
 )
 from app.note_repository import NoteRepository
-from hello_agents.memory.base import MemoryConfig, MemoryItem
+from hello_agents.memory.base import MemoryConfig
 from hello_agents.memory.manager import MemoryManager
 
 
@@ -127,9 +127,7 @@ def test_false_legacy_remove_retries_without_marking_ledger_cleaned(tmp_path: Pa
         assert conn.execute("select legacy_memory_cleaned_at from note_legacy_imports").fetchone()[0] is None
 
 
-def test_default_projection_reports_actual_semantic_remove_unsupported(tmp_path: Path) -> None:
-    # The repository's real SemanticMemory currently has no remove() method;
-    # MemoryManager therefore returns False instead of pretending deletion.
+def test_default_projection_removes_stable_semantic_memory(tmp_path: Path) -> None:
     manager = MemoryManager(
         config=MemoryConfig(qdrant_collection=f"note-projection-{uuid4()}"),
         user_id="alice",
@@ -138,16 +136,19 @@ def test_default_projection_reports_actual_semantic_remove_unsupported(tmp_path:
         enable_semantic=True,
     )
     memory_id = "note:alice:stable"
-    manager.memory_types["semantic"].memories[memory_id] = MemoryItem(
-        content="still present", memory_type="semantic", id=memory_id
+    manager.add_memory(
+        "still present",
+        memory_type="semantic",
+        metadata={"knowledge_type": "learning_note"},
+        memory_id=memory_id,
     )
     runtime = SimpleNamespace(
         user_id="alice",
         memory_tool=SimpleNamespace(memory_manager=manager),
     )
 
-    assert DefaultNoteMemoryProjection().remove(runtime, "stable") is False
-    assert memory_id in manager.memory_types["semantic"].memories
+    assert DefaultNoteMemoryProjection().remove(runtime, "stable") is True
+    assert memory_id not in manager.memory_types["semantic"].memories
     manager.close()
 
 

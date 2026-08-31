@@ -60,11 +60,13 @@ owner: "codex-notes-packet-02"
 - Create: `app/note_migration.py`
 - Create: `app/note_projection.py`
 - Create: `app/note_service.py`
+- Modify: `hello_agents/memory/types/semantic.py`
 - Create: `tests/test_note_models.py`
 - Create: `tests/test_note_repository.py`
 - Create: `tests/test_note_migration.py`
 - Create: `tests/test_note_projection.py`
 - Create: `tests/test_note_service.py`
+- Modify: `tests/memory/test_semantic_vector_store_protocol.py`
 
 ### Allowed behavior changes
 
@@ -137,6 +139,13 @@ Expected: all selected tests PASS; diff check silent.
 
 Use the standard reality-conflict report and stop if an existing schema/source shape differs, stable Memory IDs are unsupported, a prerequisite requires editing a forbidden file, FTS5 is unavailable, or concurrent packet changes overlap this boundary.
 
+## Reality-conflict resolution: exact semantic deletion
+
+- Observed after commit `bfdbccd`: `MemoryManager.remove_memory()` correctly delegates to a module-level exact `remove()`, but the real `SemanticMemory` module does not implement that method. Delete and legacy-cleanup tasks therefore fail truthfully yet cannot converge.
+- Impact: leaving the worker in durable retry is safer than false completion, but it does not satisfy the approved exact-delete and cleanup invariants.
+- Resolution: extend this packet boundary narrowly to `hello_agents/memory/types/semantic.py` and `tests/memory/test_semantic_vector_store_protocol.py`. Implement exact-ID removal from both the semantic cache and vector store, preserve other users/points, and return a truthful boolean. Do not add broad metadata deletion or change other Memory APIs.
+- Acceptance evidence: a real `SemanticMemory` + `MemoryManager.remove_memory()` integration test must prove stable note deletion and exact legacy cleanup can converge; Packet 02 projection tests must no longer document permanent unsupported deletion as expected behavior.
+
 ## Implementation handoff
 
 - Status: done
@@ -179,14 +188,18 @@ Use the standard reality-conflict report and stop if an existing schema/source s
 - Commit:
   - `not committed` (handoff recorded immediately before creating the single Packet 02 task commit; final hash is reported to the controller).
 
-## Corrective handoff after independent re-review
+## Corrective handoff after exact semantic-deletion reality conflict
 
 - Status: done (corrective fixes applied; no scope expansion).
 - Findings addressed:
-  - Exact Memory removal now propagates `False`; projection tasks retry/fail
-    without completion or legacy-ledger cleanup when the runtime does not
-    support exact deletion. The real `MemoryManager`/`SemanticMemory` behavior
-    is covered by regression tests.
+  - `SemanticMemory.remove(memory_id)` now preflights the logical vector ID,
+    deletes only that exact point with the VectorStore `_id` filter, and evicts
+    the cache only after successful backend deletion. Missing IDs return
+    `False`; backend failures remain retryable and truthful.
+  - A real `MemoryManager` + `SemanticMemory` integration test proves stable
+    Note deletion and exact legacy cleanup converge while another user's point
+    survives. Projection regression coverage no longer treats semantic removal
+    as permanently unsupported.
   - Note create idempotency is checked from a stable client payload digest
     before QA source resolution, including replay after source deletion.
   - Projection task lookup requires the owning `user_id`; cross-user reads
@@ -195,10 +208,11 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - Migration excludes stable `note:{user_id}:{note_id}` projection IDs from
     the legacy-memory scan.
 - Verification:
-  - Packet suite: `37 passed in 46.17s`.
-  - QA regressions: `20 passed in 14.68s`.
+  - Packet suite: `37 passed in 43.41s`.
+  - Semantic/vector and related memory tests: `19 passed in 0.99s`.
+  - QA regressions: `20 passed in 14.37s`.
   - `git diff --check`: PASS.
 - Commit:
-  - Corrective changes are committed as a new commit immediately after
-    `f20f2040b46472918a746167c88b635adb65a854`; final hash is reported to the
+  - Corrective changes are committed as a new commit after
+    `bfdbccd418adb4f204e780f58d4c6ef859b791d0`; final hash is reported to the
     controller.
