@@ -14,6 +14,7 @@ from app.note_projection import (
 from app.note_repository import NoteRepository
 from hello_agents.memory.base import MemoryConfig
 from hello_agents.memory.manager import MemoryManager
+from hello_agents.memory.storage.vector_store import InMemoryVectorStore
 
 
 class RuntimeRegistry:
@@ -265,3 +266,54 @@ def test_successful_delete_replays_after_completion_lease_loss(tmp_path: Path) -
     assert worker.run_once() is True
     assert tasks.list_for_note("alice", note.id)[-1].status == "completed"
     assert [call[0] for call in manager.calls].count("remove") == 2
+
+
+def test_projection_does_not_mark_cross_user_legacy_vector_cleaned(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db, notes, tasks = setup_domain(tmp_path)
+    tasks.max_attempts = 1
+    note = notes.create("alice", "body", None, (), "r")
+    with connect(db) as conn:
+        conn.execute(
+            "insert into note_legacy_imports (user_id, legacy_import_key, note_id, source_digest, legacy_memory_id, imported_at) values ('alice','k',?,'d','note:bob:legacy','t')",
+            (note.id,),
+        )
+
+    store = InMemoryVectorStore()
+    monkeypatch.setattr(
+        "hello_agents.memory.storage.qdrant_store.QdrantConnectionManager.get_instance",
+        lambda **_: store,
+    )
+    manager = MemoryManager(
+        config=MemoryConfig(qdrant_collection="projection-cross-user"),
+        user_id="alice",
+        enable_working=False,
+        enable_episodic=False,
+        enable_semantic=True,
+    )
+    manager.add_memory(
+        "bob legacy",
+        memory_type="semantic",
+        metadata={"user_id": "bob"},
+        memory_id="note:bob:legacy",
+    )
+    runtime = SimpleNamespace(
+        user_id="alice", lock=RLock(),
+        memory_tool=SimpleNamespace(memory_manager=manager),
+    )
+    worker = NoteProjectionWorker(
+        tasks, notes, RuntimeRegistry(runtime), DefaultNoteMemoryProjection(),
+        worker_id="cross-user",
+    )
+
+    assert worker.run_once() is True
+    assert tasks.list_for_note("alice", note.id)[0].status == "failed"
+    with connect(db) as conn:
+        assert conn.execute(
+            "select legacy_memory_cleaned_at from note_legacy_imports"
+        ).fetchone()[0] is None
+    assert store.count(
+        "projection-cross-user", {"_id": ["note:bob:legacy"]}
+    ) == 1
+    manager.close()
