@@ -52,4 +52,43 @@ describe("NotesPage", () => {
     window.confirm = originalConfirm;
     window.history.replaceState({}, "", originalUrl);
   });
+
+  it("guards dirty fresh drafts across filters and the QA empty-state CTA", async () => {
+    const user = userEvent.setup();
+    const originalConfirm = window.confirm;
+    const originalUrl = window.location.href;
+    window.history.replaceState({ idx: 20 }, "", "/notes?note=new");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><BrowserRouter><NotesPage /></BrowserRouter></QueryClientProvider>);
+    const body = await screen.findByLabelText("笔记正文");
+    await user.type(body, "draft");
+    const search = screen.getByLabelText("搜索笔记");
+    await user.type(search, "memory");
+    await user.keyboard("{Enter}");
+    expect(window.location.search).toContain("note=new");
+    expect(body).toHaveValue("draft");
+    confirm.mockReturnValue(true);
+    await user.keyboard("{Enter}");
+    expect(window.location.pathname).toBe("/notes");
+    expect(window.location.search).not.toContain("note=");
+
+    const newButton = screen.getAllByRole("button", { name: "新建笔记" })[0];
+    await user.click(newButton);
+    const newBody = await screen.findByLabelText("笔记正文");
+    await user.type(newBody, "draft again");
+    const qaCta = screen.getByRole("button", { name: "从 QA 记录" });
+    confirm.mockReturnValue(false);
+    await user.click(qaCta);
+    expect(window.location.pathname).toBe("/notes");
+    expect(window.location.search).toContain("note=new");
+    expect(newBody).toHaveValue("draft again");
+    confirm.mockReturnValue(true);
+    await user.click(qaCta);
+    expect(window.location.pathname).toBe("/qa");
+    expect(window.location.search).not.toContain("note=");
+    confirm.mockRestore();
+    window.confirm = originalConfirm;
+    window.history.replaceState({}, "", originalUrl);
+  });
 });

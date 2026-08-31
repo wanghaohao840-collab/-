@@ -10,7 +10,7 @@ import "./notes-workspace.css";
 export type NoteSaveInput = { body_markdown: string; concept: string | null; tags: string[]; expected_version?: number; client_request_id?: string };
 type Props = {
   items: NoteListItem[]; selectedNote?: Note; selectedId?: string; selectedLoading?: boolean; selectedError?: unknown; hasMore?: boolean; loadingMore?: boolean; saving?: boolean; actionError?: unknown;
-  onSelect: (id: string) => void; onSave: (input: NoteSaveInput) => Promise<Note | undefined> | Note | undefined; onCreate: () => void; onDelete: () => void; onClear: () => Promise<unknown> | unknown; onRetryProjection: () => Promise<unknown> | unknown; onLoadMore?: () => void; onReload?: () => Promise<Note | undefined> | Note | undefined; onBack?: () => void; clearing?: boolean; onOpenQa?: () => void;
+  onSelect: (id: string) => boolean | void; onSave: (input: NoteSaveInput) => Promise<Note | undefined> | Note | undefined; onCreate: () => boolean | void; onDelete: () => void; onClear: () => Promise<unknown> | unknown; onRetryProjection: () => Promise<unknown> | unknown; onLoadMore?: () => void; onReload?: () => Promise<Note | undefined> | Note | undefined; onBack?: () => boolean | void; clearing?: boolean; onOpenQa?: () => boolean | void;
   queryValue?: string; tagsValue?: string; sourceValue?: string; onFilterChange?: (key: "query" | "tags" | "source_kind", value: string) => void; onDirtyChange?: (dirty: boolean) => void;
 };
 
@@ -56,7 +56,7 @@ export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoadin
     try { overlayReturn.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; const saved = await onSave({ body_markdown: draft.body_markdown, concept: draft.concept.trim() || null, tags: draft.tags, ...(selectedNote ? { expected_version: baseVersion } : { client_request_id: crypto.randomUUID() }) }); if (saved) { const next = { body_markdown: saved.body_markdown, concept: saved.concept ?? "", tags: saved.tags }; setDraft(next); baseline.current = next; setBaseVersion(saved.version); setHydratedId(saved.id); } }
     catch (error) { if (error instanceof ApiError && error.code === "NOTE_VERSION_CONFLICT") setConflictOpen(true); else setSaveError(message(error, "保存失败，请重试")); }
   }
-  function select(id: string) { if (dirty && !window.confirm("当前笔记有未保存更改，确定离开吗？")) return; setListView(false); onSelect(id); }
+  function select(id: string) { if (onSelect(id) !== false) setListView(false); }
   const sources = selectedNote?.sources ?? [];
   const detailUnavailable = Boolean(selectedId && selectedId !== "new" && selectedError && hydratedId === selectedId);
   const detailWaiting = Boolean(selectedId && selectedId !== "new" && selectedLoading && hydratedId !== selectedId);
@@ -67,7 +67,7 @@ export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoadin
     {detailWaiting ? <p className="notes-loading" role="status">正在加载笔记详情…</p> : null}
     {detailUnavailable ? <p className="notes-error" role="alert">服务端笔记已删除或不可用，本地草稿仍保留。<button type="button" onClick={copyDraft}>复制本地草稿</button>{copyFeedback ? <span>{copyFeedback}</span> : null}</p> : null}
     {actionError ? <p className="notes-error" role="alert">{message(actionError, "笔记操作失败，请重试")}</p> : null}
-    <div className="notes-grid"><NoteList items={items} selectedId={selectedId} hasMore={hasMore} loadingMore={loadingMore} onSelect={select} onLoadMore={onLoadMore} onOpenQa={onOpenQa} onCreate={() => { if (!dirty || window.confirm("当前笔记有未保存更改，确定新建吗？")) { setListView(false); onCreate(); } }} />
+    <div className="notes-grid"><NoteList items={items} selectedId={selectedId} hasMore={hasMore} loadingMore={loadingMore} onSelect={select} onLoadMore={onLoadMore} onOpenQa={() => onOpenQa()} onCreate={() => { if (onCreate() !== false) setListView(false); }} />
       {activeId === "new" || hydratedId === activeId || detailUnavailable ? <NoteEditor draft={draft} dirty={dirty} saving={saving} disabled={detailUnavailable} error={saveError} onChange={setDraft} onSave={save} onDelete={selectedNote ? (trigger) => { overlayReturn.current = trigger; setDeleteOpen(true); } : undefined} /> : <section className="notes-welcome"><h2>选择一篇笔记</h2><p>从列表中打开笔记，或创建一篇新的学习笔记。</p></section>}
       <NoteSourcePanel sources={sources} />
     </div>
@@ -78,6 +78,6 @@ export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoadin
     {clearOpen ? <NoteClearDialog pending={clearing} returnFocusTo={clearTrigger.current} onClose={() => setClearOpen(false)} onConfirm={async () => { try { await onClear(); setClearOpen(false); } catch { /* error remains in the page and the dialog stays recoverable */ } }} /> : null}
     {deleteOpen ? <NotesOverlay label="删除笔记" returnFocusTo={overlayReturn.current} onClose={() => !saving && setDeleteOpen(false)}><h2>删除笔记</h2><p>确认删除这篇笔记？此操作不可撤销。</p><div className="notes-dialog__actions"><button type="button" disabled={saving} onClick={() => setDeleteOpen(false)}>取消</button><button type="button" disabled={saving} onClick={() => { setDeleteOpen(false); onDelete(); }}>确认删除</button></div></NotesOverlay> : null}
     {conflictOpen ? <NotesOverlay label="笔记已在其他窗口更新" returnFocusTo={overlayReturn.current} onClose={() => setConflictOpen(false)}><h2>笔记已在其他窗口更新</h2><p>本地草稿未被覆盖。请选择如何继续。</p>{copyFeedback ? <p role="status">{copyFeedback}</p> : null}<div className="notes-dialog__actions"><button type="button" onClick={copyDraft}>复制本地草稿</button><button type="button" onClick={() => void reloadConflict().catch((error) => setSaveError(message(error, "重新加载失败，请重试")))}>重新加载服务端版本</button><button type="button" onClick={() => setConflictOpen(false)}>取消并继续查看本地草稿</button></div></NotesOverlay> : null}
-    {selectedId && onBack ? <button type="button" className="notes-mobile-back" onClick={() => { if (!dirty || window.confirm("当前笔记有未保存更改，确定返回吗？")) onBack(); }}>返回笔记列表</button> : null}
+    {selectedId && onBack ? <button type="button" className="notes-mobile-back" onClick={onBack}>返回笔记列表</button> : null}
   </article>;
 }

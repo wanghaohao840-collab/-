@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { Button } from "../components/Button/Button";
@@ -46,6 +46,7 @@ export function NotesPage() {
   const notes = useNotesQuery(filters, enabled);
   const selected = useNoteQuery(selectedId && selectedId !== "new" ? selectedId : undefined, enabled);
   const mutations = useNoteMutations();
+  const confirmDiscardIfDirty = useCallback(() => { if (!dirty) return true; if (!window.confirm("当前笔记有未保存更改，确定离开吗？")) return false; setDirty(false); return true; }, [dirty]);
 
   useEffect(() => { setQueryInput(params.get("query") ?? ""); setTagInput(params.get("tags") ?? ""); }, [params]);
   useEffect(() => {
@@ -58,27 +59,27 @@ export function NotesPage() {
     }
     if (next.toString() !== params.toString()) setParams(next, { replace: true });
   }, [params, prefillSourceKind, setParams]);
-  useEffect(() => { const onClick = (event: MouseEvent) => { if (!dirty || event.defaultPrevented) return; const target = event.target as HTMLElement | null; const link = target?.closest<HTMLAnchorElement>("a[href]"); if (!link || link.target === "_blank" || link.origin !== window.location.origin) return; const nextPath = `${link.pathname}${link.search}${link.hash}`; const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`; if (nextPath === currentPath) return; if (!window.confirm("当前笔记有未保存更改，确定离开吗？")) { event.preventDefault(); event.stopPropagation(); } else setDirty(false); }; document.addEventListener("click", onClick, true); return () => document.removeEventListener("click", onClick, true); }, [dirty]);
+  useEffect(() => { const onClick = (event: MouseEvent) => { if (!dirty || event.defaultPrevented) return; const target = event.target as HTMLElement | null; const link = target?.closest<HTMLAnchorElement>("a[href]"); if (!link || link.target === "_blank" || link.origin !== window.location.origin) return; const nextPath = `${link.pathname}${link.search}${link.hash}`; const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`; if (nextPath === currentPath) return; if (!confirmDiscardIfDirty()) { event.preventDefault(); event.stopPropagation(); } }; document.addEventListener("click", onClick, true); return () => document.removeEventListener("click", onClick, true); }, [confirmDiscardIfDirty, dirty]);
   const popstateRestoring = useRef(false);
-  useEffect(() => { if (!dirty) return; const previousIndex = window.history.state?.idx; const onPopState = () => { if (popstateRestoring.current) { popstateRestoring.current = false; return; } if (window.confirm("当前笔记有未保存更改，确定离开吗？")) { setDirty(false); return; } const currentIndex = window.history.state?.idx; const delta = historyRestoreDelta(previousIndex, currentIndex); popstateRestoring.current = true; if (delta) window.history.go(delta); else window.history.forward(); }; window.addEventListener("popstate", onPopState); return () => window.removeEventListener("popstate", onPopState); }, [dirty]);
+  useEffect(() => { if (!dirty) return; const previousIndex = window.history.state?.idx; const onPopState = () => { if (popstateRestoring.current) { popstateRestoring.current = false; return; } if (confirmDiscardIfDirty()) return; const currentIndex = window.history.state?.idx; const delta = historyRestoreDelta(previousIndex, currentIndex); popstateRestoring.current = true; if (delta) window.history.go(delta); else window.history.forward(); }; window.addEventListener("popstate", onPopState); return () => window.removeEventListener("popstate", onPopState); }, [confirmDiscardIfDirty, dirty]);
 
   function updateFilter(key: "query" | "tags" | "source_kind", value: string) {
-    const next = new URLSearchParams(params); if (value) next.set(key, value); else next.delete(key); if (key === "source_kind") { next.delete("qa_message_id"); next.delete("citation_id"); } next.delete("note"); setParams(next);
+    if (!confirmDiscardIfDirty()) { setQueryInput(params.get("query") ?? ""); setTagInput(params.get("tags") ?? ""); return false; }
+    const next = new URLSearchParams(params); if (value) next.set(key, value); else next.delete(key); if (key === "source_kind") { next.delete("qa_message_id"); next.delete("citation_id"); } next.delete("note"); setParams(next); return true;
   }
   function filterChange(key: "query" | "tags" | "source_kind", value: string) {
-    if (key === "query") setQueryInput(value);
-    if (key === "tags") setTagInput(value);
-    updateFilter(key, value);
+    if (updateFilter(key, value)) { if (key === "query") setQueryInput(value); if (key === "tags") setTagInput(value); }
   }
-  function select(id: string) { const next = new URLSearchParams(params); next.set("note", id); setParams(next); }
-  function create() { const next = new URLSearchParams(params); next.set("note", "new"); setParams(next); }
+  function select(id: string) { if (!confirmDiscardIfDirty()) return false; const next = new URLSearchParams(params); next.set("note", id); setParams(next); return true; }
+  function create() { if (!confirmDiscardIfDirty()) return false; const next = new URLSearchParams(params); next.set("note", "new"); setParams(next); return true; }
   function save(input: NoteSaveInput) {
     if (selectedId && selectedId !== "new" && selected.data) return mutations.update.mutateAsync({ id: selectedId, input: { body_markdown: input.body_markdown, concept: input.concept, tags: input.tags, expected_version: input.expected_version ?? selected.data.version } });
     return mutations.create.mutateAsync({ body_markdown: input.body_markdown, concept: input.concept, tags: input.tags, client_request_id: input.client_request_id ?? crypto.randomUUID(), source: prefillSource }).then((note) => { select(note.id); return note; });
   }
   function remove() { if (selectedId && selected.data) void mutations.remove.mutateAsync({ id: selectedId, input: { expected_version: selected.data.version } }).then(() => { const next = new URLSearchParams(params); next.delete("note"); setParams(next); }).catch(() => undefined); }
   function clear() { return mutations.clear.mutateAsync().then((result) => { const next = new URLSearchParams(params); next.delete("note"); setParams(next); return result; }); }
-  function back() { const next = new URLSearchParams(params); next.delete("note"); setParams(next); }
+  function back() { if (!confirmDiscardIfDirty()) return false; const next = new URLSearchParams(params); next.delete("note"); setParams(next); return true; }
+  function openQa() { if (!confirmDiscardIfDirty()) return false; navigate("/qa"); return true; }
 
   if (capabilities.isPending) return <div className="notes-state" role="status">正在加载笔记…</div>;
   if (capabilities.error) return <section className="notes-state" role="alert"><h1>学习笔记</h1><p>{safeError(capabilities.error, "笔记状态加载失败")}</p></section>;
@@ -86,6 +87,6 @@ export function NotesPage() {
   if (notes.error && !notes.data) return <section className="notes-state" role="alert"><p>{safeError(notes.error, "笔记加载失败")}</p><Button hierarchy="secondary" onClick={() => void notes.refetch()}>重新加载</Button></section>;
   return <article className="notes-page">
     <div className="notes-filters" aria-label="笔记筛选"><label>搜索笔记<input aria-label="搜索笔记" value={queryInput} onChange={(event) => setQueryInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") updateFilter("query", queryInput.trim()); }} placeholder="搜索正文或概念" /></label><label>标签<input aria-label="按标签筛选" value={tagInput} onChange={(event) => setTagInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") updateFilter("tags", tagInput.trim()); }} placeholder="多个标签用逗号分隔" /></label><label>来源<select aria-label="按来源筛选" value={filters.source_kind ?? ""} onChange={(event) => updateFilter("source_kind", event.target.value)}><option value="">全部来源</option><option value="qa_message">问答回答</option><option value="qa_citation">问答引用</option></select></label></div>
-    <NotesWorkspace items={notes.items as NoteListItem[]} selectedId={selectedId} selectedNote={selected.data} selectedLoading={selected.isPending} selectedError={selected.error} hasMore={Boolean(notes.hasNextPage)} loadingMore={notes.isFetchingNextPage} saving={mutations.create.isPending || mutations.update.isPending} clearing={mutations.clear.isPending} actionError={mutations.remove.error ?? mutations.clear.error ?? mutations.retryProjection.error} onSelect={select} onSave={save} onCreate={create} onDelete={remove} onClear={clear} onRetryProjection={() => mutations.retryProjection.mutateAsync()} onLoadMore={() => void notes.fetchNextPage()} onReload={async () => (await selected.refetch()).data} onBack={back} onDirtyChange={setDirty} onOpenQa={() => navigate("/qa")} queryValue={queryInput} tagsValue={tagInput} sourceValue={listSourceKind} onFilterChange={filterChange} />
+    <NotesWorkspace items={notes.items as NoteListItem[]} selectedId={selectedId} selectedNote={selected.data} selectedLoading={selected.isPending} selectedError={selected.error} hasMore={Boolean(notes.hasNextPage)} loadingMore={notes.isFetchingNextPage} saving={mutations.create.isPending || mutations.update.isPending} clearing={mutations.clear.isPending} actionError={mutations.remove.error ?? mutations.clear.error ?? mutations.retryProjection.error} onSelect={select} onSave={save} onCreate={create} onDelete={remove} onClear={clear} onRetryProjection={() => mutations.retryProjection.mutateAsync()} onLoadMore={() => void notes.fetchNextPage()} onReload={async () => (await selected.refetch()).data} onBack={back} onDirtyChange={setDirty} onOpenQa={openQa} queryValue={queryInput} tagsValue={tagInput} sourceValue={listSourceKind} onFilterChange={filterChange} />
   </article>;
 }
