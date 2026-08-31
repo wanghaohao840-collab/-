@@ -1,10 +1,10 @@
 import { useEffect, useRef } from "react";
 import { Button } from "../Button/Button";
 
-export function NoteClearDialog({ pending, onClose, onConfirm }: { pending: boolean; onClose: () => void; onConfirm: () => void }) {
+export function NoteClearDialog({ pending, onClose, onConfirm, returnFocusTo }: { pending: boolean; onClose: () => void; onConfirm: () => void; returnFocusTo?: HTMLElement | null }) {
   const dialog = useRef<HTMLDivElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
-  useEffect(() => { cancel.current?.focus(); const prior = document.body.style.overflow; document.body.style.overflow = "hidden"; return () => { document.body.style.overflow = prior; }; }, []);
+  useEffect(() => { cancel.current?.focus(); const prior = document.body.style.overflow; document.body.style.overflow = "hidden"; return () => { document.body.style.overflow = prior; returnFocusTo?.focus(); }; }, [returnFocusTo]);
   function keyDown(event: React.KeyboardEvent<HTMLDivElement>) {
     if (event.key === "Escape" && !pending) { event.preventDefault(); onClose(); }
     if (event.key !== "Tab") return;

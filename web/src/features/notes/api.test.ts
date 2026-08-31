@@ -28,4 +28,8 @@ describe("notes api", () => {
     ]);
     expect(JSON.parse(request.mock.calls[1][1].body)).toEqual({ confirmation: "清空全部笔记" });
   });
+
+  it("keeps cursor pagination opaque and normalizes empty filters", () => {
+    expect(api.noteFiltersQuery({ cursor: "opaque-token", limit: 50, query: "  ", tags: ["", "rag"] })).toBe("cursor=opaque-token&limit=50&tags=rag&sort=updated_desc");
+  });
 });

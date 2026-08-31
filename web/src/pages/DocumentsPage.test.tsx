@@ -145,13 +145,13 @@ describe("DocumentsPage", () => {
     document.body.style.overflow = "";
   });
 
-  it("renders real /documents while every other protected route stays migration", async () => {
+  it("renders real /documents while non-product routes stay migration", async () => {
     installFetchStub();
     const { unmount } = renderApp("/documents");
     expect(await screen.findByRole("heading", { level: 1, name: "文档库" })).toBeVisible();
     expect(screen.queryByText("该能力正在迁移到新版界面")).not.toBeInTheDocument();
     unmount();
-    for (const item of navigationItems.filter(({ path }) => path !== "/documents" && path !== "/qa")) {
+    for (const item of navigationItems.filter(({ path }) => path !== "/documents" && path !== "/qa" && path !== "/notes")) {
       const migration = renderApp(item.path);
       expect(
         await screen.findByRole("heading", { level: 1, name: item.heading }),
@@ -161,6 +161,10 @@ describe("DocumentsPage", () => {
       ).toBeVisible();
       migration.unmount();
     }
+    const notes = renderApp("/notes");
+    expect(await screen.findByRole("heading", { level: 1, name: "学习笔记" })).toBeVisible();
+    expect(screen.queryByText("该能力正在迁移到新版界面，可暂时前往旧版使用。")).not.toBeInTheDocument();
+    notes.unmount();
   });
 
   it("keeps loading distinct from empty and renders the exact empty copy", async () => {

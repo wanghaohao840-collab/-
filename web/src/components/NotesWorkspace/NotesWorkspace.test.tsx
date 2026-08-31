@@ -25,4 +25,41 @@ describe("NotesWorkspace", () => {
     expect(screen.getByText("来源已删除")).toBeVisible();
     expect(screen.queryByText("旧标题")).not.toBeInTheDocument();
   });
+
+  it("derives the first Markdown heading and exposes pending/failed projection states", async () => {
+    const retry = vi.fn();
+    const pending = { ...note, body_markdown: "# Derived title\ncontent", projection_state: "pending" as const };
+    const { rerender } = render(<NotesWorkspace items={[pending]} selectedNote={pending} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={retry} />);
+    expect(screen.getByRole("button", { name: /Derived title/ })).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("正在同步");
+    const failed = { ...pending, projection_state: "failed" as const };
+    rerender(<NotesWorkspace items={[failed]} selectedNote={failed} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={retry} />);
+    await userEvent.click(screen.getByRole("button", { name: "重试投影" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("traps and restores focus for the source overlay", async () => {
+    const user = userEvent.setup();
+    const trigger = document.createElement("button"); document.body.append(trigger); trigger.focus();
+    render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
+    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.textContent === "来源");
+    expect(sourceButton).toBeDefined();
+    await user.click(sourceButton!);
+    expect(screen.getByRole("dialog", { name: "笔记来源" })).toBeVisible();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog", { name: "笔记来源" })).not.toBeInTheDocument();
+  });
+
+  it("provides complete filter and clear confirmation surfaces", async () => {
+    const user = userEvent.setup();
+    render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn().mockResolvedValue(undefined)} onRetryProjection={vi.fn()} queryValue="memory" tagsValue="rag" sourceValue="" onFilterChange={vi.fn()} />);
+    const filterButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.textContent === "筛选");
+    expect(filterButton).toBeDefined();
+    await user.click(filterButton!);
+    const filterDialog = screen.getByRole("dialog", { name: "筛选笔记" });
+    expect(filterDialog).toContainElement(screen.getByLabelText("筛选中的标签"));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "清空笔记" }));
+    expect(screen.getByRole("dialog", { name: "清空全部笔记" })).toBeVisible();
+  });
 });

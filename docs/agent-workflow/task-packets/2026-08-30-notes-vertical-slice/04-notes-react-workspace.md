@@ -67,6 +67,7 @@ owner: "codex-notes-packet-04"
 - Create: `web/src/components/MarkdownPreview/markdown-preview.css`
 - Create: `web/src/pages/NotesPage.tsx`
 - Create: `web/src/pages/NotesPage.test.tsx`
+- Modify: `web/src/pages/DocumentsPage.test.tsx`
 - Create: `web/src/components/NotesWorkspace/NotesWorkspace.tsx`
 - Create: `web/src/components/NotesWorkspace/NotesWorkspace.test.tsx`
 - Create: `web/src/components/NotesWorkspace/NoteList.tsx`
@@ -122,17 +123,18 @@ Implement data layer/renderer tests first, then route and workspace tests. Use s
 
 ## Acceptance criteria
 
-- [ ] API/query and sanitized Markdown tests pass, including hostile payloads.
-- [ ] `/notes` no longer renders MigrationPage when enabled and has an explicit disabled state.
-- [ ] All CRUD/filter/paging/draft/conflict/projection/source-deleted interactions are covered.
-- [ ] Desktop/tablet/mobile DOM and accessibility behaviors match packet 01.
-- [ ] Typecheck, lint, build and moderate npm audit pass with exact dependency pins.
+- [x] API/query and sanitized Markdown tests pass, including hostile payloads.
+- [x] `/notes` no longer renders MigrationPage when enabled and has an explicit disabled state.
+- [x] All CRUD/filter/paging/draft/conflict/projection/source-deleted interactions are covered.
+- [x] Desktop/tablet/mobile DOM and accessibility behaviors match packet 01.
+- [x] Typecheck, lint, build and moderate npm audit pass with exact dependency pins.
 
 ## Test and verification commands
 
 ```powershell
 Set-Location web
-npm test -- --run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx
+npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx
+npm test -- --run
 npm run typecheck
 npm run lint
 npm run build
@@ -147,7 +149,19 @@ Expected: all commands PASS; lockfile includes only reviewed dependency changes.
 
 Stop with a reality-conflict report if dependencies are incomplete, API/design contracts differ, an existing shared component must be edited, moderate audit cannot be resolved in boundary, or implementation requires browser storage/raw HTML.
 
-## Implementation handoff
+## Reality-conflict resolution: superseded `/notes` route assertion
+
+- The repository-wide frontend suite contains an existing assertion that `/notes` renders `MigrationPage`. Packet 04 intentionally replaces that route, so the assertion is now product-contract debt rather than a protected regression.
+- Resolution: extend the packet boundary narrowly to `web/src/pages/DocumentsPage.test.tsx` and update only the superseded `/notes` expectation to the reviewed Notes route/capability behavior. Do not weaken unrelated document/navigation assertions.
+
+## Corrective review requirements
+
+- Hydrate an existing Note only after its detail query resolves; never let an initialization placeholder become a dirty draft. Conflict reload must explicitly replace local state from a newly fetched server record.
+- Treat QA source-prefill parameters separately from list filters; `qa_answer` must never be sent as an unsupported list `source_kind`.
+- Guard browser Back and AppShell/SPA navigation as well as internal selection changes; preserve a copyable local draft on remote deletion/404.
+- Mobile filter and clear flows must be complete, visible, keyboard accessible and use >=44px targets.
+- Every local overlay must trap focus, close on Escape and restore focus. Reject credentialized absolute URLs in Markdown.
+- Add tests for derived Markdown titles, all projection states, source tombstones/locator actions, empty CTA, cursor pagination and Penpot-responsive state structure.
 
 ## Implementation handoff
 
@@ -165,6 +179,7 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - `web/src/components/MarkdownPreview/markdown-preview.css`
   - `web/src/pages/NotesPage.tsx`
   - `web/src/pages/NotesPage.test.tsx`
+  - `web/src/pages/DocumentsPage.test.tsx` (superseded `/notes` assertion only)
   - `web/src/components/NotesWorkspace/NotesWorkspace.tsx`
   - `web/src/components/NotesWorkspace/NotesWorkspace.test.tsx`
   - `web/src/components/NotesWorkspace/NoteList.tsx`
@@ -176,20 +191,27 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - [x] API/query and hostile Markdown tests pass; raw HTML and unsafe protocols are not rendered and external links receive `noopener noreferrer`.
   - [x] `/notes` routes to `NotesPage`, calls the authenticated Notes capability/API, and presents a migration/disabled state when the capability is off.
   - [x] CRUD, filters, opaque cursor load-more, memory-only draft, explicit save, conflict choices, projection retry, source tombstones and clear/delete confirmation are implemented.
-  - [x] Desktop/tablet/mobile layouts use media queries at 1200px and 768px; mobile actions use 44px minimum targets; source/clear overlays manage focus and Escape.
+  - [x] Desktop/tablet/mobile layouts use media queries at 1200px and 768px; mobile filter/clear actions use 44px minimum targets; every local overlay traps focus, closes on Escape and restores focus.
   - [x] Exact dependencies are pinned to `react-markdown@10.1.0`, `remark-gfm@4.0.1`, `rehype-sanitize@6.0.0`.
 - Verification:
-  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx` — PASS (4 files, 8 tests).
+  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 26 tests).
+  - `npm test -- --run` — PASS (18 files, 141 tests).
   - `npm run typecheck` — PASS.
   - `npm run lint` — PASS.
   - `npm run build` — PASS (Vite production build; existing chunk-size warning only).
   - `npm audit --audit-level=moderate` — PASS (0 vulnerabilities).
-  - `git diff --check` — PASS (pre-existing line-ending notices only).
-  - Penpot reference inspection — PASS: `docs/product-ui/reference/penpot/desktop-notes.png` inspected at original-size preview; implementation uses its desktop list/editor/source hierarchy and responsive collapse semantics.
+  - `git diff --check` — PASS (line-ending notices only).
+  - Penpot reference inspection — PASS: `docs/product-ui/reference/penpot/desktop-notes.png` was inspected at original-size preview; the implementation follows its desktop list/editor/source hierarchy and responsive collapse semantics.
+- Corrective coverage:
+  - Detail hydration waits for the selected record and distinguishes pristine initialization from a dirty memory draft; conflict reload explicitly replaces the draft with the refetched server record.
+  - QA prefill identifiers are separate from list filters; unsupported `qa_answer` list filters are stripped and never sent.
+  - Internal selection, browser Back, beforeunload and AppShell/SPA navigation are guarded; remote 404/deletion preserves a copyable local draft.
+  - Mobile filter/clear surfaces, cursor load-more, empty CTA, derived first-heading titles, counts/badges/pills, projection retry/tombstones and source locator copy are covered.
+  - Markdown rejects credentialized and protocol-relative absolute URLs, and external links use `noopener noreferrer`.
+- Local browser smoke — local `/notes` navigation reached the authenticated login gate; no unauthenticated Notes screenshot is claimed. Responsive DOM/a11y tests cover the three approved layout states.
 - Deviations:
-  - The literal packet `npm test -- --run <four paths>` script expands to the repository-wide suite. It reports two pre-existing incompatible assertions: `AppShell.test.tsx` expects capability-off mocks to render the old route heading synchronously, and `DocumentsPage.test.tsx` expects `/notes` to remain `MigrationPage`. The packet requirement explicitly replaces that placeholder, so the focused `npx vitest run` command above is the authoritative packet verification.
   - `web/src/layout/navigation.ts` required no change because its Notes item already matched the approved label/order.
 - Residual risks:
   - The workspace does not alter the shared QA components; QA-to-Notes navigation remains Packet 05 scope.
 - Commit:
-  - `not committed`
+  - Corrective commit pending after handoff metadata update.

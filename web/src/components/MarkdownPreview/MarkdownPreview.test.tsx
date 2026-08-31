@@ -13,8 +13,10 @@ describe("MarkdownPreview", () => {
   });
 
   it("marks external links noopener while retaining safe relative links", () => {
-    render(<MarkdownPreview markdown={'[external](https://example.com) [relative](/notes/1)'} />);
+    render(<MarkdownPreview markdown={'[external](https://example.com) [relative](/notes/1) [credentialized](https://user:secret@example.com/private) [protocol-relative](//example.com)'} />);
     expect(screen.getByRole("link", { name: "external" })).toHaveAttribute("rel", "noopener noreferrer");
     expect(screen.getByRole("link", { name: "relative" })).not.toHaveAttribute("rel");
+    expect(screen.queryByRole("link", { name: "credentialized" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "protocol-relative" })).not.toBeInTheDocument();
   });
 });
