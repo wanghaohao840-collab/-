@@ -190,7 +190,8 @@ Use the standard reality-conflict report and stop if an existing schema/source s
 - Residual risks:
   - The source-scrub primitive is intentionally not wired into `app/qa_deletion.py` in this packet; Packet 03 owns that integration and the two-connection fence race test.
 - Commit:
-  - `not committed` (handoff recorded immediately before creating the single Packet 02 task commit; final hash is reported to the controller).
+  - Superseded by the corrective implementation commits listed below; this
+    historical handoff is retained only as the original Packet 02 baseline.
 
 ## Corrective handoff after exact semantic-deletion reality conflict
 
@@ -241,6 +242,9 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - `fde935d` — preserve retryability when projection lease loss rejects
     failure handling.
   - `c79d3ad` — direct projection regression for cross-user legacy cleanup.
+  - Current corrective commit (this commit; hash reported by the controller)
+    — explicit user-scoped desired-absent legacy cleanup and real
+    MemoryManager/SemanticMemory replay coverage after ledger lease loss.
 - Corrective files delivered in this amended boundary:
   - `app/note_projection.py`
   - `hello_agents/memory/manager.py`
@@ -249,12 +253,12 @@ Use the standard reality-conflict report and stop if an existing schema/source s
   - `tests/test_note_projection.py`
   - `tests/memory/test_semantic_vector_store_protocol.py`
   - `tests/memory/storage/test_qdrant_vector_store.py`
-- Verification:
-  - Packet suite: `37 passed in 43.41s`.
-  - Semantic/vector and related memory tests: `19 passed in 0.99s`.
-  - QA regressions: `20 passed in 14.37s`.
+- Final verification after the current corrective changes:
+  - Packet suite: `40 passed in 46.90s`.
+  - Full `tests/memory`: `184 passed in 141.76s`.
+  - QA regressions: `20 passed in 18.01s`.
   - `git diff --check`: PASS.
 - Commit:
-  - Corrective changes are committed as a new commit after
-    `bfdbccd418adb4f204e780f58d4c6ef859b791d0`; final hash is reported to the
-    controller.
+  - This handoff and its production/tests changes are delivered in the
+    current corrective commit; the exact hash is reported by the controller
+    after commit creation.

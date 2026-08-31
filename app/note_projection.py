@@ -432,7 +432,9 @@ class NoteProjectionWorker:
                         ):
                             return True
                         if not runtime.memory_tool.memory_manager.remove_memory(
-                            legacy_id, memory_type="semantic"
+                            legacy_id,
+                            memory_type="semantic",
+                            missing_ok=True,
                         ):
                             raise RuntimeError(
                                 "exact legacy memory removal is unavailable"

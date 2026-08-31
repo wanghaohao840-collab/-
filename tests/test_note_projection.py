@@ -317,3 +317,74 @@ def test_projection_does_not_mark_cross_user_legacy_vector_cleaned(
         "projection-cross-user", {"_id": ["note:bob:legacy"]}
     ) == 1
     manager.close()
+
+
+def test_real_projection_replays_after_legacy_cleanup_lease_loss(
+    monkeypatch, tmp_path: Path
+) -> None:
+    db, notes, tasks = setup_domain(tmp_path)
+    note = notes.create("alice", "body", None, (), "r")
+    legacy_id = "legacy:alice:old"
+    with connect(db) as conn:
+        conn.execute(
+            "insert into note_legacy_imports (user_id, legacy_import_key, note_id, source_digest, legacy_memory_id, imported_at) values ('alice','k',?,'d',?,'t')",
+            (note.id, legacy_id),
+        )
+
+    store = InMemoryVectorStore()
+    monkeypatch.setattr(
+        "hello_agents.memory.storage.qdrant_store.QdrantConnectionManager.get_instance",
+        lambda **_: store,
+    )
+    manager = MemoryManager(
+        config=MemoryConfig(qdrant_collection="projection-replay"),
+        user_id="alice",
+        enable_working=False,
+        enable_episodic=False,
+        enable_semantic=True,
+    )
+    manager.add_memory(
+        "legacy alice",
+        memory_type="semantic",
+        metadata={"user_id": "alice"},
+        memory_id=legacy_id,
+    )
+    bob_id = "note:bob:other"
+    manager.add_memory(
+        "bob survivor",
+        memory_type="semantic",
+        metadata={"user_id": "bob"},
+        memory_id=bob_id,
+    )
+    runtime = SimpleNamespace(
+        user_id="alice", lock=RLock(),
+        memory_tool=SimpleNamespace(memory_manager=manager),
+    )
+    worker = NoteProjectionWorker(
+        tasks, notes, RuntimeRegistry(runtime), DefaultNoteMemoryProjection(),
+        worker_id="legacy-replay",
+    )
+    original_mark = tasks.mark_legacy_cleaned
+    lost = True
+
+    def lose_first_mark(*args, **kwargs):
+        nonlocal lost
+        if lost:
+            lost = False
+            return False
+        return original_mark(*args, **kwargs)
+
+    tasks.mark_legacy_cleaned = lose_first_mark  # type: ignore[method-assign]
+    assert worker.run_once() is True
+    assert tasks.list_for_note("alice", note.id)[0].status == "queued"
+    assert store.count("projection-replay", {"_id": [legacy_id]}) == 0
+
+    assert worker.run_once() is True
+    assert tasks.list_for_note("alice", note.id)[0].status == "completed"
+    with connect(db) as conn:
+        assert conn.execute(
+            "select legacy_memory_cleaned_at from note_legacy_imports"
+        ).fetchone()[0] is not None
+    assert store.count("projection-replay", {"_id": [legacy_id]}) == 0
+    assert store.count("projection-replay", {"_id": [bob_id]}) == 1
+    manager.close()
