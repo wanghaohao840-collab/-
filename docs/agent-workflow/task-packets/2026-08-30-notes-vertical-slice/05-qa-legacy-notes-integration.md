@@ -175,17 +175,18 @@ Stop with a reality-conflict report if NoteService trusted interfaces differ, su
   - Consumed Packet 04 identifier-only `/notes` prefill navigation contract from `57f516b`/`801b8f4`.
   - Completed QA answers expose keyboard-labeled answer/citation links with only stable QA/citation identifiers only after a successful Notes capability response explicitly returns `enabled: true`; disabled, pending, failed, and error states expose no action.
   - Supported legacy runtime operations create, clear, FTS-search, count, and list recent Notes through `NoteService`; missing-service operations fail explicitly without JSON/Memory Note fallback, while document/question history recall remains available.
-  - Recall reserves bounded space for at least one `NoteService` FTS hit when present, so document/question history cannot starve Notes; it never scans legacy JSON Notes.
+  - Recall reserves visibility for both sources when capacity permits, then backfills the bounded result set from the source with remaining hits. Note-only and sparse-legacy queries use the full limit; legacy-saturated queries still expose an FTS Note. It never scans legacy JSON Notes.
   - Authenticated `/api/v1/notes` integration coverage proves the React list contract sees assistant-created rows and a later assistant session recalls an API-created row.
   - The approved regression-fixture extension moves Note-specific isolation, concurrency, and report-snapshot assertions to real `ApplicationServices`/`NoteService` runtimes without weakening their original guarantees.
 - Acceptance criteria:
   - [x] Completed answer/citation actions open identifier-only Notes drafts; disabled, pending, and error capability states, plus pending/failed QA states, do not expose actions.
   - [x] Legacy assistant creates rows visible through the shared SQLite-backed `NoteService` and leaves legacy history Notes unchanged.
-  - [x] Legacy clear/recall/stats/report use active Note rows while preserving document/question recall and report behavior.
+  - [x] Legacy clear/recall/stats/report use active Note rows while preserving document/question recall and report behavior; combined recall is bounded, fully allocated, and cannot starve FTS Notes.
   - [x] Supported paths and explicit missing-service behavior do not issue random `learning_note` Memory writes, JSON Note writes, or broad Memory clears; Notes projection remains the sole Memory writer.
   - [x] Cross-user and multi-session integration coverage confirms shared same-user rows and user-scoped clear.
 - Verification:
-  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/integration/test_note_legacy_cutover.py tests/assistants/test_pdf_learning_assistant_notes.py tests/ui/test_note_handlers.py tests/test_assistant_user_isolation.py tests/test_p0_data_integrity.py --basetemp=.runtime/pytest-notes-cross-entry` — PASS (15 passed in 88.22s).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/assistants/test_pdf_learning_assistant_notes.py --basetemp=.runtime/pytest-notes-recall-allocation` — PASS (6 passed in 1.83s).
+  - `& 'D:\python_self_agent\venv\Scripts\python.exe' -m pytest -q tests/integration/test_note_legacy_cutover.py tests/assistants/test_pdf_learning_assistant_notes.py tests/ui/test_note_handlers.py tests/test_assistant_user_isolation.py tests/test_p0_data_integrity.py --basetemp=.runtime/pytest-notes-cross-entry` — PASS (17 passed in 88.45s).
   - `Set-Location web; npm test -- --run src/components/QaWorkspace/QaWorkspace.test.tsx src/pages/QaPage.test.tsx src/pages/NotesPage.test.tsx` — PASS (18 files, 155 tests).
   - `Set-Location web; npm run typecheck` — PASS.
   - `git diff --check` — PASS.
@@ -195,3 +196,4 @@ Stop with a reality-conflict report if NoteService trusted interfaces differ, su
   - The repository frontend command expands to the full `src tests` suite. Two earlier attempts exposed existing focus-timing failures in unowned `src/auth/AuthProvider.test.tsx` and `src/auth/ProtectedRoute.test.tsx`; the final identical retry passed all 155 tests. No Packet 05 files touch either test.
 - Commit:
   - `57fc2c0` — closes the independent review findings and updates regression coverage.
+  - `944e044` — fully allocates bounded combined recall results and adds allocation regressions.
