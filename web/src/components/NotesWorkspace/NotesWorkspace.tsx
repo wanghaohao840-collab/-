@@ -38,8 +38,8 @@ export function NotesWorkspace({ items, selectedNote, selectedId, selectedLoadin
   const filterTrigger = useRef<HTMLButtonElement>(null);
   const clearTrigger = useRef<HTMLButtonElement>(null);
   const overlayReturn = useRef<HTMLElement | null>(null);
-  const baseline = useRef<EditorDraft | null>(selectedNote ? { body_markdown: selectedNote.body_markdown, concept: selectedNote.concept ?? "", tags: selectedNote.tags } : null);
-  const [hydratedId, setHydratedId] = useState<string | undefined>(selectedNote?.id);
+  const baseline = useRef<EditorDraft | null>(selectedNote ? { body_markdown: selectedNote.body_markdown, concept: selectedNote.concept ?? "", tags: selectedNote.tags } : selectedId === "new" ? emptyDraft : null);
+  const [hydratedId, setHydratedId] = useState<string | undefined>(selectedNote?.id ?? (selectedId === "new" ? "new" : undefined));
   const [listView, setListView] = useState(!selectedId);
   const [copyFeedback, setCopyFeedback] = useState("");
   const activeId = selectedId ?? selectedNote?.id;
