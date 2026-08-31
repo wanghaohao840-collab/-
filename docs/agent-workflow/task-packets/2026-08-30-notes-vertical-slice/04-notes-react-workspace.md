@@ -194,8 +194,8 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - [x] Desktop/tablet/mobile layouts use media queries at 1200px and 768px; mobile filter/clear actions use 44px minimum targets; every local overlay traps focus, closes on Escape and restores focus.
   - [x] Exact dependencies are pinned to `react-markdown@10.1.0`, `remark-gfm@4.0.1`, `rehype-sanitize@6.0.0`.
 - Verification:
-  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 32 tests).
-  - `npm test -- --run` — PASS (18 files, 147 tests).
+  - `npx vitest run src/features/notes/api.test.ts src/components/MarkdownPreview/MarkdownPreview.test.tsx src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx src/pages/DocumentsPage.test.tsx` — PASS (5 files, 33 tests).
+  - `npm test -- --run` — PASS (18 files, 148 tests).
   - `npm run typecheck` — PASS.
   - `npm run lint` — PASS.
   - `npm run build` — PASS (Vite production build; existing chunk-size warning only).
@@ -212,6 +212,7 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - Browser Back cancellation restores the existing history entry with a calculated `history.go` delta; projection retry failures are caught and surfaced without unhandled rejections.
   - Empty state exposes both explicit “新建笔记” and “从 QA 记录” actions; list count is labeled as loaded rows rather than an unsupported total.
   - Clear removes all cached Note detail records before list invalidation; source locator copy reports both success and failure without blocking the drawer.
+  - Fresh-note drafts establish an empty baseline immediately, so unsaved create navigation is guarded; popstate tests cover both cancel-and-restore and confirm-and-proceed paths.
 - Local browser smoke — local `/notes` navigation reached the authenticated login gate; no unauthenticated Notes screenshot is claimed. Responsive DOM/a11y tests cover the three approved layout states.
 - Deviations:
   - `web/src/layout/navigation.ts` required no change because its Notes item already matched the approved label/order.
@@ -222,3 +223,4 @@ Stop with a reality-conflict report if dependencies are incomplete, API/design c
   - `6971d5f` — final exact handoff metadata.
   - `dd9e27c` — second-review corrective implementation and tests.
   - `f94460f` — history restoration safety refinement.
+  - `83aee11` — new-note baseline and history regression coverage.
