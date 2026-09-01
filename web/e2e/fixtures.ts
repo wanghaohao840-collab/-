@@ -21,6 +21,8 @@ type WorkerFixtures = {
 
 export type AppServer = {
   url: string;
+  dataRoot: string;
+  dbPath: string;
   start: () => Promise<void>;
   stop: () => Promise<void>;
   restart: () => Promise<void>;
@@ -155,7 +157,7 @@ export const test = base.extend<object, WorkerFixtures>({
 
       try {
         await start();
-        await use({ url: appUrl, start, stop, restart });
+        await use({ url: appUrl, dataRoot, dbPath: join(dataRoot, "app.db"), start, stop, restart });
       } finally {
         await stop();
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
@@ -232,7 +234,78 @@ export const qaTest = base.extend<object, WorkerFixtures>({
 
       try {
         await start();
-        await use({ url: appUrl, start, stop, restart });
+        await use({ url: appUrl, dataRoot, dbPath: join(dataRoot, "app.db"), start, stop, restart });
+      } finally {
+        await stop();
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
+        rmSync(dataRoot, { force: true, maxRetries: 10, recursive: true, retryDelay: 250 });
+      }
+    },
+    { scope: "worker", timeout: 60_000 },
+  ],
+  appUrl: [
+    async ({ appServer }, use) => { await use(appServer.url); },
+    { scope: "worker" },
+  ],
+});
+
+export const notesTest = base.extend<object, WorkerFixtures>({
+  appServer: [
+    async ({ browserName }, use) => {
+      if (browserName !== "chromium") {
+        throw new Error(`Notes acceptance supports exactly one browser: received ${browserName}`);
+      }
+      if (!existsSync(frontendIndex)) {
+        throw new Error("Build web/dist before running Playwright: npm run build");
+      }
+
+      const expectedParent = resolve(repositoryRoot, ".runtime");
+      mkdirSync(expectedParent, { recursive: true });
+      const dataRoot = mkdtempSync(join(expectedParent, "zhiyan-notes-playwright-"));
+      if (dirname(resolve(dataRoot)) !== expectedParent) {
+        throw new Error(`Unexpected Notes E2E data root: ${dataRoot}`);
+      }
+      const port = await reservePort();
+      const appUrl = `http://127.0.0.1:${port}`;
+      const logs: string[] = [];
+      let serverProcess: ChildProcessWithoutNullStreams | undefined;
+
+      const stop = async () => {
+        const ownedProcess = serverProcess;
+        serverProcess = undefined;
+        if (ownedProcess) await stopProcess(ownedProcess);
+      };
+      const start = async () => {
+        if (serverProcess?.exitCode === null) return;
+        logs.length = 0;
+        serverProcess = spawn(
+          pythonExecutable,
+          [resolve(repositoryRoot, "web/e2e/notes-runtime.py"), "--host", "127.0.0.1", "--port", String(port)],
+          {
+            cwd: repositoryRoot,
+            env: {
+              ...withoutPythonOverrides(globalThis.process.env),
+              PDF_ASSISTANT_DATA_DIR: dataRoot,
+              PYTHONUNBUFFERED: "1",
+              NOTES_ROUTE_ENABLED: "true",
+              QA_ROUTE_ENABLED: "true",
+            },
+          },
+        );
+        serverProcess.stdout.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+        serverProcess.stderr.on("data", (chunk: Buffer) => logs.push(chunk.toString()));
+        try {
+          await waitForServer(serverProcess, appUrl, logs);
+        } catch (error) {
+          await stop();
+          throw error;
+        }
+      };
+      const restart = async () => { await stop(); await start(); };
+
+      try {
+        await start();
+        await use({ url: appUrl, dataRoot, dbPath: join(dataRoot, "app.db"), start, stop, restart });
       } finally {
         await stop();
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));

@@ -177,6 +177,12 @@ Stop with a reality-conflict report if any prerequisite packet is not done, hand
 - Decision required:
   - Can the connected Penpot MCP bridge and Docker Linux daemon be restored so Packet 06 can resume its required real-server, visual and container gates?
 
+### Resolution
+
+- Resolved on 2026-08-31 without changing acceptance criteria: the official local `@penpot/mcp@stable` 2.15.4 bridge is listening on `4400/4401/4402`; the authenticated target file is open in the in-app browser and the Penpot UI reports `MCP connected`.
+- Docker Desktop was started from the existing local installation; `docker info --format '{{.OSType}}|{{.ServerVersion}}'` now returns `linux|29.6.2`.
+- Packet 06 returns to `in_progress` and must still perform its own MCP fresh read plus all visual, regression and Docker gates.
+
 ### Implementation handoff
 
 - Status: blocked
@@ -210,3 +216,63 @@ Stop with a reality-conflict report if any prerequisite packet is not done, hand
   - All Packet 06 implementation and release-acceptance work remains outstanding until both external prerequisites are restored.
 - Commit:
   - To be recorded in the final blocked handoff response; the packet cannot embed its own commit hash without a self-referential follow-up commit.
+
+### Reality-conflict report (visual acceptance, 2026-09-01)
+
+- Packet: `notes-vertical-slice-06`
+- Status: blocked
+- Expected by packet:
+  - The authenticated runtime’s four reviewed Playwright snapshots must match the approved Notes Penpot boards for hierarchy, spacing, state meaning and responsive behavior; snapshots may be created only after original-size inspection.
+- Observed in repository/runtime:
+  - A connected Packet 06 MCP session fresh-read all fifteen Notes boards from file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c` at saved revision `153`; the exact board IDs and `1440 × 1024` desktop dimensions match `docs/product-ui/penpot-handoff.md`.
+  - The real, authenticated desktop runtime screenshot was inspected at original size beside `docs/product-ui/reference/penpot/desktop-notes.png`. Although both have the 248 px navigation and Notes list/editor/source columns, the runtime adds an unapproved top filter row and materially differs in page-header/action placement, list width and rows, editor metadata controls, source card and whitespace hierarchy.
+  - `docs/product-ui/penpot-handoff.md` states that no browser-only visual divergence is approved. The temporary actual screenshot is only ignored Playwright output; it was not copied to `web/e2e/notes.spec.ts-snapshots/` and `--update-snapshots` was not run.
+- Impact:
+  - Creating or accepting a runtime baseline would silently waive the approved Penpot contract. Aligning the layout requires a cross-component visual implementation beyond Packet 06’s narrow acceptance-correction boundary.
+- Work completed before pause:
+  - Added a real FastAPI/production-asset Notes E2E runtime and scenarios. The non-visual desktop lifecycle scenario passes; the desktop QA citation/source-deletion scenario passes after the approved narrow source-prefill correction.
+  - Corrected `web/src/pages/NotesPage.tsx` and its regression test: a valid `qa_citation` prefill now initializes the same editable fresh draft as `note=new`, so the source-ID URL reaches the explicit create POST. Before the fix, the URL held `source_kind=qa_citation`, a non-empty `qa_message_id` and `citation_id=NOTES-E2E-S1`, but Save remained disabled and no POST occurred.
+  - Corrected `web/src/components/NotesWorkspace/notes-workspace.css`: ordinary 12–16 px supporting copy and inactive tab labels use `color.text.primary`. Real Axe had reported six serious color-contrast nodes at ratios `3.71:1` or `3.96:1`; after the token correction the visual scenario advanced to its missing-snapshot assertion with no serious/critical Axe failure.
+  - Fresh Penpot revision-153 evidence and Notes release/deployment contract documentation were updated. No snapshot, runtime database, trace, report or credential was added to Git.
+- Recommended resolution:
+  - Create and complete a dedicated visual-alignment packet that owns the affected Notes UI components/styles and visual regression tests. It must make the runtime match the approved boards, then return Packet 06 to `in_progress` for original-size snapshot review and the remaining release gates.
+- Decision required:
+  - A new corrective visual-alignment packet is required before Packet 06 can create a reviewed screenshot baseline or claim release acceptance.
+
+### Implementation handoff (blocked checkpoint, 2026-09-01)
+
+- Status: blocked
+- Files changed:
+  - `web/e2e/fixtures.ts`
+  - `web/e2e/notes-runtime.py`
+  - `web/e2e/notes.spec.ts`
+  - `web/src/pages/NotesPage.tsx` (approved narrow corrective edit)
+  - `web/src/pages/NotesPage.test.tsx` (approved regression coverage)
+  - `web/src/components/NotesWorkspace/notes-workspace.css` (approved narrow contrast correction)
+  - `docs/product-ui/penpot-handoff.md`
+  - `docs/product-ui/README.md`
+  - `README.md`
+  - `tests/deploy/test_notes_product_contract.py`
+  - this packet
+- Acceptance criteria:
+  - [x] Connected MCP fresh read: seven pages and all fifteen Notes board IDs/viewports match revision `153` authority.
+  - [x] Real-server desktop lifecycle and QA citation/source-deletion E2E scenarios pass without endpoint interception.
+  - [x] QA source-prefill and NotesPage regression tests prove source IDs reach the create input.
+  - [x] Release docs record SQLite fact-source, rebuildable Memory projection, idempotent legacy cutover, route flag/recovery and single-worker topology.
+  - [ ] Four inspected snapshots: blocked by material runtime/Penpot visual mismatch; none accepted.
+  - [ ] Full E2E, full repository, audit and Docker gates: not run to a release verdict after the visual stop condition.
+- Verification:
+  - `Set-Location web; npx vitest run src/pages/NotesPage.test.tsx` — PASS (6 tests; pre-fix RED recorded as one failed regression with zero create calls).
+  - `Set-Location web; npx vitest run src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx` — PASS (2 files, 17 tests).
+  - `Set-Location web; npm run typecheck` — PASS.
+  - `Set-Location web; npm run lint` — PASS.
+  - `Set-Location web; npx playwright test e2e/notes.spec.ts --project=desktop --workers=1 -g "completed QA citation"` — PASS (1 test, 19.8s).
+  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/deploy/test_notes_product_contract.py --basetemp=.runtime/pytest-notes-product-contract` — PASS (3 passed).
+  - `node --test tests/design/test_penpot_handoff.mjs tests/design/test_penpot_component_map.mjs` — PASS (10 tests).
+  - `git diff --check` — PASS before this final packet checkpoint update; rerun before commit.
+- Deviations:
+  - Snapshot generation and all succeeding release gates are intentionally stopped, not waived. The visual defect must not be documented as an approved runtime difference.
+- Residual risks:
+  - The current runtime is not visually aligned with the approved Notes boards. A new Packet 07 must own the alignment before release acceptance resumes.
+- Commit:
+  - Pending blocked checkpoint commit.

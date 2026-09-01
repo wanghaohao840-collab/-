@@ -7,7 +7,7 @@ from struct import unpack
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = ROOT / "docs" / "product-ui" / "reference" / "penpot"
 HANDOFF = ROOT / "docs" / "product-ui" / "penpot-handoff.md"
-FINAL_REVISION = 152
+FINAL_REVISION = 153
 EXPECTED_BOARDS = {
     "Desktop / Notes / Default": ("02 Desktop", "9b1e7a6b-703c-8060-8008-7071c3463d87", (1440, 1024), "1099f839-63e4-80b7-8008-90947129dd57", "desktop-notes.png"),
     "Desktop / Notes / Source deleted": ("02 Desktop", "9b1e7a6b-703c-8060-8008-7071c3463d87", (1440, 1024), "1099f839-63e4-80b7-8008-909480e7b254", "desktop-notes-source-deleted.png"),

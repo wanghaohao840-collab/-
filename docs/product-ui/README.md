@@ -1,7 +1,7 @@
 # 知研产品 UI 工作流
 
 本目录记录知研 React 产品界面的受支持设计、开发、验证与发布流程。当前已交付
-认证流程、响应式应用外壳、文档库和智能问答垂直切片；Memory、RAG、文档隔离、引用、
+认证流程、响应式应用外壳、文档库、智能问答和学习笔记垂直切片；Memory、RAG、文档隔离、引用、
 报告、批量导入与存储仍由现有 `ApplicationServices` 边界提供，不在 React 中
 复制业务状态或后端逻辑。
 
@@ -14,14 +14,14 @@
 | `/documents` | 真实文档库：列表、批量导入、任务进度、重试、取消与删除 |
 | `/qa` | 真实智能问答：固定文档范围、持久对话、引用、摘要、重试与安全删除 |
 | `/search` | 文献检索导航位；当前显示明确的迁移状态 |
-| `/notes` | 学习笔记导航位；当前显示明确的迁移状态 |
+| `/notes` | 真实学习笔记：Markdown 草稿与预览、版本化保存、来源、筛选、游标分页、冲突、投影重试与安全清空 |
 | `/insights` | 学习洞察导航位；当前显示明确的迁移状态 |
 | `/api/v1/auth/*` | FastAPI 注册、登录、会话恢复与退出 API |
 | `/legacy/` | 共享同一 `ApplicationServices` 的完整 Gradio 界面与回滚入口 |
 | `/healthz` | 统一服务健康检查，返回 `{"status":"ok"}` |
 
 迁移页不展示虚构产品数据，而是说明功能仍在迁移并提供 `/legacy/` 操作。后续
-垂直切片依次为 notes、overview/insights、search；每个切片应复用现有服务
+垂直切片为 overview/insights、search；每个切片应复用现有服务
 边界，并在端到端能力完成后替换对应迁移状态。
 
 ## Penpot 连接与交接
@@ -137,6 +137,25 @@ Compose 的秘密与运行数据约束、Qdrant/Neo4j 配置、备份和恢复�
 幂等请求和状态端点的前提下替换为 SSE/WebSocket 通知。多副本部署前仍必须完成共享
 Session、分布式用户锁、共享任务队列/唤醒和一致存储；在这些条件满足前继续保持单
 应用副本、单 Uvicorn worker，不能仅提高 `--workers`。
+
+## `/notes` 发布、恢复与数据契约
+
+`/notes` 默认启用；只有环境值精确为 `false`（忽略大小写）时，
+`NOTES_ROUTE_ENABLED=false` 才隐藏 React 入口并显示迁移状态。这个开关只控制
+访问表现，**不**停止 legacy Note 迁移、启动恢复或投影恢复。重新启用后，用户仍从
+同一持久化 Note 聚合读取数据。
+
+- API 与 SQLite/FTS5 是 Note 的唯一事实源；Memory 只是异步、可重建的投影。投影
+  失败不能丢失、回滚或阻塞已保存的 Note，用户可显式重试。
+- `history.json` 的 legacy Notes 迁移是幂等的，迁移完成后新 Note 不再双写 legacy
+  History 或随机 Memory；稳定投影才按精确 Note ID 清理对应旧投影。
+- QA “记为笔记”与“记录此引用”只把稳定的 QA/citation ID 带入内存草稿。用户必须
+  显式保存；服务端在同一用户和删除栅栏内解析来源，绝不接受正文或摘录通过 URL 传递。
+- 清空是用户作用域内的 Note 软删除：活动列表清空而 tombstone 留存；文档和 QA
+  记录不受影响。来源文档删除时，Note 的用户正文保留，来源展示改为“来源已删除”且
+  不保留旧摘录。
+- 当前相同用户写锁、投影 worker 与运行时注册表都是进程内资源，受支持拓扑仍是一个
+  应用进程、一个 Uvicorn worker。Docker 与本地部署都不得增加 worker 来规避该限制。
 
 ## Cookie 与 CSRF
 

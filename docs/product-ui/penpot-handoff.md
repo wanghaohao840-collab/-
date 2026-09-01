@@ -222,7 +222,7 @@ The local MCP bridge used plugin 2.17.0 against Penpot 2.17.2 and displayed a pa
 
 ## Learning Notes vertical slice
 
-Validated on 2026-08-31 against Penpot 2.17.2 at final saved source revision `152`. These fifteen top-level boards are the implementation authority for the Notes slice. Page IDs identify the owning page; board IDs identify the exact direct-export source.
+Validated on 2026-09-01 against Penpot 2.17.2 at final saved source revision `153`. These fifteen top-level boards are the implementation authority for the Notes slice. Page IDs identify the owning page; board IDs identify the exact direct-export source.
 
 | Board | Page / page ID | Viewport | Penpot board ID | Direct export |
 |---|---|---:|---|---|
@@ -270,7 +270,7 @@ Notes boards use illustrative sample data only; production renders authenticated
 
 ### Fresh-read, cleanup and export evidence
 
-At revision `152`, fresh readback confirmed the same seven page IDs and all fifteen Notes board records, including `Mobile / Notes / Version conflict` at `390 × 844` with board ID `1099f839-63e4-80b7-8008-9095ca611a4f`. The comprehensive page-scoped audit from revision `151` remains valid for the fourteen unchanged boards: exactly 5 desktop, 4 tablet and 6 mobile Notes boards, no duplicate board names, root-link counts of 5/4/6/6/5 for desktop Default/Source deleted/Projection failed/Clear confirm/Empty, 5/7/6/5 for tablet Default/Sources drawer/Projection failed/Empty, and 4/6/8/8/7/6 for mobile List/Editor/Filters drawer/Sources drawer/Version conflict/Empty. Full instance readback found zero broken component links on every board. Visible text-bounds overflow, visible actual-bounds overflow and overlay-order violations were zero on all fifteen boards. The mobile audit found 6/5/11/7/7/5 named actions respectively, with zero below 44 × 44.
+At revision `153`, Packet 06 initialized a connected `@penpot/mcp` 2.15.4 session and independently fresh-read file `3be9e5e1-190f-8090-8008-6ff3f3dcd54c`. The read returned the same seven page IDs and all fifteen Notes board records, including `Mobile / Notes / Version conflict` at `390 × 844` with board ID `1099f839-63e4-80b7-8008-9095ca611a4f`; every recorded board ID and viewport in the table above matched. The comprehensive page-scoped audit from revision `151` remains valid for the fourteen unchanged boards: exactly 5 desktop, 4 tablet and 6 mobile Notes boards, no duplicate board names, root-link counts of 5/4/6/6/5 for desktop Default/Source deleted/Projection failed/Clear confirm/Empty, 5/7/6/5 for tablet Default/Sources drawer/Projection failed/Empty, and 4/6/8/8/7/6 for mobile List/Editor/Filters drawer/Sources drawer/Version conflict/Empty. Full instance readback found zero broken component links on every board. Visible text-bounds overflow, visible actual-bounds overflow and overlay-order violations were zero on all fifteen boards. The mobile audit found 6/5/11/7/7/5 named actions respectively, with zero below 44 × 44.
 
 Revision `152` extends the conflict-state audit to the three foreground siblings whose geometric overlap is not detected by containment-only checks:
 

@@ -119,4 +119,23 @@ describe("NotesPage", () => {
     confirm.mockRestore();
     window.history.replaceState({}, "", originalUrl);
   });
+
+  it("treats a valid QA citation prefill as an editable fresh draft", async () => {
+    const user = userEvent.setup();
+    const originalUrl = window.location.href;
+    window.history.replaceState({}, "", "/notes?source_kind=qa_citation&qa_message_id=message-1&citation_id=citation-1");
+    const created = { id: "created-source-1", body_markdown: "draft", concept: null, tags: [], sources: [], version: 1, projection_state: "ready" as const, created_at: "2026-01-01", updated_at: "2026-01-01", deleted_at: null };
+    const create = vi.fn().mockResolvedValue(created);
+    const mutationStub = { create: { isPending: false, error: null, mutateAsync: create }, update: { isPending: false, error: null, mutateAsync: vi.fn() }, remove: { isPending: false, error: null, mutateAsync: vi.fn() }, clear: { isPending: false, error: null, mutateAsync: vi.fn() }, retryProjection: { isPending: false, error: null, mutateAsync: vi.fn() } };
+    const mutations = vi.spyOn(noteQueries, "useNoteMutations").mockReturnValue(mutationStub as never);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><BrowserRouter><NotesPage /></BrowserRouter></QueryClientProvider>);
+    await user.type(await screen.findByLabelText("笔记正文"), "draft");
+    await user.click(screen.getByRole("button", { name: "保存笔记" }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      source: { kind: "qa_citation", qa_message_id: "message-1", citation_id: "citation-1" },
+    }));
+    mutations.mockRestore();
+    window.history.replaceState({}, "", originalUrl);
+  });
 });

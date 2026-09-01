@@ -34,12 +34,12 @@ export function NotesPage() {
   const navigate = useNavigate();
   const capabilities = useNotesCapabilities();
   const enabled = capabilities.data?.enabled !== false;
-  const selectedId = params.get("note") ?? undefined;
+  const prefillSource = useMemo(() => validatedPrefillSource(params), [params]);
+  const selectedId = params.get("note") ?? (prefillSource ? "new" : undefined);
   const [queryInput, setQueryInput] = useState(params.get("query") ?? "");
   const [tagInput, setTagInput] = useState(params.get("tags") ?? "");
   const [dirty, setDirty] = useState(false);
   const rawSourceKind = params.get("source_kind") ?? "";
-  const prefillSource = useMemo(() => validatedPrefillSource(params), [params]);
   const prefillSourceKind = prefillSource?.kind ?? "";
   const listSourceKind = listSourceKinds.has(rawSourceKind) && !prefillSourceKind ? rawSourceKind : "";
   const filters = useMemo(() => notesListFilters(params), [params]);
