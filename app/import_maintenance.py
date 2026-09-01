@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,7 @@ from app.import_models import ImportBatchSummary
 
 
 _FAILURE_RECORD_RETRY_DELAYS = (0.0, 0.02, 0.05)
+logger = logging.getLogger(__name__)
 
 
 class ImportHistoryMaintenance:
@@ -32,8 +34,14 @@ class ImportHistoryMaintenance:
         batches = self.repository.list_deleting_batches(limit=limit)
         recovered = 0
         for summary in batches:
-            self.resume_batch_deletion(summary.user_id, summary.batch_id)
-            recovered += 1
+            try:
+                self.resume_batch_deletion(summary.user_id, summary.batch_id)
+            except Exception:
+                # One corrupt or inaccessible staged batch must not prevent
+                # recovery of later batches in this bounded pass.
+                logger.error("import history deletion recovery failed for a batch")
+            else:
+                recovered += 1
         return recovered
 
     def run_retention(

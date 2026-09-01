@@ -37,6 +37,7 @@ _STOP = object()
 _RETENTION_ENV = "IMPORT_TASK_RETENTION_DAYS"
 _RETENTION_ERROR = "IMPORT_TASK_RETENTION_DAYS must be a non-negative integer"
 _RETENTION_INTERVAL_SECONDS = 60 * 60
+_IDLE_RECOVERY_LIMIT = 20
 _SAFE_STRUCTURED_ERROR_CODES = {
     "document_invalid",
     "rag_connection",
@@ -71,7 +72,9 @@ def parse_import_task_retention_days(value: str | None = None) -> int:
     raw = os.environ.get(_RETENTION_ENV) if value is None else value
     if raw in (None, ""):
         return 0
-    if not isinstance(raw, str) or re.fullmatch(r"[0-9]+", raw) is None:
+    if raw == "0":
+        return 0
+    if not isinstance(raw, str) or re.fullmatch(r"[1-9][0-9]*", raw) is None:
         raise ValueError(_RETENTION_ERROR)
     try:
         return int(raw, 10)
@@ -608,7 +611,7 @@ class ImportWorkerPool:
                             and self._active_count == 0
                         )
                     if idle:
-                        self._run_idle_retention()
+                        self._run_idle_maintenance()
                     continue
                 with self._condition:
                     if self._stop_event.is_set():
@@ -634,6 +637,13 @@ class ImportWorkerPool:
         finally:
             for _ in self._worker_threads:
                 self._task_queue.put(_STOP)
+
+    def _run_idle_maintenance(self) -> None:
+        try:
+            self.maintenance.recover_deleting(limit=_IDLE_RECOVERY_LIMIT)
+        except Exception:
+            logger.error("import history deletion recovery maintenance failed")
+        self._run_idle_retention()
 
     def _run_idle_retention(self) -> None:
         if self.retention_days == 0:

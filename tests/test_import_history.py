@@ -165,6 +165,8 @@ def test_history_applies_filters_before_cursor_and_treats_like_wildcards_literal
         _cursor({"created_at": NOW, "batch_id": "x", "extra": 1}),
         _cursor({"created_at": 123, "batch_id": "x"}),
         _cursor({"created_at": NOW, "batch_id": 123}),
+        _cursor({"created_at": "2026-08-20T12:00:00+00:00", "batch_id": "x"}),
+        _cursor({"created_at": "2026-08-20", "batch_id": "x"}),
     ],
 )
 def test_history_rejects_malformed_or_non_exact_cursor(tmp_path, cursor):

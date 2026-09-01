@@ -158,6 +158,24 @@ def test_recovery_resumes_marked_batch_without_remarking_and_missing_file_is_ide
     assert maintenance.resume_batch_deletion(user_a, batch_id) is None
 
 
+def test_recovery_continues_after_a_permanently_bad_batch(tmp_path):
+    repository, storage, maintenance, user_a, _ = _maintenance_harness(tmp_path)
+    bad_batch, bad_task, _, _ = _create_batch(repository, storage, user_a)
+    good_batch, _, _, good_staged = _create_batch(repository, storage, user_a)
+    with connect(repository.db_path) as connection:
+        connection.execute(
+            "update import_tasks set staged_relative_path = ? where id = ?",
+            ("../documents/private-token.md", bad_task),
+        )
+    repository.mark_batch_deleting(user_a, bad_batch)
+    repository.mark_batch_deleting(user_a, good_batch)
+
+    assert maintenance.recover_deleting(limit=20) == 1
+    assert repository.get_deleting_batch(user_a, bad_batch) is not None
+    assert repository.get_batch(user_a, good_batch) is None
+    assert not good_staged.exists()
+
+
 def test_unsafe_recorded_staging_path_keeps_deleting_and_persists_safe_bounded_error(
     tmp_path,
 ):
@@ -325,7 +343,9 @@ def test_retention_env_default_is_disabled(monkeypatch, value):
     assert parse_import_task_retention_days() == 0
 
 
-@pytest.mark.parametrize("value", ["-1", "+1", "1.5", " 1", "1 ", "abc"])
+@pytest.mark.parametrize(
+    "value", ["-1", "+1", "00", "01", "1.5", " 1", "1 ", "abc"]
+)
 def test_invalid_retention_env_raises_exact_safe_message(monkeypatch, value):
     monkeypatch.setenv("IMPORT_TASK_RETENTION_DAYS", value)
 
@@ -333,6 +353,13 @@ def test_invalid_retention_env_raises_exact_safe_message(monkeypatch, value):
         parse_import_task_retention_days()
 
     assert str(error.value) == "IMPORT_TASK_RETENTION_DAYS must be a non-negative integer"
+
+
+@pytest.mark.parametrize(("value", "expected"), [("1", 1), ("10", 10)])
+def test_positive_canonical_retention_env_is_enabled(monkeypatch, value, expected):
+    monkeypatch.setenv("IMPORT_TASK_RETENTION_DAYS", value)
+
+    assert parse_import_task_retention_days() == expected
 
 
 def test_worker_start_recovery_failure_is_safely_logged_and_does_not_block_scheduler(
@@ -400,6 +427,53 @@ def test_idle_retention_is_bounded_hourly_and_failure_does_not_escape(
     pool._run_idle_retention()
 
     assert maintenance.calls == [(30, 10), (30, 10)]
+
+
+def test_idle_maintenance_recovers_a_transient_manual_cleanup_failure_online(
+    tmp_path, monkeypatch
+):
+    repository, storage, maintenance, user_a, _ = _maintenance_harness(tmp_path)
+    batch_id, *_ = _create_batch(repository, storage, user_a, status="failed")
+    original_resolve = storage.resolve_staged_import_path
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("C:\\private\\staged-import.md")
+        return original_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(storage, "resolve_staged_import_path", fail_once)
+    pool = ImportWorkerPool(
+        repository,
+        SimpleNamespace(),
+        storage,
+        maintenance=maintenance,
+        retention_days=0,
+        worker_count=1,
+    )
+    sessions = SimpleNamespace(
+        get_session=lambda token: SimpleNamespace(
+            user_id=user_a, runtime=SimpleNamespace(lock=threading.RLock())
+        )
+    )
+    service = ImportTaskService(
+        sessions, repository, storage, pool, maintenance=maintenance
+    )
+
+    pool.start()
+    try:
+        with pytest.raises(OSError):
+            service.delete_batch_history("token", batch_id)
+        assert repository.get_deleting_batch(user_a, batch_id) is not None
+
+        pool._run_idle_maintenance()
+
+        assert repository.get_batch(user_a, batch_id) is None
+        assert pool._scheduler_thread.is_alive()
+    finally:
+        pool.stop(wait=True)
 
 
 def test_manual_service_delete_marks_under_lock_and_finishes_after_unlock(tmp_path):

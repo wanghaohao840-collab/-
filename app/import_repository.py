@@ -1388,10 +1388,15 @@ def _decode_history_cursor(cursor: str) -> dict[str, str]:
     if any(not isinstance(payload[key], str) or not payload[key] for key in payload):
         raise invalid
     try:
-        _validate_history_date(payload["created_at"], "cursor")
+        created_at = _validate_history_date(payload["created_at"], "cursor")
     except ValueError as error:
         raise invalid from error
-    return payload
+    # Batch timestamps and cursors use one canonical UTC representation.  Do
+    # not let a semantically equivalent spelling (for example ``+00:00``)
+    # become a different SQLite keyset value.
+    if created_at != payload["created_at"]:
+        raise invalid
+    return {"created_at": created_at, "batch_id": payload["batch_id"]}
 
 
 def _validate_maintenance_limit(limit: int) -> None:
