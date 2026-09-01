@@ -219,3 +219,29 @@ Expected: Vitest/full frontend/typecheck/lint/build/diff check PASS。Playwright
   - Packet06 must create and review its approved runtime baselines from the three no-write actuals before release acceptance; this packet intentionally does not create them.
 - Commit:
   - pending (recorded in the final delivery response to avoid a self-referential packet edit).
+
+## Reviewer-finding corrective handoff (2026-09-01)
+
+- Status: done
+- Scope decision:
+  - Reviewed only the permitted corrective diff in `web/src/components/NotesWorkspace/NotesWorkspace.test.tsx` and `web/src/components/NotesWorkspace/notes-workspace.css`.
+  - Kept the responsive grid correction: desktop now uses shrink-safe `minmax(240px, 300px) minmax(0, 1fr) minmax(220px, 268px)` instead of the prior 300px / 420px / 268px hard minima; the middle column therefore remains fluid rather than forcing page overflow between the desktop and tablet breakpoints.
+  - Kept the tablet filter override (`grid-column: 1 / -1`) and its compact toolbar spacing. The fixed source surface is still suppressed below 1200px. Removed `.notes-saved-status`; no selector remains in the source tree.
+  - No further code change was required after real-runtime verification; no E2E, baseline, AppShell, API, data, token, or controller-owned file was touched.
+- Runtime layout evidence (real Notes runtime, authenticated record, Playwright Chromium; one-time script: `C:\Users\11272\AppData\Local\Temp\notes-layout-evidence.mjs`; no screenshot actual/baseline was created):
+  - Desktop `1366×900`: `documentElement.scrollWidth/clientWidth = 1366/1366`; workspace x/width = `296/1022`; list x/width = `296/300`; editor x/width = `620/406`; source x/width = `1050/268`. All three surfaces share y=`261.59`, with 24px gaps (`596→620`, `1026→1050`), so they are visible and non-overlapping while retaining the required approximately 300/fluid/268 hierarchy.
+  - Tablet `1024×768`: `documentElement.scrollWidth/clientWidth = 1024/1024`; fixed source computed `display=none`, width=`0`; list/editor are `x=104,width=300` and `x=428,width=564`. Search, tag, and source filter labels all have top y=`147.98` (one row); workspace top is y=`96`, filters bottom y=`219.98`, and grid top y=`235.98`.
+- Verification:
+  - `npm run build` — PASS (389 modules; existing Vite >500 kB chunk warning only; required to serve the current runtime).
+  - `node C:\Users\11272\AppData\Local\Temp\notes-layout-evidence.mjs` — PASS; produced the coordinate and overflow evidence above from the current built Notes runtime. No temporary screenshot actual exists.
+  - `npx vitest run src/pages/NotesPage.test.tsx src/components/NotesWorkspace/NotesWorkspace.test.tsx` — PASS (2 files, 18 tests).
+  - `npm run typecheck` — PASS.
+  - `npm run lint` — PASS.
+  - `git diff --check` — PASS.
+- Deviations:
+  - None. The temporary runtime data directory is OS-managed under `%TEMP%`; it is not a repository artifact or test baseline.
+- Residual risks:
+  - Packet 06 still owns screenshot-baseline creation and review. This corrective handoff intentionally supplies geometry evidence only and does not update snapshots.
+- Commit:
+  - prior implementation: `94b60ec` (`fix: align notes workspace with approved design`)
+  - reviewer-finding correction: pending (`fix: stabilize notes responsive layout`)

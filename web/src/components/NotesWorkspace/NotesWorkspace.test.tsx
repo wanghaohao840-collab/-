@@ -145,5 +145,10 @@ describe("NotesWorkspace", () => {
     expect(within(header!).getByLabelText("按标签筛选")).toHaveValue("rag");
     expect(within(header!).getByLabelText("按来源筛选")).toBeVisible();
     expect(within(header!).getByRole("button", { name: "新建笔记" })).toBeVisible();
+    expect(container.querySelector(".notes-grid")).not.toBeNull();
+    expect(container.querySelector(".notes-toolbar__filters")).not.toBeNull();
+    expect(container.querySelector(".notes-grid > .notes-list")).not.toBeNull();
+    expect(container.querySelector(".notes-grid > .notes-editor")).not.toBeNull();
+    expect(container.querySelector(".notes-grid > .notes-source")).not.toBeNull();
   });
 });
