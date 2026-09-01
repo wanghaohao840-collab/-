@@ -11,6 +11,7 @@ import gradio as gr
 import pytest
 
 from app.import_models import ImportBatchSummary, ImportTaskRecord
+from app.import_repository import InvalidImportTransition
 
 
 def _task(**changes):
@@ -86,6 +87,30 @@ class FakeImportService:
         self.calls.append(("retry_failed_in_batch", token, batch_id))
         return _summary(_task(status="queued", stage="queued", progress=0))
 
+    def pause_task(self, token, task_id):
+        self.calls.append(("pause_task", token, task_id))
+        return _summary(_task(status="paused", stage="paused"))
+
+    def resume_task(self, token, task_id):
+        self.calls.append(("resume_task", token, task_id))
+        return _summary(_task(status="queued", stage="queued"))
+
+    def cancel_task(self, token, task_id):
+        self.calls.append(("cancel_task", token, task_id))
+        return _summary(_task(status="cancel_requested", stage="queued"))
+
+    def pause_batch(self, token, batch_id):
+        self.calls.append(("pause_batch", token, batch_id))
+        return _summary(_task(status="paused", stage="paused"))
+
+    def resume_batch(self, token, batch_id):
+        self.calls.append(("resume_batch", token, batch_id))
+        return _summary(_task(status="queued", stage="queued"))
+
+    def cancel_batch(self, token, batch_id):
+        self.calls.append(("cancel_batch", token, batch_id))
+        return _summary(_task(status="cancel_requested", stage="queued"))
+
 
 def test_submit_import_batch_rejects_missing_token_before_service(monkeypatch):
     import ui.gradio_app as module
@@ -160,6 +185,48 @@ def test_task_table_localizes_status_stage_and_retry_time():
     assert row[5] != "2026-08-01T00:00:03Z"
 
 
+@pytest.mark.parametrize(
+    ("status", "stage", "label"),
+    [
+        ("pause_requested", "queued", "暂停请求中"),
+        ("paused", "paused", "已暂停"),
+        ("cancel_requested", "queued", "取消请求中"),
+        ("cancelled", "cancelled", "已取消"),
+    ],
+)
+def test_task_table_localizes_active_control_states(status, stage, label):
+    from ui.gradio_app import format_task_table
+
+    row = format_task_table(_summary(_task(status=status, stage=stage)))[0]
+
+    assert row[1] == label
+    assert row[2] != "未知"
+
+
+def test_batch_summary_includes_localized_active_control_counts():
+    from ui.gradio_app import format_batch_summary
+
+    summary = _summary(
+        _task(status="paused", stage="paused"),
+        _task(status="pause_requested", stage="queued"),
+        _task(status="cancel_requested", stage="queued"),
+        _task(status="cancelled", stage="cancelled"),
+    )
+    summary = replace(
+        summary,
+        paused=1,
+        pause_requested=1,
+        cancel_requested=1,
+        cancelled=1,
+    )
+
+    rendered = format_batch_summary(summary)
+
+    for label in ("已暂停：1", "暂停请求中：1", "取消请求中：1", "已取消：1"):
+        assert label in rendered
+    assert all(value not in rendered for value in ("batch-a", "user-id-must-not-render"))
+
+
 def test_retry_handler_passes_only_current_session_token(monkeypatch):
     import ui.gradio_app as module
 
@@ -173,6 +240,209 @@ def test_retry_handler_passes_only_current_session_token(monkeypatch):
 
     assert service.calls == [("retry_task", "token-a", "task-a", "batch-a")]
     assert result[-1] == ""
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "status", "confirmed", "expected_call"),
+    [
+        ("pause_import_task", "queued", None, ("pause_task", "token-a", "task-a")),
+        ("resume_import_task", "paused", None, ("resume_task", "token-a", "task-a")),
+        ("cancel_import_task", "queued", True, ("cancel_task", "token-a", "task-a")),
+    ],
+)
+def test_task_controls_validate_selection_and_pass_only_token_and_hidden_task_id(
+    monkeypatch, handler_name, status, confirmed, expected_call,
+):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status=status)))
+
+    args = ["token-a", "batch-a", ("batch-a", "task-a")]
+    if confirmed is not None:
+        args.append(confirmed)
+    result = getattr(module, handler_name)(*args)
+
+    assert service.calls == [expected_call]
+    assert result[-1] in {"", ("batch-a", "task-a")}
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "status", "confirmed"),
+    [
+        ("pause_import_task", "paused", None),
+        ("resume_import_task", "queued", None),
+        ("cancel_import_task", "cancel_requested", True),
+    ],
+)
+def test_task_controls_reject_stale_or_duplicate_selection_before_mutation(
+    monkeypatch, handler_name, status, confirmed,
+):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status=status)))
+
+    args = ["token-a", "batch-a", ("batch-a", "task-a")]
+    if confirmed is not None:
+        args.append(confirmed)
+    with pytest.raises(gr.Error, match="cannot"):
+        getattr(module, handler_name)(*args)
+
+    assert all(call[0] != "pause_task" for call in service.calls)
+
+
+def test_task_controls_reject_wrong_batch_and_missing_or_forged_selection_safely(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    for selection in ("", ("batch-other", "task-a"), ("batch-a", "forged-task")):
+        with pytest.raises(gr.Error) as exc_info:
+            module.pause_import_task("token-a", "batch-a", selection)
+        assert "task-a" not in str(exc_info.value)
+        assert "batch-a" not in str(exc_info.value)
+
+    assert all(call[0] != "pause_task" for call in service.calls)
+
+
+def test_task_control_converts_expected_service_errors_without_leaking_identifiers(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status="queued")))
+
+    def rejected(token, task_id):
+        raise InvalidImportTransition(f"task {task_id} cannot change in batch batch-a")
+
+    monkeypatch.setattr(service, "pause_task", rejected)
+    with pytest.raises(gr.Error) as exc_info:
+        module.pause_import_task("token-a", "batch-a", ("batch-a", "task-a"))
+
+    assert "task-a" not in str(exc_info.value)
+    assert "batch-a" not in str(exc_info.value)
+
+
+def test_task_control_does_not_hide_unexpected_service_errors(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status="queued")))
+    monkeypatch.setattr(
+        service, "pause_task", lambda token, task_id: (_ for _ in ()).throw(RuntimeError("unexpected"))
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        module.pause_import_task("token-a", "batch-a", ("batch-a", "task-a"))
+
+
+def test_task_control_rejects_cross_user_batch_without_disclosing_or_mutating(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    def missing_for_current_user(token, batch_id):
+        raise KeyError(f"batch {batch_id} belongs to another user")
+
+    monkeypatch.setattr(service, "get_batch", missing_for_current_user)
+    with pytest.raises(gr.Error) as exc_info:
+        module.pause_import_task("token-a", "private-batch", ("private-batch", "private-task"))
+
+    rendered = str(exc_info.value)
+    assert "private-batch" not in rendered
+    assert "private-task" not in rendered
+    assert service.calls == []
+
+
+def test_task_cancel_requires_explicit_confirmation_before_validation_or_mutation(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+
+    with pytest.raises(gr.Error, match="confirm"):
+        module.cancel_import_task("token-a", "batch-a", ("batch-a", "task-a"), False)
+
+    assert service.calls == []
+
+
+def test_task_cancel_authenticates_before_reporting_missing_confirmation(monkeypatch):
+    import ui.gradio_app as module
+
+    checked = []
+    monkeypatch.setattr(module, "_require_session", lambda token: checked.append(token))
+
+    with pytest.raises(gr.Error, match="confirm"):
+        module.cancel_import_task("token-a", "batch-a", ("batch-a", "task-a"), False)
+
+    assert checked == ["token-a"]
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "status", "confirmed", "expected_call"),
+    [
+        ("pause_import_batch", "queued", None, ("pause_batch", "token-a", "batch-a")),
+        ("resume_import_batch", "paused", None, ("resume_batch", "token-a", "batch-a")),
+        ("cancel_import_batch", "queued", True, ("cancel_batch", "token-a", "batch-a")),
+    ],
+)
+def test_batch_controls_pass_only_token_and_visible_batch_id(
+    monkeypatch, handler_name, status, confirmed, expected_call,
+):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status=status)))
+
+    args = ["token-a", "batch-a"]
+    if confirmed is not None:
+        args.append(confirmed)
+    result = getattr(module, handler_name)(*args)
+
+    assert service.calls == [expected_call]
+    assert result[-1] == ""
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "status", "confirmed"),
+    [
+        ("pause_import_batch", "paused", None),
+        ("resume_import_batch", "queued", None),
+        ("cancel_import_batch", "cancel_requested", True),
+    ],
+)
+def test_batch_controls_reject_duplicate_or_wrong_state_before_mutation(
+    monkeypatch, handler_name, status, confirmed,
+):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status=status)))
+
+    args = ["token-a", "batch-a"]
+    if confirmed is not None:
+        args.append(confirmed)
+    with pytest.raises(gr.Error, match="changed"):
+        getattr(module, handler_name)(*args)
+
+    assert service.calls == []
 
 
 def test_selected_row_resolves_to_server_owned_task_id(monkeypatch):
@@ -372,10 +642,11 @@ def test_logout_clear_chain_resets_selected_import_task_state():
         if block_fn.fn is module.clear_import_ui
     )
 
-    assert module.clear_import_ui()[-1] == ""
-    assert len(clear_binding.outputs) == 4
-    assert clear_binding.outputs[-1].__class__.__name__ == "State"
-    assert clear_binding.outputs[-1].value == ""
+    assert module.clear_import_ui()[-2:] == ("", False)
+    assert len(clear_binding.outputs) == 5
+    assert clear_binding.outputs[-2].__class__.__name__ == "State"
+    assert clear_binding.outputs[-2].value == ""
+    assert clear_binding.outputs[-1].__class__.__name__ == "Checkbox"
 
 
 def test_upload_document_delegates_single_file_after_authentication(monkeypatch):

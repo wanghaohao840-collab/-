@@ -16,7 +16,7 @@ from app.database import initialize_database
 from app.session import InvalidSessionError, SessionRegistry
 from app.storage import UserStorage
 from app.import_models import ImportBatchSummary
-from app.import_repository import ImportTaskRepository
+from app.import_repository import ImportTaskRepository, InvalidImportTransition
 from app.import_service import ImportTaskService
 from app.import_worker import ImportWorkerPool
 from hello_agents.memory.rag.errors import sanitize_error_message
@@ -174,6 +174,10 @@ _IMPORT_STATUS_LABELS = {
     "queued": "排队中",
     "running": "执行中",
     "retry_wait": "等待重试",
+    "pause_requested": "暂停请求中",
+    "paused": "已暂停",
+    "cancel_requested": "取消请求中",
+    "cancelled": "已取消",
     "succeeded": "成功",
     "failed": "失败",
 }
@@ -185,6 +189,8 @@ _IMPORT_STAGE_LABELS = {
     "embedding": "生成嵌入",
     "persisting": "持久化",
     "committing": "提交结果",
+    "paused": "已暂停",
+    "cancelled": "已取消",
     "succeeded": "已完成",
     "failed": "失败",
 }
@@ -245,7 +251,9 @@ def format_batch_summary(summary: ImportBatchSummary) -> str:
     return (
         "批量导入进度\n\n"
         f"总数：{summary.total}　排队：{summary.queued}　执行中：{summary.running}　"
-        f"等待重试：{summary.retry_wait}　成功：{summary.succeeded}　失败：{summary.failed}"
+        f"等待重试：{summary.retry_wait}　暂停请求中：{summary.pause_requested}　"
+        f"已暂停：{summary.paused}　取消请求中：{summary.cancel_requested}　"
+        f"已取消：{summary.cancelled}　成功：{summary.succeeded}　失败：{summary.failed}"
     )
 
 
@@ -326,7 +334,11 @@ def refresh_import_batches(session_token):
 
 
 def clear_import_ui():
-    return gr.update(choices=[], value=None), "", [], ""
+    return gr.update(choices=[], value=None), "", [], "", False
+
+
+def clear_import_selection_and_confirmation():
+    return "", False
 
 
 def refresh_import_batch(session_token, batch_id, selected_task=""):
@@ -347,7 +359,7 @@ def refresh_import_batch(session_token, batch_id, selected_task=""):
 
 
 def select_import_task(session_token, batch_id, evt: gr.SelectData):
-    """Resolve a selected failed row to its server-owned opaque task ID."""
+    """Resolve an actionable selected row to its server-owned opaque task ID."""
 
     if not session_token:
         return ""
@@ -362,7 +374,7 @@ def select_import_task(session_token, batch_id, evt: gr.SelectData):
     if not isinstance(row_index, int) or not 0 <= row_index < len(summary.tasks):
         return ""
     task = summary.tasks[row_index]
-    return (batch_id, task.task_id) if task.status == "failed" else ""
+    return (batch_id, task.task_id) if _task_has_import_action(task) else ""
 
 
 def retry_import_task(session_token, batch_id, selected_task=""):
@@ -393,6 +405,147 @@ def retry_import_batch_failures(session_token, batch_id):
     return format_batch_summary(summary), format_task_table(summary), ""
 
 
+def _safe_import_control_error():
+    return gr.Error("The import item is no longer available or cannot be changed")
+
+
+def _task_can_pause(task) -> bool:
+    return task.status in {"queued", "retry_wait", "running"}
+
+
+def _task_can_resume(task) -> bool:
+    return task.status == "paused"
+
+
+def _task_can_cancel(task) -> bool:
+    return task.status in {
+        "queued", "retry_wait", "paused", "running", "pause_requested",
+    } or (
+        task.status == "failed"
+        and task.error_code in {"pause_cleanup_failed", "cancel_cleanup_failed"}
+    )
+
+
+def _task_has_import_action(task) -> bool:
+    return (
+        task.status == "failed"
+        or _task_can_pause(task)
+        or _task_can_resume(task)
+        or _task_can_cancel(task)
+    )
+
+
+def _require_import_batch_selection(session_token, batch_id, task_is_actionable):
+    if not isinstance(batch_id, str) or not batch_id:
+        raise gr.Error("Please select an import batch")
+    try:
+        summary = import_service.get_batch(session_token, batch_id)
+    except KeyError:
+        raise _safe_import_control_error() from None
+    if not any(task_is_actionable(task) for task in summary.tasks):
+        raise gr.Error("The import batch has no tasks that can be changed")
+    return summary
+
+
+def _require_import_task_selection(
+    session_token, batch_id, selected_task, task_is_actionable
+):
+    selection = _import_task_selection(selected_task)
+    if selection is None:
+        raise gr.Error("Please select an import task")
+    selected_batch_id, task_id = selection
+    if not isinstance(batch_id, str) or not batch_id or selected_batch_id != batch_id:
+        raise gr.Error("Selected task does not belong to the visible batch")
+    try:
+        summary = import_service.get_batch(session_token, batch_id)
+    except KeyError:
+        raise _safe_import_control_error() from None
+    task = next((item for item in summary.tasks if item.task_id == task_id), None)
+    if task is None:
+        raise _safe_import_control_error()
+    if not task_is_actionable(task):
+        raise gr.Error("The selected import task cannot be changed")
+    return selected_batch_id, task_id
+
+
+def _render_import_action(summary, batch_id, selected_task):
+    return (
+        format_batch_summary(summary),
+        format_task_table(summary),
+        _retain_import_task_selection(summary, batch_id, selected_task),
+    )
+
+
+def pause_import_task(session_token, batch_id, selected_task=""):
+    _require_session(session_token)
+    selected_batch_id, task_id = _require_import_task_selection(
+        session_token, batch_id, selected_task, _task_can_pause
+    )
+    try:
+        summary = import_service.pause_task(session_token, task_id)
+    except (InvalidImportTransition, KeyError):
+        raise _safe_import_control_error() from None
+    return _render_import_action(summary, selected_batch_id, selected_task)
+
+
+def resume_import_task(session_token, batch_id, selected_task=""):
+    _require_session(session_token)
+    selected_batch_id, task_id = _require_import_task_selection(
+        session_token, batch_id, selected_task, _task_can_resume
+    )
+    try:
+        summary = import_service.resume_task(session_token, task_id)
+    except (InvalidImportTransition, KeyError):
+        raise _safe_import_control_error() from None
+    return _render_import_action(summary, selected_batch_id, selected_task)
+
+
+def cancel_import_task(session_token, batch_id, selected_task="", confirmed=False):
+    _require_session(session_token)
+    if confirmed is not True:
+        raise gr.Error("Please confirm cancellation before continuing")
+    selected_batch_id, task_id = _require_import_task_selection(
+        session_token, batch_id, selected_task, _task_can_cancel
+    )
+    try:
+        summary = import_service.cancel_task(session_token, task_id)
+    except (InvalidImportTransition, KeyError):
+        raise _safe_import_control_error() from None
+    return _render_import_action(summary, selected_batch_id, selected_task)
+
+
+def pause_import_batch(session_token, batch_id):
+    _require_session(session_token)
+    _require_import_batch_selection(session_token, batch_id, _task_can_pause)
+    try:
+        summary = import_service.pause_batch(session_token, batch_id)
+    except (InvalidImportTransition, KeyError):
+        raise _safe_import_control_error() from None
+    return _render_import_action(summary, batch_id, "")
+
+
+def resume_import_batch(session_token, batch_id):
+    _require_session(session_token)
+    _require_import_batch_selection(session_token, batch_id, _task_can_resume)
+    try:
+        summary = import_service.resume_batch(session_token, batch_id)
+    except (InvalidImportTransition, KeyError):
+        raise _safe_import_control_error() from None
+    return _render_import_action(summary, batch_id, "")
+
+
+def cancel_import_batch(session_token, batch_id, confirmed=False):
+    _require_session(session_token)
+    if confirmed is not True:
+        raise gr.Error("Please confirm cancellation before continuing")
+    _require_import_batch_selection(session_token, batch_id, _task_can_cancel)
+    try:
+        summary = import_service.cancel_batch(session_token, batch_id)
+    except (InvalidImportTransition, KeyError):
+        raise _safe_import_control_error() from None
+    return _render_import_action(summary, batch_id, "")
+
+
 def _import_task_selection(value):
     if not isinstance(value, (list, tuple)) or len(value) != 2:
         return None
@@ -410,7 +563,7 @@ def _retain_import_task_selection(summary, batch_id, selected_task):
         return ""
     selected_task_id = selection[1]
     if any(
-        task.task_id == selected_task_id and task.status == "failed"
+        task.task_id == selected_task_id and _task_has_import_action(task)
         for task in summary.tasks
     ):
         return selection
@@ -958,6 +1111,18 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             retry_selected_btn = gr.Button("重试所选失败项")
             retry_batch_btn = gr.Button("重试本批次全部失败项")
             refresh_import_btn = gr.Button("手动刷新")
+        import_cancel_confirmation = gr.Checkbox(
+            label="我确认取消所选任务或当前批次",
+            value=False,
+        )
+        with gr.Row():
+            pause_selected_import_btn = gr.Button("暂停所选任务")
+            resume_selected_import_btn = gr.Button("恢复所选任务")
+            cancel_selected_import_btn = gr.Button("取消所选任务")
+        with gr.Row():
+            pause_import_batch_btn = gr.Button("暂停当前批次")
+            resume_import_batch_btn = gr.Button("恢复当前批次")
+            cancel_import_batch_btn = gr.Button("取消当前批次")
         import_timer = gr.Timer(value=1, active=True)
 
     # =========================
@@ -1426,6 +1591,11 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 selected_import_task_id,
             ],
             queue=False,
+        ).then(
+            fn=clear_import_selection_and_confirmation,
+            inputs=None,
+            outputs=[selected_import_task_id, import_cancel_confirmation],
+            queue=False,
         )
 
         register_btn.click(
@@ -1442,6 +1612,11 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 selected_import_task_id,
             ],
             queue=False,
+        ).then(
+            fn=clear_import_selection_and_confirmation,
+            inputs=None,
+            outputs=[selected_import_task_id, import_cancel_confirmation],
+            queue=False,
         )
 
         logout_btn.click(
@@ -1456,6 +1631,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 import_summary,
                 import_tasks,
                 selected_import_task_id,
+                import_cancel_confirmation,
             ],
             queue=False,
         )
@@ -1532,6 +1708,53 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         retry_batch_btn.click(
             fn=retry_import_batch_failures,
             inputs=[session_token, import_batch_dropdown],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
+        )
+        pause_selected_import_btn.click(
+            fn=pause_import_task,
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                selected_import_task_id,
+            ],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
+        )
+        resume_selected_import_btn.click(
+            fn=resume_import_task,
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                selected_import_task_id,
+            ],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
+        )
+        cancel_selected_import_btn.click(
+            fn=cancel_import_task,
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                selected_import_task_id,
+                import_cancel_confirmation,
+            ],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
+        )
+        pause_import_batch_btn.click(
+            fn=pause_import_batch,
+            inputs=[session_token, import_batch_dropdown],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
+        )
+        resume_import_batch_btn.click(
+            fn=resume_import_batch,
+            inputs=[session_token, import_batch_dropdown],
+            outputs=[import_summary, import_tasks, selected_import_task_id],
+        )
+        cancel_import_batch_btn.click(
+            fn=cancel_import_batch,
+            inputs=[
+                session_token,
+                import_batch_dropdown,
+                import_cancel_confirmation,
+            ],
             outputs=[import_summary, import_tasks, selected_import_task_id],
         )
 

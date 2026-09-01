@@ -56,6 +56,12 @@ STATE_CHANGING_HANDLERS = [
     ("submit_import_batch", lambda token: (token, [])),
     ("retry_import_task", lambda token: (token, "task-id")),
     ("retry_import_batch_failures", lambda token: (token, "batch-id")),
+    ("pause_import_task", lambda token: (token, "batch-id", ("batch-id", "task-id"))),
+    ("resume_import_task", lambda token: (token, "batch-id", ("batch-id", "task-id"))),
+    ("cancel_import_task", lambda token: (token, "batch-id", ("batch-id", "task-id"), True)),
+    ("pause_import_batch", lambda token: (token, "batch-id")),
+    ("resume_import_batch", lambda token: (token, "batch-id")),
+    ("cancel_import_batch", lambda token: (token, "batch-id", True)),
     ("add_note",         lambda token: (token, "test note", "concept")),
     ("clear_all_notes",  lambda token: (token,)),
     ("ask_pdf",          lambda token: (token, "what is this?", None, "auto")),
@@ -107,6 +113,12 @@ AUTHENTICATED_IMPORT_HANDLERS = [
     ),
     ("retry_import_task", lambda token: (token, "task-id")),
     ("retry_import_batch_failures", lambda token: (token, "batch-id")),
+    ("pause_import_task", lambda token: (token, "batch-id", ("batch-id", "task-id"))),
+    ("resume_import_task", lambda token: (token, "batch-id", ("batch-id", "task-id"))),
+    ("cancel_import_task", lambda token: (token, "batch-id", ("batch-id", "task-id"), True)),
+    ("pause_import_batch", lambda token: (token, "batch-id")),
+    ("resume_import_batch", lambda token: (token, "batch-id")),
+    ("cancel_import_batch", lambda token: (token, "batch-id", True)),
 ]
 
 
