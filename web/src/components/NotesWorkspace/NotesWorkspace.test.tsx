@@ -54,7 +54,7 @@ describe("NotesWorkspace", () => {
     const pending = { ...note, concept: null, body_markdown: "# Derived title\ncontent", projection_state: "pending" as const };
     const { rerender } = render(<NotesWorkspace items={[pending]} selectedNote={pending} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={retry} />);
     expect(screen.getByRole("button", { name: /Derived title/ })).toBeVisible();
-    expect(screen.getByRole("heading", { level: 2, name: "已加载 1 条笔记" })).toBeVisible();
+    expect(screen.getByRole("heading", { level: 2, name: "全部笔记 · 1" })).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent("正在同步");
     const failed = { ...pending, projection_state: "failed" as const };
     rerender(<NotesWorkspace items={[failed]} selectedNote={failed} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={retry} />);
@@ -135,5 +135,15 @@ describe("NotesWorkspace", () => {
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("button", { name: "清空笔记" }));
     expect(screen.getByRole("dialog", { name: "清空全部笔记" })).toBeVisible();
+  });
+
+  it("keeps the live search and compact filters in the Notes header", () => {
+    const { container } = render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} queryValue="memory" tagsValue="rag" sourceValue="" onFilterChange={vi.fn()} />);
+    const header = container.querySelector<HTMLElement>(".notes-toolbar");
+    expect(header).not.toBeNull();
+    expect(within(header!).getByLabelText("搜索笔记")).toHaveValue("memory");
+    expect(within(header!).getByLabelText("按标签筛选")).toHaveValue("rag");
+    expect(within(header!).getByLabelText("按来源筛选")).toBeVisible();
+    expect(within(header!).getByRole("button", { name: "新建笔记" })).toBeVisible();
   });
 });

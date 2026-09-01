@@ -26,7 +26,7 @@ export function noteTitle(markdown: string, concept: string | null): string {
 
 export function NoteList({ items, selectedId, hasMore, loadingMore, onSelect, onLoadMore, onCreate, onOpenQa }: Props) {
   return <aside className="notes-list" aria-label="笔记列表">
-    <div className="notes-list__heading"><h2>已加载 {items.length} 条笔记</h2><Button size="sm" onClick={onCreate}>新建笔记</Button></div>
+    <div className="notes-list__heading"><h2>全部笔记 · {items.length}</h2></div>
     {!items.length ? <div className="notes-list__empty"><h3>还没有笔记</h3><p>没有符合条件的笔记</p><div className="notes-list__empty-actions"><Button onClick={onCreate}>新建笔记</Button><Button hierarchy="secondary" onClick={onOpenQa}>从 QA 记录</Button></div></div> : <ol>
       {items.map((item) => <li key={item.id}>
         <button type="button" className="notes-list__item" aria-current={item.id === selectedId ? "page" : undefined} onClick={() => onSelect(item.id)}>
