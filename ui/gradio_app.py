@@ -358,6 +358,12 @@ def refresh_import_batch(session_token, batch_id, selected_task=""):
     )
 
 
+def refresh_import_batch_and_clear_confirmation(
+    session_token, batch_id, selected_task=""
+):
+    return (*refresh_import_batch(session_token, batch_id, selected_task), False)
+
+
 def select_import_task(session_token, batch_id, evt: gr.SelectData):
     """Resolve an actionable selected row to its server-owned opaque task ID."""
 
@@ -468,12 +474,13 @@ def _require_import_task_selection(
     return selected_batch_id, task_id
 
 
-def _render_import_action(summary, batch_id, selected_task):
-    return (
+def _render_import_action(summary, batch_id, selected_task, clear_confirmation=False):
+    rendered = (
         format_batch_summary(summary),
         format_task_table(summary),
         _retain_import_task_selection(summary, batch_id, selected_task),
     )
+    return (*rendered, False) if clear_confirmation else rendered
 
 
 def pause_import_task(session_token, batch_id, selected_task=""):
@@ -511,7 +518,9 @@ def cancel_import_task(session_token, batch_id, selected_task="", confirmed=Fals
         summary = import_service.cancel_task(session_token, task_id)
     except (InvalidImportTransition, KeyError):
         raise _safe_import_control_error() from None
-    return _render_import_action(summary, selected_batch_id, selected_task)
+    return _render_import_action(
+        summary, selected_batch_id, selected_task, clear_confirmation=True
+    )
 
 
 def pause_import_batch(session_token, batch_id):
@@ -543,7 +552,7 @@ def cancel_import_batch(session_token, batch_id, confirmed=False):
         summary = import_service.cancel_batch(session_token, batch_id)
     except (InvalidImportTransition, KeyError):
         raise _safe_import_control_error() from None
-    return _render_import_action(summary, batch_id, "")
+    return _render_import_action(summary, batch_id, "", clear_confirmation=True)
 
 
 def _import_task_selection(value):
@@ -1670,13 +1679,18 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             queue=False,
         )
         import_batch_dropdown.change(
-            fn=refresh_import_batch,
+            fn=refresh_import_batch_and_clear_confirmation,
             inputs=[
                 session_token,
                 import_batch_dropdown,
                 selected_import_task_id,
             ],
-            outputs=[import_summary, import_tasks, selected_import_task_id],
+            outputs=[
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+                import_cancel_confirmation,
+            ],
             queue=False,
         )
         import_timer.tick(
@@ -1736,7 +1750,12 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 selected_import_task_id,
                 import_cancel_confirmation,
             ],
-            outputs=[import_summary, import_tasks, selected_import_task_id],
+            outputs=[
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+                import_cancel_confirmation,
+            ],
         )
         pause_import_batch_btn.click(
             fn=pause_import_batch,
@@ -1755,7 +1774,12 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 import_batch_dropdown,
                 import_cancel_confirmation,
             ],
-            outputs=[import_summary, import_tasks, selected_import_task_id],
+            outputs=[
+                import_summary,
+                import_tasks,
+                selected_import_task_id,
+                import_cancel_confirmation,
+            ],
         )
 
 

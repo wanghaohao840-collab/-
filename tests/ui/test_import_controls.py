@@ -18,11 +18,16 @@ def test_task_control_bindings_use_only_session_visible_batch_and_hidden_selecti
         assert len(bindings) == 1
         binding = bindings[0]
         assert len(binding.inputs) == input_count
-        assert len(binding.outputs) == 3
+        expected_output_count = 4 if handler is module.cancel_import_task else 3
+        assert len(binding.outputs) == expected_output_count
         assert binding.inputs[0].__class__.__name__ == "State"
         assert binding.inputs[1].__class__.__name__ == "Dropdown"
         assert binding.inputs[2].__class__.__name__ == "State"
-        assert binding.outputs[-1].__class__.__name__ == "State"
+        if handler is module.cancel_import_task:
+            assert binding.outputs[-2].__class__.__name__ == "State"
+            assert binding.outputs[-1].__class__.__name__ == "Checkbox"
+        else:
+            assert binding.outputs[-1].__class__.__name__ == "State"
 
 
 def test_batch_control_bindings_use_visible_batch_and_cancel_confirmation():
@@ -38,11 +43,13 @@ def test_batch_control_bindings_use_visible_batch_and_cancel_confirmation():
         assert len(bindings) == 1
         binding = bindings[0]
         assert len(binding.inputs) == input_count
-        assert len(binding.outputs) == 3
+        expected_output_count = 4 if handler is module.cancel_import_batch else 3
+        assert len(binding.outputs) == expected_output_count
         assert binding.inputs[0].__class__.__name__ == "State"
         assert binding.inputs[1].__class__.__name__ == "Dropdown"
         if handler is module.cancel_import_batch:
             assert binding.inputs[-1].__class__.__name__ == "Checkbox"
+            assert binding.outputs[-1].__class__.__name__ == "Checkbox"
 
 
 def test_timer_is_read_only_and_never_refreshes_history_or_controls():
@@ -86,3 +93,21 @@ def test_batch_change_and_polling_clear_selection_when_task_loses_every_action()
     assert module._retain_import_task_selection(
         summary, "batch-a", ("batch-a", "task-a")
     ) == ""
+
+
+def test_batch_change_clears_confirmation_but_timer_does_not_touch_it():
+    import ui.gradio_app as module
+
+    change = _bindings(module, module.refresh_import_batch_and_clear_confirmation)
+    assert len(change) == 1
+    assert len(change[0].inputs) == 3
+    assert len(change[0].outputs) == 4
+    assert change[0].outputs[-2].__class__.__name__ == "State"
+    assert change[0].outputs[-1].__class__.__name__ == "Checkbox"
+
+    timer = next(
+        block_fn
+        for block_fn in _bindings(module, module.refresh_import_batch)
+        if getattr(block_fn, "queue", None) is False
+    )
+    assert len(timer.outputs) == 3

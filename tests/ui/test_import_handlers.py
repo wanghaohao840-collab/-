@@ -5,13 +5,19 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from types import SimpleNamespace
 
 import gradio as gr
 import pytest
 
 from app.import_models import ImportBatchSummary, ImportTaskRecord
-from app.import_repository import InvalidImportTransition
+from app.import_models import ImportTaskCreate
+from app.import_repository import ImportTaskRepository, InvalidImportTransition
+from app.import_service import ImportTaskService
+from app.database import initialize_database
+from app.session import SessionRegistry
+from app.storage import UserStorage
 
 
 def _task(**changes):
@@ -110,6 +116,180 @@ class FakeImportService:
     def cancel_batch(self, token, batch_id):
         self.calls.append(("cancel_batch", token, batch_id))
         return _summary(_task(status="cancel_requested", stage="queued"))
+
+
+class _RecordingWorkerPool:
+    def __init__(self):
+        self.notify_count = 0
+
+    def notify(self):
+        self.notify_count += 1
+
+
+def _real_control_harness(tmp_path, monkeypatch):
+    import ui.gradio_app as module
+
+    database_path = tmp_path / "app.db"
+    storage = UserStorage(tmp_path / "data")
+    initialize_database(database_path)
+    registry = SessionRegistry(db_path=database_path, storage=storage)
+    owner_token = registry.register("ImportOwner", "correct horse battery")
+    other_token = registry.register("ImportOther", "correct horse battery")
+    repository = ImportTaskRepository(database_path)
+    workers = _RecordingWorkerPool()
+    service = ImportTaskService(registry, repository, storage, workers)
+    monkeypatch.setattr(module, "session_registry", registry)
+    monkeypatch.setattr(module, "import_service", service)
+    return SimpleNamespace(
+        module=module,
+        storage=storage,
+        registry=registry,
+        repository=repository,
+        workers=workers,
+        owner_token=owner_token,
+        other_token=other_token,
+    )
+
+
+def _seed_real_import_task(harness, token):
+    session = harness.registry.get_session(token)
+    batch_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    document_id = str(uuid.uuid4())
+    staged = harness.storage.staged_import_path(session.user_id, batch_id, task_id, ".md")
+    staged.write_bytes(b"private staged import")
+    harness.repository.create_batch(
+        session.user_id,
+        [
+            ImportTaskCreate(
+                task_id=task_id,
+                batch_id=batch_id,
+                user_id=session.user_id,
+                document_id=document_id,
+                original_name="private.md",
+                file_suffix=".md",
+                size_bytes=21,
+                staged_relative_path=str(
+                    staged.relative_to(harness.storage.user_paths(session.user_id).root)
+                ),
+            )
+        ],
+    )
+    return SimpleNamespace(
+        user_id=session.user_id,
+        batch_id=batch_id,
+        task_id=task_id,
+        document_id=document_id,
+        staged=staged,
+    )
+
+
+def _real_task_snapshot(harness, seeded):
+    return (
+        harness.repository.get_batch(seeded.user_id, seeded.batch_id),
+        harness.repository.list_task_events(seeded.user_id, seeded.task_id),
+        seeded.staged.read_bytes(),
+        harness.workers.notify_count,
+    )
+
+
+def _assert_safe_control_error(exc_info, *private_values):
+    rendered = str(exc_info.value)
+    for value in private_values:
+        assert str(value) not in rendered
+
+
+def test_real_task_and_batch_cross_user_controls_have_zero_side_effects(tmp_path, monkeypatch):
+    harness = _real_control_harness(tmp_path, monkeypatch)
+    seeded = _seed_real_import_task(harness, harness.owner_token)
+    before = _real_task_snapshot(harness, seeded)
+
+    with pytest.raises(gr.Error) as task_error:
+        harness.module.pause_import_task(
+            harness.other_token, seeded.batch_id, (seeded.batch_id, seeded.task_id)
+        )
+    with pytest.raises(gr.Error) as batch_error:
+        harness.module.cancel_import_batch(harness.other_token, seeded.batch_id, True)
+
+    _assert_safe_control_error(task_error, seeded.batch_id, seeded.task_id, seeded.user_id, seeded.staged)
+    _assert_safe_control_error(batch_error, seeded.batch_id, seeded.task_id, seeded.user_id, seeded.staged)
+    assert _real_task_snapshot(harness, seeded) == before
+
+
+def test_real_wrong_batch_task_membership_has_zero_side_effects(tmp_path, monkeypatch):
+    harness = _real_control_harness(tmp_path, monkeypatch)
+    displayed = _seed_real_import_task(harness, harness.owner_token)
+    hidden_other = _seed_real_import_task(harness, harness.owner_token)
+    before = (_real_task_snapshot(harness, displayed), _real_task_snapshot(harness, hidden_other))
+
+    with pytest.raises(gr.Error) as exc_info:
+        harness.module.pause_import_task(
+            harness.owner_token,
+            displayed.batch_id,
+            (displayed.batch_id, hidden_other.task_id),
+        )
+
+    _assert_safe_control_error(
+        exc_info, displayed.batch_id, hidden_other.batch_id, hidden_other.task_id, hidden_other.staged
+    )
+    assert (_real_task_snapshot(harness, displayed), _real_task_snapshot(harness, hidden_other)) == before
+
+
+def test_real_duplicate_transition_has_zero_side_effects_after_first_control(tmp_path, monkeypatch):
+    harness = _real_control_harness(tmp_path, monkeypatch)
+    seeded = _seed_real_import_task(harness, harness.owner_token)
+
+    harness.module.pause_import_task(
+        harness.owner_token, seeded.batch_id, (seeded.batch_id, seeded.task_id)
+    )
+    after_first = _real_task_snapshot(harness, seeded)
+
+    with pytest.raises(gr.Error) as exc_info:
+        harness.module.pause_import_task(
+            harness.owner_token, seeded.batch_id, (seeded.batch_id, seeded.task_id)
+        )
+
+    _assert_safe_control_error(exc_info, seeded.batch_id, seeded.task_id, seeded.staged)
+    assert _real_task_snapshot(harness, seeded) == after_first
+
+
+def test_real_successful_cancel_resets_confirmation_and_duplicate_is_side_effect_free(
+    tmp_path, monkeypatch,
+):
+    harness = _real_control_harness(tmp_path, monkeypatch)
+    seeded = _seed_real_import_task(harness, harness.owner_token)
+
+    output = harness.module.cancel_import_task(
+        harness.owner_token, seeded.batch_id, (seeded.batch_id, seeded.task_id), True
+    )
+    after_first = _real_task_snapshot(harness, seeded)
+
+    assert output[-1] is False
+    assert after_first[0].tasks[0].status == "cancel_requested"
+    assert after_first[2] == b"private staged import"
+    assert after_first[3] == 1
+    with pytest.raises(gr.Error) as exc_info:
+        harness.module.cancel_import_task(
+            harness.owner_token, seeded.batch_id, (seeded.batch_id, seeded.task_id), True
+        )
+
+    _assert_safe_control_error(exc_info, seeded.batch_id, seeded.task_id, seeded.staged)
+    assert _real_task_snapshot(harness, seeded) == after_first
+
+
+def test_real_successful_batch_cancel_resets_confirmation(tmp_path, monkeypatch):
+    harness = _real_control_harness(tmp_path, monkeypatch)
+    seeded = _seed_real_import_task(harness, harness.owner_token)
+
+    output = harness.module.cancel_import_batch(
+        harness.owner_token, seeded.batch_id, True
+    )
+    after_cancel = _real_task_snapshot(harness, seeded)
+
+    assert output[-1] is False
+    assert after_cancel[0].tasks[0].status == "cancel_requested"
+    assert after_cancel[2] == b"private staged import"
+    assert after_cancel[3] == 1
 
 
 def test_submit_import_batch_rejects_missing_token_before_service(monkeypatch):
@@ -266,7 +446,11 @@ def test_task_controls_validate_selection_and_pass_only_token_and_hidden_task_id
     result = getattr(module, handler_name)(*args)
 
     assert service.calls == [expected_call]
-    assert result[-1] in {"", ("batch-a", "task-a")}
+    if handler_name == "cancel_import_task":
+        assert result[-2] in {"", ("batch-a", "task-a")}
+        assert result[-1] is False
+    else:
+        assert result[-1] in {"", ("batch-a", "task-a")}
 
 
 @pytest.mark.parametrize(
@@ -379,6 +563,20 @@ def test_task_cancel_requires_explicit_confirmation_before_validation_or_mutatio
     assert service.calls == []
 
 
+def test_successful_task_cancel_clears_confirmation_state(monkeypatch):
+    import ui.gradio_app as module
+
+    service = FakeImportService()
+    monkeypatch.setattr(module, "import_service", service)
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(service, "get_batch", lambda token, batch_id: _summary(_task(status="queued")))
+
+    result = module.cancel_import_task("token-a", "batch-a", ("batch-a", "task-a"), True)
+
+    assert result[-1] is False
+    assert service.calls == [("cancel_task", "token-a", "task-a")]
+
+
 def test_task_cancel_authenticates_before_reporting_missing_confirmation(monkeypatch):
     import ui.gradio_app as module
 
@@ -415,7 +613,10 @@ def test_batch_controls_pass_only_token_and_visible_batch_id(
     result = getattr(module, handler_name)(*args)
 
     assert service.calls == [expected_call]
-    assert result[-1] == ""
+    if handler_name == "cancel_import_batch":
+        assert result[-2:] == ("", False)
+    else:
+        assert result[-1] == ""
 
 
 @pytest.mark.parametrize(
