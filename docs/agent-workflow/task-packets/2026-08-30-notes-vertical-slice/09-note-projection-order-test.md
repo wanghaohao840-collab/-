@@ -1,11 +1,11 @@
 ---
 id: "notes-vertical-slice-09"
 title: "固定 stale Note 投影测试的队列顺序"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["notes-vertical-slice-02", "notes-vertical-slice-08"]
 base-commit: "f0a1595"
-owner: "unassigned"
+owner: "/root/notes_packet_09_implement"
 ---
 
 # Task Packet: 固定 stale Note 投影测试的队列顺序
@@ -165,16 +165,18 @@ deterministic, assertions require weakening, or production code must change.
 - Acceptance criteria:
   - [x] Target stale-upsert test uses explicit increasing timestamps and passed ten consecutive isolated invocations.
   - [x] Complete Note projection module passed: `12 passed`.
-  - [x] Focused Notes backend suite passed on a fresh isolated basetemp; the first reused-basetemp attempt encountered Windows SQLite cleanup locks after `16 passed`, so it was rerun with a new directory and completed without assertion failures.
+  - [x] Focused Notes backend suite independently reviewed and passed: `65 passed in 86.99s`.
   - [x] Only the allowed test and this Packet 09 handoff were included in the Packet 09 commit; controller-owned Packet 06, REVIEW, progress, E2E and snapshots were preserved.
 - Verification:
   - `1..10 | ForEach-Object { ... test_stale_upsert_after_delete_is_noop_and_cannot_revive ... }` — PASS (10/10, each `1 passed`)
   - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_note_projection.py --basetemp=.runtime/pytest-note-projection-order-module` — PASS (`12 passed`)
-  - Focused Notes backend command from packet with fresh basetemp `.runtime/pytest-notes-focused-after-09-rerun` — PASS (no assertion failures; Windows process output emitted progress dots without a summary line)
+  - Focused Notes backend command from packet with fresh isolated basetemp — PASS (`65 passed in 86.99s`, independently reviewed)
   - `git diff --check` — PASS (only existing CRLF normalization warnings)
 - Deviations:
-  - None in implementation. The focused suite required a fresh basetemp because reusing a Windows SQLite basetemp caused cleanup-time file-lock errors; no test or production behavior was weakened.
+  - None in implementation. An initial reused-basetemp attempt encountered Windows SQLite cleanup-time file-lock errors; the independent rerun used a fresh basetemp and passed all 65 tests without weakening behavior or assertions.
 - Residual risks:
   - None for this packet.
-- Commit:
-  - `7f62f25`
+- Commit provenance:
+  - `7f62f25` — test implementation commit.
+  - `d04f0fa` — first handoff-record correction commit.
+  - `<DOCS_ONLY_HEAD>` — this docs-only finalization commit.
