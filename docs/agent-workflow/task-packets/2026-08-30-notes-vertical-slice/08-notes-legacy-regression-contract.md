@@ -5,6 +5,7 @@ status: "done"
 parallel-safe: false
 depends-on: ["notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-05", "notes-vertical-slice-07"]
 base-commit: "31fd82ae5b322f658e34ba4dbf8d263754680e15"
+correction-base-commit: "695f22277c0e30e7bc174dab43df92f9fc5f5b2b"
 owner: "Codex /root/notes_packet_06_gates_finalize"
 ---
 
@@ -275,4 +276,37 @@ restore legacy persistence to make a test green.
   - The seven skipped tests are pre-existing conditional skips from the full
     suite; no new skip was added by Packet08.
 - Commit:
-  - `3df1c07` — `test: migrate notes legacy regression contract`.
+  - `695f222` — `test: migrate notes legacy regression contract` (initial
+    functional implementation; superseded by the lifecycle/ownership review
+    correction below).
+
+## Review correction handoff
+
+- Status: done
+- Review base:
+  - `695f22277c0e30e7bc174dab43df92f9fc5f5b2b`
+- Files changed:
+  - `tests/integration/test_multi_user_acceptance.py`
+  - `tests/test_user_mutation_coordination.py`
+  - `tests/ui/test_authenticated_handlers.py`
+- Corrections:
+  - Restart isolation now asserts Alice's restored Note before asserting Bob
+    has no Notes, with both service instances and tokens closed in
+    `try/finally`.
+  - Backup ownership now proves quarantine success, opaque backup ID validity,
+    Alice's successful restoration of that exact backup, and Bob's rejection.
+  - Every new `ApplicationServices` test tracks tokens, logs them out, and
+    stops services in `finally` blocks.
+- Verification:
+  - Exact eight-test regression command — PASS: `8 passed in 76.39s`.
+  - Packet08 + Packet05 focused command — PASS: `163 passed in 487.54s`.
+  - Python compilation of the three changed test modules — PASS.
+  - `git diff --check` before commit — PASS.
+  - No production files changed.
+- Functional head:
+  - `2924233` — `test: harden notes lifecycle and backup assertions`.
+- Scope confirmation:
+  - Controller-owned files were not included in the functional commit.
+- Documentation commit:
+  - This handoff is committed separately as docs-only and intentionally does
+    not embed its own commit hash.
