@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NotesWorkspace } from "./NotesWorkspace";
 import { noteTitle } from "./NoteList";
 import type { Note } from "../../features/notes/types";
@@ -8,6 +8,8 @@ import type { Note } from "../../features/notes/types";
 const note: Note = { id: "n1", body_markdown: "# 服务端内容", concept: "RAG", tags: ["学习"], sources: [], version: 1, projection_state: "ready", created_at: "2026-01-01", updated_at: "2026-01-01", deleted_at: null };
 
 describe("NotesWorkspace", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("keeps a draft local until the explicit save action", async () => {
     const user = userEvent.setup();
     const save = vi.fn();
@@ -37,6 +39,31 @@ describe("NotesWorkspace", () => {
     expect(screen.getByRole("button", { name: "保存笔记" })).toBeDisabled();
     expect(dirtyStates.at(-1)).toBe(false);
     expect(onCommitted).not.toHaveBeenCalled();
+  });
+
+  it("places the single mobile Save before editor tabs in DOM order", () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true,
+      media: "(max-width: 767px)",
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    const { container } = render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
+    const editor = container.querySelector<HTMLElement>(".notes-editor");
+    const header = editor?.querySelector<HTMLElement>(".notes-editor__heading");
+    const footer = editor?.querySelector<HTMLElement>(".notes-editor__footer");
+    expect(editor).not.toBeNull();
+    expect(within(header!).getByRole("button", { name: "保存笔记" })).toBeVisible();
+    expect(within(footer!).queryByRole("button", { name: "保存笔记" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "保存笔记" })).toHaveLength(1);
+    const controls = Array.from(editor!.querySelectorAll("button, input, textarea"));
+    expect(controls.indexOf(screen.getByRole("button", { name: "保存笔记" }))).toBeLessThan(
+      controls.indexOf(screen.getByRole("tab", { name: "编辑" })),
+    );
   });
 
   it("uses a non-empty concept before the first non-empty Markdown line", () => {

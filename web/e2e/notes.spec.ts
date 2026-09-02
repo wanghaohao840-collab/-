@@ -378,6 +378,14 @@ test("Notes approved visuals, accessibility, overflow and mobile primary targets
     expect(deleteBox!.y + deleteBox!.height).toBeLessThanOrEqual(navBox!.y);
     await settleVisuals(page);
     await expect(page).toHaveScreenshot("notes-editor.png");
+    await editor.getByLabel("笔记正文").fill("# 键盘顺序验证");
+    await expect(saveButton).toBeEnabled();
+    const backButton = editor.getByRole("button", { name: "返回笔记列表" });
+    await backButton.focus();
+    await page.keyboard.press("Tab");
+    await expect(saveButton).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(editor.getByRole("tab", { name: "编辑" })).toBeFocused();
   } else {
     await page.locator(".notes-list__item").click();
     await settleVisuals(page);

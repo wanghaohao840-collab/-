@@ -198,7 +198,8 @@ describe("AuthProvider", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "会话已过期" });
     expect(dialog).toBeVisible();
-    expect(screen.getByRole("button", { name: "重新登录" })).toHaveFocus();
+    const reloginButton = screen.getByRole("button", { name: "重新登录" });
+    await waitFor(() => expect(reloginButton).toHaveFocus());
 
     await user.keyboard("{Escape}");
 

@@ -108,7 +108,7 @@ describe("ProtectedRoute", () => {
     await waitFor(() => expect(router.state.location.pathname).toBe("/login"));
     expect(router.state.historyAction).toBe("REPLACE");
     expect(router.state.location.state).toEqual({ from: "/documents?sort=recent" });
-    expect(screen.getByTestId("login-state")).toHaveTextContent("anonymous");
+    expect(await screen.findByTestId("login-state")).toHaveTextContent("anonymous");
   });
 
   it("renders protected content after successful restoration", async () => {
@@ -153,7 +153,7 @@ describe("ProtectedRoute", () => {
       from: "/documents?sort=recent",
       sessionExpired: true,
     });
-    expect(screen.getByTestId("login-state")).toHaveTextContent("anonymous");
+    expect(await screen.findByTestId("login-state")).toHaveTextContent("anonymous");
     expect(queryClient.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
 
     cleanup();

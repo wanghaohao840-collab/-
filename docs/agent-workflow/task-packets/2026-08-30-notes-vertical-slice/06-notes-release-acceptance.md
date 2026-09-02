@@ -1,9 +1,9 @@
 ---
 id: "notes-vertical-slice-06"
 title: "完成 Notes 产品发布验收"
-status: "blocked"
+status: "done"
 parallel-safe: false
-depends-on: ["notes-vertical-slice-01", "notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-04", "notes-vertical-slice-05", "notes-vertical-slice-07", "notes-vertical-slice-08", "notes-vertical-slice-09", "notes-vertical-slice-10"]
+depends-on: ["notes-vertical-slice-01", "notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-04", "notes-vertical-slice-05", "notes-vertical-slice-07", "notes-vertical-slice-08", "notes-vertical-slice-09", "notes-vertical-slice-10", "notes-vertical-slice-11", "notes-vertical-slice-12"]
 base-commit: "8ac2775dc2cb0563095f0fad5b4a83abcbf52fb9"
 owner: "Codex /root/notes_packet_06"
 ---
@@ -116,12 +116,12 @@ Reuse QA E2E runtime patterns and one real server process. Keep deterministic en
 
 ## Acceptance criteria
 
-- [ ] All real-server Notes scenarios pass with no endpoint interception or new skip.
-- [ ] Four representative snapshots are inspected against Penpot and mapping/handoff are fresh.
-- [ ] Focused/full Python, Vitest, typecheck, lint, build, Playwright, design, `pip check` and moderate npm audit pass.
-- [ ] Docker Linux build/up/health/smoke/down passes with one application worker.
-- [ ] Repository contains no sensitive/runtime artifacts and `git diff --check` is silent.
-- [ ] All dependency criteria remain covered; no central interface was implemented twice or bypassed.
+- [x] All real-server Notes scenarios pass with no endpoint interception or new skip.
+- [x] Four representative snapshots are inspected against Penpot and mapping/handoff are fresh.
+- [x] Focused/full Python, Vitest, typecheck, lint, build, Playwright, design, `pip check` and moderate npm audit pass.
+- [x] Docker Linux build/up/health/smoke/down passes with one application worker; after successful validation, the user explicitly requested the restored project containers remain running.
+- [x] Repository contains no sensitive/runtime artifacts and `git diff --check` is silent.
+- [x] All dependency criteria remain covered; no central interface was implemented twice or bypassed.
 
 ## Test and verification commands
 
@@ -410,3 +410,36 @@ Stop with a reality-conflict report if any prerequisite packet is not done, hand
 - Commit:
   - The release-acceptance commit containing this handoff is reported by the
     controller after creation; no self-referential follow-up commit is required.
+
+### Regression after Packet 10 (2026-09-02)
+
+- Status: blocked
+- Fresh full Notes E2E on `33b57fa` completed with `10 passed, 2 failed`.
+  Desktop visual differed by 13,312 pixels (1%) and tablet by 15,459 pixels
+  (2%); all mobile scenarios, including the corrected editor, passed.
+- The accepted desktop/tablet baselines were not updated. Corrective Packet 11
+  owns restoration of the same single Save DOM node to the responsive approved
+  positions, after which this packet must rerun the full `12/12` E2E gate.
+
+### Resolution after Packets 11 and 12 (2026-09-02)
+
+- Packet 11 restored the accepted desktop/tablet footer placement while
+  mounting the same single Save action in the semantic mobile header. Its
+  initial CSS-only correction reached `12/12` visually but independent review
+  found an illogical mobile Tab order; the final `matchMedia` implementation
+  fixes that finding and the real browser now verifies back → Save → edit tab.
+- Packet 12 stabilizes two pre-existing authentication test observations by
+  awaiting the React DOM/focus commit without changing production behavior,
+  retries, timeouts or assertion meaning. Consecutive full runs passed and the
+  final frontend total is `158/158`.
+- Fresh final gates on the corrected source:
+  - full Notes Playwright `12/12`; all four approved snapshots unchanged;
+  - focused Notes UI `19/19`, full frontend `158/158`, typecheck/lint/build;
+  - design contract `10/10`, `pip check`, npm moderate audit `0`;
+  - Docker Linux `29.6.2` images rebuilt, dedicated app/Qdrant containers
+    restored against the original bind-mounted data, both healthy, and smoke
+    passed for HTTP, Qdrant readiness/write and local import.
+- The user explicitly requested the dedicated project containers remain
+  available, so the successful `release-document-library-app-1` and
+  `release-document-library-qdrant-1` instances are intentionally left running
+  rather than executing the earlier cleanup-only `down` step.

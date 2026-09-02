@@ -144,13 +144,13 @@ bulk-update snapshots or change the Penpot reference.
 
 ## Acceptance criteria
 
-- [ ] One Save button preserves behavior and appears in the mobile header.
-- [ ] Source/delete are visible above bottom nav at 390×844 with no overflow or
+- [x] One Save button preserves behavior and appears in the mobile header.
+- [x] Source/delete are visible above bottom nav at 390×844 with no overflow or
   obscured inputs; desktop/tablet regressions stay green.
-- [ ] Unit tests, full frontend, typecheck, lint and build pass.
-- [ ] Mobile Notes E2E and geometry assertions pass; only editor snapshot is
+- [x] Unit tests, full frontend, typecheck, lint and build pass.
+- [x] Mobile Notes E2E and geometry assertions pass; only editor snapshot is
   deliberately replaced after original-size comparison.
-- [ ] Handoff accurately scopes mobile clear and records MCP 2.17.0 provenance.
+- [x] Handoff accurately scopes mobile clear and records MCP 2.17.0 provenance.
 
 ## Test and verification commands
 
@@ -223,4 +223,4 @@ authority differs, or any backend/extra snapshot change is required.
 - Residual risks:
   - Notes mobile still uses runtime-authenticated data rather than Penpot’s sample strings, so future visual reviews should keep comparing geometry/state meaning rather than literal copy.
 - Commit:
-  - not committed
+  - `33b57fa`
