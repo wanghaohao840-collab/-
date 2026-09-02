@@ -196,11 +196,14 @@ class TestSameUserConcurrency:
     def test_concurrent_notes_all_persisted(self, tmp_path):
         """All concurrent add_note calls remain in SQLite Note truth."""
         services = ApplicationServices.create(tmp_path / "data")
+        reg = services.session_registry
+        token = None
+        token2 = None
         try:
-            reg = services.session_registry
             token = reg.register("Alice", "correct horse battery")
             session1 = reg.get_session(token)
-            session2 = reg.get_session(reg.login("alice", "correct horse battery"))
+            token2 = reg.login("alice", "correct horse battery")
+            session2 = reg.get_session(token2)
             a1 = session1.assistant
 
             notes = [f"note-{i}" for i in range(20)]
@@ -219,6 +222,8 @@ class TestSameUserConcurrency:
             }
             assert persisted == set(notes)
         finally:
+            reg.logout(token2)
+            reg.logout(token)
             services.stop()
 
     def test_concurrent_import_and_delete_no_orphan_sources(self, tmp_path):
@@ -290,87 +295,98 @@ class TestRestartRestoration:
 
         services1 = ApplicationServices.create(data_root)
         reg1 = services1.session_registry
-        token1 = reg1.register("Alice", "correct horse battery")
-        a1 = reg1.get_session(token1).assistant
-        uid = a1.user_id
+        services2 = None
+        reg2 = None
+        token1 = None
+        token2 = None
+        try:
+            token1 = reg1.register("Alice", "correct horse battery")
+            a1 = reg1.get_session(token1).assistant
+            uid = a1.user_id
 
-        _write_doc(tmp_path / "test.txt", "Restart test document content")
-        _stage_document(a1, tmp_path / "test.txt", "restart-doc",
-                        "restart.txt")
-        a1.add_note("restart-note-1", concept="restart")
-        a1.add_note("restart-note-2", concept="restart")
-        report_path = Path(a1.export_report_markdown())
-        report_id = report_path.stem
-        a1.memory_tool.execute(
-            "add", content="restart-memory",
-            memory_type="working", importance=0.8,
-        )
+            _write_doc(tmp_path / "test.txt", "Restart test document content")
+            _stage_document(a1, tmp_path / "test.txt", "restart-doc",
+                            "restart.txt")
+            a1.add_note("restart-note-1", concept="restart")
+            a1.add_note("restart-note-2", concept="restart")
+            report_path = Path(a1.export_report_markdown())
+            report_id = report_path.stem
+            a1.memory_tool.execute(
+                "add", content="restart-memory",
+                memory_type="working", importance=0.8,
+            )
 
-        reg1.logout(token1)
-        services1.stop()
+            reg1.logout(token1)
+            services1.stop()
 
-        # "Restart" — fresh supported application services over the same root.
-        services2 = ApplicationServices.create(data_root)
-        reg2 = services2.session_registry
-        token2 = reg2.login("alice", "correct horse battery")
-        a2 = reg2.get_session(token2).assistant
+            # "Restart" — fresh supported application services over same root.
+            services2 = ApplicationServices.create(data_root)
+            reg2 = services2.session_registry
+            token2 = reg2.login("alice", "correct horse battery")
+            a2 = reg2.get_session(token2).assistant
 
-        # ── History ────────────────────────────────────────────
-        history = read_json(
-            data_root / "users" / uid / "history.json", default={},
-        )
-        docs = history.get("documents", [])
-        assert any("restart-doc" == d.get("document_id") for d in docs), (
-            "History document not restored"
-        )
-        notes = services2.note_service.list_for_user(
-            a2.user_id, NoteFilters()
-        ).items
-        assert {note.body_markdown for note in notes} == {
-            "restart-note-1", "restart-note-2"
-        }
+            # ── History ────────────────────────────────────────
+            history = read_json(
+                data_root / "users" / uid / "history.json", default={},
+            )
+            docs = history.get("documents", [])
+            assert any("restart-doc" == d.get("document_id") for d in docs), (
+                "History document not restored"
+            )
+            notes = services2.note_service.list_for_user(
+                a2.user_id, NoteFilters()
+            ).items
+            assert {note.body_markdown for note in notes} == {
+                "restart-note-1", "restart-note-2"
+            }
 
-        # ── RAG JSON ───────────────────────────────────────────
-        rag = read_json(
-            data_root / "users" / uid / "rag" / "rag_cache.json",
-            default={},
-        )
-        chunk_doc_ids = {
-            c.get("document_id")
-            for c in rag.get("chunks", [])
-            if c.get("document_id")
-        }
-        rag_doc_ids = set(rag.get("documents", {}).keys())
-        found = "restart-doc" in chunk_doc_ids or "restart-doc" in rag_doc_ids
-        assert found, "RAG cache not restored"
+            # ── RAG JSON ───────────────────────────────────────
+            rag = read_json(
+                data_root / "users" / uid / "rag" / "rag_cache.json",
+                default={},
+            )
+            chunk_doc_ids = {
+                c.get("document_id")
+                for c in rag.get("chunks", [])
+                if c.get("document_id")
+            }
+            rag_doc_ids = set(rag.get("documents", {}).keys())
+            found = "restart-doc" in chunk_doc_ids or "restart-doc" in rag_doc_ids
+            assert found, "RAG cache not restored"
 
-        # ── Memory restoration ───────────────────────────────
-        # Notes are SQLite facts; Memory is only a rebuildable projection.
-        working_result = a2.memory_tool.execute(
-            "search", query="restart-memory", limit=10,
-        )
-        assert "restart-memory" in working_result, (
-            f"Working memory not restored after restart: {working_result[:200]}"
-        )
+            # ── Memory restoration ─────────────────────────────
+            # Notes are SQLite facts; Memory is only a rebuildable projection.
+            working_result = a2.memory_tool.execute(
+                "search", query="restart-memory", limit=10,
+            )
+            assert "restart-memory" in working_result, (
+                f"Working memory not restored after restart: {working_result[:200]}"
+            )
 
-        # ── Report index ───────────────────────────────────────
-        reports = a2.report_service.list_reports(uid)
-        assert len(reports) >= 1
-        assert any(r.id == report_id for r in reports), (
-            "Report not in index after restart"
-        )
-        content = a2.report_service.read_report(uid, report_id)
-        assert "restart-note-1" in content, (
-            "Report content not restored"
-        )
+            # ── Report index ───────────────────────────────────
+            reports = a2.report_service.list_reports(uid)
+            assert len(reports) >= 1
+            assert any(r.id == report_id for r in reports), (
+                "Report not in index after restart"
+            )
+            content = a2.report_service.read_report(uid, report_id)
+            assert "restart-note-1" in content, (
+                "Report content not restored"
+            )
 
-        # ── Uploaded files ─────────────────────────────────────
-        doc_dir = data_root / "users" / uid / "documents"
-        assert doc_dir.exists()
-        assert len(list(doc_dir.iterdir())) >= 1, (
-            "Uploaded files not restored"
-        )
-        services2.stop()
+            # ── Uploaded files ─────────────────────────────────
+            doc_dir = data_root / "users" / uid / "documents"
+            assert doc_dir.exists()
+            assert len(list(doc_dir.iterdir())) >= 1, (
+                "Uploaded files not restored"
+            )
+        finally:
+            reg1.logout(token1)
+            services1.stop()
+            if reg2 is not None:
+                reg2.logout(token2)
+            if services2 is not None:
+                services2.stop()
 
     def test_restart_preserves_user_scoped_isolation(self, tmp_path):
         """After restart, user A still cannot access user B's data."""
@@ -380,22 +396,41 @@ class TestRestartRestoration:
 
         services1 = ApplicationServices.create(data_root)
         reg1 = services1.session_registry
-        alice_tok = reg1.register("Alice", "correct horse battery")
-        reg1.register("Bob", "correct horse battery")
-        a1 = reg1.get_session(alice_tok).assistant
-        a1.add_note("alice-restart-note", concept="test")
+        services2 = None
+        reg2 = None
+        alice_tok = None
+        bob_tok1 = None
+        bob_tok = None
+        try:
+            alice_tok = reg1.register("Alice", "correct horse battery")
+            bob_tok1 = reg1.register("Bob", "correct horse battery")
+            a1 = reg1.get_session(alice_tok).assistant
+            a1.add_note("alice-restart-note", concept="test")
 
-        services1.stop()
-        services2 = ApplicationServices.create(data_root)
-        reg2 = services2.session_registry
-        bob_tok = reg2.login("bob", "correct horse battery")
-        bob = reg2.get_session(bob_tok).assistant
+            services1.stop()
+            services2 = ApplicationServices.create(data_root)
+            reg2 = services2.session_registry
+            bob_tok = reg2.login("bob", "correct horse battery")
+            bob = reg2.get_session(bob_tok).assistant
 
-        bob_notes = services2.note_service.list_for_user(
-            bob.user_id, NoteFilters()
-        ).items
-        assert bob_notes == ()
-        services2.stop()
+            alice_notes = services2.note_service.list_for_user(
+                a1.user_id, NoteFilters()
+            ).items
+            bob_notes = services2.note_service.list_for_user(
+                bob.user_id, NoteFilters()
+            ).items
+            assert [note.body_markdown for note in alice_notes] == [
+                "alice-restart-note"
+            ]
+            assert bob_notes == ()
+        finally:
+            reg1.logout(alice_tok)
+            reg1.logout(bob_tok1)
+            services1.stop()
+            if reg2 is not None:
+                reg2.logout(bob_tok)
+            if services2 is not None:
+                services2.stop()
 
 
 # ── acceptance: delete/clear scope ───────────────────────────────────────
@@ -438,27 +473,31 @@ class TestDeleteClearScope:
         preserves learning notes."""
         services = ApplicationServices.create(tmp_path / "data")
         reg = services.session_registry
-        token = reg.register("Alice", "correct horse battery")
-        session = reg.get_session(token)
-        user_id, data_root = session.user_id, services.data_root
-        a = session.assistant
+        token = None
+        try:
+            token = reg.register("Alice", "correct horse battery")
+            session = reg.get_session(token)
+            user_id, data_root = session.user_id, services.data_root
+            a = session.assistant
 
-        _write_doc(tmp_path / "doc.txt", "Doc content")
-        _stage_document(a, tmp_path / "doc.txt", "doc-x", "doc.txt")
-        a.add_note("keep-this-note", concept="survivor")
+            _write_doc(tmp_path / "doc.txt", "Doc content")
+            _stage_document(a, tmp_path / "doc.txt", "doc-x", "doc.txt")
+            a.add_note("keep-this-note", concept="survivor")
 
-        a.clear_all_documents()
+            a.clear_all_documents()
 
-        history = read_json(
-            data_root / "users" / user_id / "history.json", default={},
-        )
-        assert history.get("documents", []) == []
-        assert history.get("questions", []) == []
-        notes = services.note_service.list_for_user(
-            user_id, NoteFilters()
-        ).items
-        assert [note.body_markdown for note in notes] == ["keep-this-note"]
-        services.stop()
+            history = read_json(
+                data_root / "users" / user_id / "history.json", default={},
+            )
+            assert history.get("documents", []) == []
+            assert history.get("questions", []) == []
+            notes = services.note_service.list_for_user(
+                user_id, NoteFilters()
+            ).items
+            assert [note.body_markdown for note in notes] == ["keep-this-note"]
+        finally:
+            reg.logout(token)
+            services.stop()
 
 
 # ── acceptance: backup cross-user denial ────────────────────────────────
@@ -471,18 +510,36 @@ class TestBackupCrossUserDenial:
         """Bob cannot restore Alice's quarantined history backup."""
         services = ApplicationServices.create(tmp_path / "data")
         reg = services.session_registry
-        alice_token = reg.register("Alice", "correct horse battery")
-        bob_token = reg.register("Bob", "correct horse battery")
-        alice = reg.get_session(alice_token).assistant
-        bob = reg.get_session(bob_token).assistant
+        alice_token = None
+        bob_token = None
+        try:
+            alice_token = reg.register("Alice", "correct horse battery")
+            bob_token = reg.register("Bob", "correct horse battery")
+            alice = reg.get_session(alice_token).assistant
+            bob = reg.get_session(bob_token).assistant
 
-        _write_doc(tmp_path / "history-source.txt", "history source")
-        _stage_document(
-            alice, tmp_path / "history-source.txt",
-            "history-doc", "history-source.txt",
-        )
-        q = alice.runtime.recovery.quarantine_history()
+            _write_doc(tmp_path / "history-source.txt", "history source")
+            _stage_document(
+                alice, tmp_path / "history-source.txt",
+                "history-doc", "history-source.txt",
+            )
+            q = alice.runtime.recovery.quarantine_history()
+            assert q.success
+            assert q.backup_id
+            assert q.backup_id == Path(q.backup_id).name
+            assert q.backup_id in alice.runtime.recovery.list_history_backups()
 
-        with pytest.raises(FileNotFoundError):
-            bob.runtime.recovery.restore_history(q.backup_id)
-        services.stop()
+            restored = alice.runtime.recovery.restore_history(q.backup_id)
+            assert restored.success
+            restored_history = alice.history_repository.load()
+            assert any(
+                entry.get("document_id") == "history-doc"
+                for entry in restored_history.get("documents", [])
+            )
+
+            with pytest.raises(FileNotFoundError):
+                bob.runtime.recovery.restore_history(q.backup_id)
+        finally:
+            reg.logout(alice_token)
+            reg.logout(bob_token)
+            services.stop()

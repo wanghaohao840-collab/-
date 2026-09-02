@@ -214,59 +214,75 @@ class TestRejectedTokenNoStateChange:
         """A forged token must leave Notes and legacy history unchanged."""
         services = ApplicationServices.create(tmp_path / "data")
         isolated = services.session_registry
-        token = isolated.register("RealUser", "correct horse battery")
-        session = isolated.get_session(token)
-        assistant = session.assistant
+        token = None
+        try:
+            token = isolated.register("RealUser", "correct horse battery")
+            session = isolated.get_session(token)
+            assistant = session.assistant
 
-        # Seed state.
-        assistant.add_note("original-note", concept="original")
-        history_path = assistant.history_repository.path
-        original_bytes = history_path.read_bytes() if history_path.exists() else None
-        original_notes = services.note_service.list_for_user(
-            session.user_id, NoteFilters()
-        ).items
+            # Seed state.
+            assistant.add_note("original-note", concept="original")
+            history_path = assistant.history_repository.path
+            original_bytes = (
+                history_path.read_bytes() if history_path.exists() else None
+            )
+            original_notes = services.note_service.list_for_user(
+                session.user_id, NoteFilters()
+            ).items
 
-        monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
-        handler = _get_handler("add_note")
+            monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
+            handler = _get_handler("add_note")
 
-        with pytest.raises(gr.Error):
-            handler("forged-token", "should-not-persist", "hack")
+            with pytest.raises(gr.Error):
+                handler("forged-token", "should-not-persist", "hack")
 
-        assert (history_path.read_bytes() if history_path.exists() else None) == original_bytes
-        assert services.note_service.list_for_user(
-            session.user_id, NoteFilters()
-        ).items == original_notes
-        services.stop()
+            assert (
+                history_path.read_bytes() if history_path.exists() else None
+            ) == original_bytes
+            assert services.note_service.list_for_user(
+                session.user_id, NoteFilters()
+            ).items == original_notes
+        finally:
+            isolated.logout(token)
+            services.stop()
 
     def test_expired_token_does_not_modify_history(self, tmp_path,
                                                     monkeypatch):
         """An expired token must not change Notes or legacy history."""
         services = ApplicationServices.create(tmp_path / "data")
         isolated = services.session_registry
-        token = isolated.register("RealUser", "correct horse battery")
-        session = isolated.get_session(token)
-        assistant = session.assistant
+        token = None
+        try:
+            token = isolated.register("RealUser", "correct horse battery")
+            session = isolated.get_session(token)
+            assistant = session.assistant
 
-        assistant.add_note("pre-existing", concept="safe")
-        history_path = assistant.history_repository.path
-        original_bytes = history_path.read_bytes() if history_path.exists() else None
-        original_notes = services.note_service.list_for_user(
-            session.user_id, NoteFilters()
-        ).items
+            assistant.add_note("pre-existing", concept="safe")
+            history_path = assistant.history_repository.path
+            original_bytes = (
+                history_path.read_bytes() if history_path.exists() else None
+            )
+            original_notes = services.note_service.list_for_user(
+                session.user_id, NoteFilters()
+            ).items
 
-        # Expire.
-        isolated.idle_timeout = timedelta(seconds=-1)
-        monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
-        handler = _get_handler("add_note")
+            # Expire.
+            isolated.idle_timeout = timedelta(seconds=-1)
+            monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
+            handler = _get_handler("add_note")
 
-        with pytest.raises(gr.Error):
-            handler(token, "should-not-persist", "hack")
+            with pytest.raises(gr.Error):
+                handler(token, "should-not-persist", "hack")
 
-        assert (history_path.read_bytes() if history_path.exists() else None) == original_bytes
-        assert services.note_service.list_for_user(
-            session.user_id, NoteFilters()
-        ).items == original_notes
-        services.stop()
+            assert (
+                history_path.read_bytes() if history_path.exists() else None
+            ) == original_bytes
+            assert services.note_service.list_for_user(
+                session.user_id, NoteFilters()
+            ).items == original_notes
+        finally:
+            isolated.logout(token)
+            services.stop()
 
     @pytest.mark.parametrize("name,args_fn", AUTHENTICATED_IMPORT_HANDLERS)
     @pytest.mark.parametrize("token_kind", ["missing", "forged", "expired"])

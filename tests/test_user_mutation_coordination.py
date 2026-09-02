@@ -195,8 +195,10 @@ class TestAssistantCoordination:
     def test_concurrent_notes_merge_without_loss(self, tmp_path):
         """Packet acceptance: supported sessions retain both Note rows."""
         services = ApplicationServices.create(tmp_path / "data")
+        registry = services.session_registry
+        first_token = None
+        second_token = None
         try:
-            registry = services.session_registry
             first_token = registry.register("Alice", "correct horse battery")
             second_token = registry.login("alice", "correct horse battery")
             first = registry.get_session(first_token).assistant
@@ -215,6 +217,8 @@ class TestAssistantCoordination:
                 "first-note", "second-note"
             }
         finally:
+            registry.logout(second_token)
+            registry.logout(first_token)
             services.stop()
 
     def test_import_failure_leaves_history_untouched(self, tmp_path):
