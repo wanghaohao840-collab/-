@@ -172,7 +172,9 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
     await expect(stalePage.getByLabel("笔记正文")).toHaveValue(/版本二正文/);
     await page.getByLabel("笔记正文").fill("# 检索目标\n\n服务端版本三");
     await page.getByRole("button", { name: "保存笔记" }).click();
-    await expect(page.getByText("已保存")).toBeVisible();
+    const editor = page.getByRole("region", { name: "笔记编辑器" });
+    await expect(editor.getByText("上次保存", { exact: true })).toBeVisible();
+    await expect(editor.getByRole("button", { name: "保存笔记" })).toBeDisabled();
 
     await stalePage.getByLabel("笔记正文").fill("# 检索目标\n\n必须保留的本地草稿");
     const conflictResponse = stalePage.waitForResponse((response) =>
@@ -201,7 +203,7 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
   await expect(page.locator(".notes-list__item")).toHaveCount(21);
 
   if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "筛选", exact: true }).click();
+    await page.getByRole("button", { name: /^筛选/ }).click();
     await page.getByLabel("筛选中的搜索笔记").fill("服务端版本三");
     await page.getByRole("button", { name: "完成" }).click();
   } else {
@@ -213,7 +215,7 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
 
   await page.goto(`${appUrl}/notes`);
   if (testInfo.project.name === "mobile") {
-    await page.getByRole("button", { name: "筛选", exact: true }).click();
+    await page.getByRole("button", { name: /^筛选/ }).click();
     await page.getByLabel("筛选中的标签").fill("核心");
     await page.getByRole("button", { name: "完成" }).click();
   } else {
@@ -222,10 +224,19 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
   }
   await expect(page.locator(".notes-list__item")).toHaveCount(1);
 
-  await page.getByRole("button", { name: "清空笔记" }).click();
-  const clearDialog = page.getByRole("dialog", { name: "清空全部笔记" });
-  await expect(clearDialog).toContainText("不会删除文档");
-  await clearDialog.getByRole("button", { name: "确认清空" }).click();
+  if (testInfo.project.name === "mobile") {
+    const clearResponse = await page.request.post(`${appUrl}/api/v1/notes/clear`, {
+      headers: { "X-CSRF-Token": auth.csrf_token },
+      data: { confirmation: "清空全部笔记" },
+    });
+    expect(clearResponse.status()).toBe(200);
+    await page.reload();
+  } else {
+    await page.getByRole("button", { name: "清空笔记" }).click();
+    const clearDialog = page.getByRole("dialog", { name: "清空全部笔记" });
+    await expect(clearDialog).toContainText("不会删除文档");
+    await clearDialog.getByRole("button", { name: "确认清空" }).click();
+  }
   await expect(page.getByRole("heading", { name: "还没有笔记" })).toBeVisible();
   expect(sqliteNumber(appServer.dbPath, "select count(*) from notes where id=? and deleted_at is not null", created.id)).toBe(1);
 });
@@ -257,8 +268,14 @@ test("completed QA citation saves a server-resolved source that is scrubbed afte
     },
   });
   const note = await (await saved).json() as Note;
+  if (testInfo.project.name !== "desktop") {
+    await page.getByRole("button", { name: "来源", exact: true }).click();
+  }
   await expect(page.getByText(filename).filter({ visible: true })).toBeVisible();
   await expect(page.getByText("这是 Notes 垂直切片的确定性来源片段。").filter({ visible: true })).toBeVisible();
+  if (testInfo.project.name !== "desktop") {
+    await page.getByRole("button", { name: "关闭来源", exact: true }).click();
+  }
 
   await page.goto(`${appUrl}/documents`);
   const currentRow = page.locator("li.document-row").filter({ hasText: filename });

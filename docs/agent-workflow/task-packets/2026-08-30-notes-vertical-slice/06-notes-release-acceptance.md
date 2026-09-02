@@ -1,9 +1,9 @@
 ---
 id: "notes-vertical-slice-06"
 title: "完成 Notes 产品发布验收"
-status: "blocked"
+status: "done"
 parallel-safe: false
-depends-on: ["notes-vertical-slice-01", "notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-04", "notes-vertical-slice-05"]
+depends-on: ["notes-vertical-slice-01", "notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-04", "notes-vertical-slice-05", "notes-vertical-slice-07", "notes-vertical-slice-08", "notes-vertical-slice-09"]
 base-commit: "8ac2775dc2cb0563095f0fad5b4a83abcbf52fb9"
 owner: "Codex /root/notes_packet_06"
 ---
@@ -276,3 +276,134 @@ Stop with a reality-conflict report if any prerequisite packet is not done, hand
   - The current runtime is not visually aligned with the approved Notes boards. A new Packet 07 must own the alignment before release acceptance resumes.
 - Commit:
   - Pending blocked checkpoint commit.
+
+### Resolution after Packet 07 (2026-09-01)
+
+- Corrective Packet 07 completed in commits `94b60ec` and `31fd82a`; its independent re-review approved the Notes desktop/tablet/mobile alignment with no open Critical, Important or Minor findings.
+- Authenticated runtime geometry now proves a shrink-safe `1366×900` desktop three-column layout (`300/406/268` with 24 px gaps and no page overflow) and a `1024×768` tablet two-column layout (`300/564`, fixed source hidden, filters aligned on one row).
+- Packet 06 returns to `in_progress` without weakening any acceptance criterion. Snapshot review, full regressions, dependency audits, fresh Penpot evidence and Docker Linux smoke remain mandatory.
+
+### Final acceptance checkpoint (2026-09-02)
+
+- Status: blocked
+- Reason: the mandatory full Python regression gate is not green. The exact command completed with `1126 passed, 8 failed, 7 skipped in 1083.98s`.
+- Failing tests (all pre-existing legacy compatibility/integration expectations outside Packet 06 ownership):
+  - `tests/integration/test_multi_user_acceptance.py::TestSameUserConcurrency::test_concurrent_notes_all_persisted`
+  - `tests/integration/test_multi_user_acceptance.py::TestRestartRestoration::test_full_restart_restores_all_artifacts`
+  - `tests/integration/test_multi_user_acceptance.py::TestRestartRestoration::test_restart_preserves_user_scoped_isolation`
+  - `tests/integration/test_multi_user_acceptance.py::TestDeleteClearScope::test_clear_all_documents_keeps_notes`
+  - `tests/integration/test_multi_user_acceptance.py::TestBackupCrossUserDenial::test_cross_user_restore_history_backup_denied`
+  - `tests/test_user_mutation_coordination.py::TestAssistantCoordination::test_concurrent_notes_merge_without_loss`
+  - `tests/ui/test_authenticated_handlers.py::TestRejectedTokenNoStateChange::test_forged_token_does_not_modify_history`
+  - `tests/ui/test_authenticated_handlers.py::TestRejectedTokenNoStateChange::test_expired_token_does_not_modify_history`
+- Interpretation: the first, second, fourth, sixth, seventh and eighth failures still expect legacy `history.json.notes` writes; the third observes the resulting explicit Notes-unavailable recall response; the fifth receives `ValueError` for a missing backup ID because its preceding legacy Note write did not create the expected backup. Packet 05 explicitly requires no new JSON Note writes or random Memory Note writes, so Packet 06 does not weaken or bypass these failures.
+- Passing final gates/evidence:
+  - Full Notes E2E was already verified as `12/12` on the real single-worker server; the four checked-in snapshots were inspected at original dimensions: desktop `1440x1024`, tablet `1024x768`, mobile editor/list `390x844`. No snapshot update was run.
+  - Docker Linux: `docker info --format '{{.OSType}}|{{.ServerVersion}}'` returned `linux|29.6.2`; `docker compose config`, `docker compose --env-file deploy/.env up --build -d`, container health, `deploy/smoke_test.py --env-file deploy/.env`, and `down` all passed. The `finally` cleanup stopped and removed both containers and the network.
+  - `D:\python_self_agent\venv\Scripts\python.exe -m pip check` passed (`No broken requirements found`).
+  - `npm audit --audit-level=moderate` from `web/` passed (`found 0 vulnerabilities`).
+  - Artifact/git checks passed: `git diff --check` was silent; `deploy/.env` is ignored and untracked; only the four Notes snapshots, `notes.spec.ts`, this packet, and the pre-existing controller `progress.md`/`REVIEW.md` appear in the worktree. No runtime/test-result/deploy data was staged.
+- Acceptance criteria remain open because the full regression gate failed. Packet 06 must not be marked `done`, and the requested release-completion commit must not be created from this blocked state.
+
+### Resolution after Packet 08 (2026-09-02)
+
+- Corrective Packet 08 completed in commits `695f222`, `2924233` and `f0a1595`; independent re-review approved both specification compliance and test quality with no open findings.
+- The eight stale pre-cutover scenarios now retain their concurrency, restart, clear-scope, backup-ownership and rejected-auth invariants against the supported SQLite/NoteService fact source. Exact eight tests passed and the expanded Packet 05/08 regression passed `163` tests without production edits or JSON/Memory dual-write.
+- Packet 06 returns to `in_progress`. The full Python regression must be rerun on the corrected test head before the packet can be marked `done`; all other recorded release gates remain mandatory and may be reused only when their inputs have not changed.
+
+### Fresh final acceptance rerun (2026-09-02)
+
+- Status: blocked
+- Reason: the mandatory full Python regression gate is not green on the
+  corrected Packet 08 test head. The exact required command completed with
+  `1133 passed, 1 failed, 7 skipped in 1188.11s`.
+- Failing test:
+  - `tests/test_note_projection.py::test_stale_upsert_after_delete_is_noop_and_cannot_revive`
+- Failure evidence:
+  - The first `NoteProjectionWorker.run_once()` issued a semantic `remove`
+    call for `note:alice:<note-id>`, while the test expects the stale upsert
+    task to be consumed first with no projection call.
+  - A focused immediate rerun of the same test passed (`1 passed in 2.01s`),
+    so the failure may be order/timing-sensitive; this does not waive the
+    failed mandatory full-suite gate and requires a separate investigation.
+- Reused evidence remains valid because no product code changed after the
+  previously recorded frontend, Notes E2E, Penpot, Docker, dependency-audit,
+  design-contract or build gates. Since Packet 07, the only committed code
+  changes are Packet 08's three legacy regression test modules; the current
+  working changes remain limited to this packet, `web/e2e/notes.spec.ts`, the
+  four reviewed snapshots, and the controller-owned `progress.md`/`REVIEW.md`.
+- Fresh artifact checks:
+  - Snapshot dimensions: desktop `1440x1024`, tablet `1024x768`, mobile list
+    `390x844`, mobile editor `390x844`; no snapshot update was run.
+  - `git diff --check` — PASS (silent).
+  - No tracked deploy secret, database, runtime report, trace, upload or test
+    result was found; `deploy/.env` remains ignored and untracked if present.
+- Acceptance criteria remain open. Packet 06 must not be marked `done` and no
+  release-acceptance commit is created from this blocked state.
+
+### Resolution after Packet 09 (2026-09-02)
+
+- Corrective Packet 09 completed with test implementation `7f62f25` and handoff head `6742ba0`; independent review approved specification and code quality with no open Critical or Important findings.
+- The stale-upsert/delete test now supplies explicit increasing task timestamps, preserves the no-op and exact stable-ID delete assertions, and passed ten repeated target runs, the 12-test projection module and the 65-test focused Notes backend suite.
+- Packet 06 returns to `in_progress` without changing production scheduling or weakening the full regression gate. A fresh complete Python pass remains required before release acceptance can be committed.
+
+### Final implementation handoff (2026-09-02)
+
+- Status: done
+- Files changed:
+  - `web/e2e/notes.spec.ts`
+  - `web/e2e/notes.spec.ts-snapshots/notes-default-desktop.png`
+  - `web/e2e/notes.spec.ts-snapshots/notes-default-tablet.png`
+  - `web/e2e/notes.spec.ts-snapshots/notes-editor-mobile.png`
+  - `web/e2e/notes.spec.ts-snapshots/notes-list-mobile.png`
+  - `docs/agent-workflow/task-packets/2026-08-30-notes-vertical-slice/06-notes-release-acceptance.md`
+- Acceptance criteria:
+  - [x] Real-server Notes lifecycle, QA-source deletion, projection retry,
+    conflict, tombstone, responsive, accessibility and overflow scenarios pass:
+    full Notes Playwright `12/12` with one application worker.
+  - [x] Four snapshots were generated individually only after original-size
+    inspection against the approved Penpot source. Dimensions are desktop
+    `1440x1024`, tablet `1024x768`, mobile editor `390x844` and mobile list
+    `390x844`; no automatic snapshot update was used.
+  - [x] Fresh Penpot MCP read confirmed file
+    `3be9e5e1-190f-8090-8008-6ff3f3dcd54c`, saved revision `153`, seven pages
+    and all fifteen checked-in Notes board IDs.
+  - [x] Focused Notes backend gate passed `65` tests; full frontend gate passed
+    `18` files / `157` tests; typecheck, lint and production build passed.
+  - [x] Design contract passed `10/10`; `pip check` reported no broken
+    requirements; moderate npm audit reported `0 vulnerabilities`.
+  - [x] Docker Linux `29.6.2` compose config/build/up/health/smoke/down passed
+    with one application worker, and containers/network were removed afterward.
+  - [x] Mandatory fresh full Python regression after Packets 08 and 09 passed
+    with `1134 passed, 7 skipped in 1301.71s` and zero failures.
+  - [x] Repository boundary checks passed: `git diff --check` is silent; no
+    tracked deploy secret, runtime database, trace, report, upload or test-result
+    artifact is present. Controller-owned `progress.md` and `REVIEW.md` remain
+    outside this packet commit.
+- Reused evidence rationale:
+  - Packet 08 changed only three Python regression test modules and its packet
+    document. Packet 09 changed only deterministic timestamps in
+    `tests/test_note_projection.py` and its packet document. Neither changed
+    production code, frontend code, E2E runtime/spec inputs, snapshots, Penpot
+    mappings, dependency manifests, Docker configuration or release contracts.
+    Therefore the previously recorded frontend, Playwright, visual, Penpot,
+    dependency-audit, design, build and Docker evidence remains valid; the
+    affected Python suite was rerun fresh in full on head `6742ba0`.
+- Verification:
+  - `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q --basetemp=.runtime/pytest-notes-release-final-after-09`
+    — PASS (`1134 passed, 7 skipped in 1301.71s`).
+  - Four PNG header dimension checks — PASS (`1440x1024`, `1024x768`,
+    `390x844`, `390x844`).
+  - `git diff --check` — PASS (silent except Git's existing line-ending
+    notices).
+  - Tracked sensitive/runtime candidate scan — PASS (no matches); `.runtime/`
+    and `deploy/.env` remain ignored and unstaged.
+- Deviations:
+  - None. Earlier blockers were resolved by corrective Packets 07–09 without
+    weakening release criteria.
+- Residual risks:
+  - Existing Vite large-chunk advisory is informational and unchanged; all
+    required release gates pass.
+- Commit:
+  - The release-acceptance commit containing this handoff is reported by the
+    controller after creation; no self-referential follow-up commit is required.
