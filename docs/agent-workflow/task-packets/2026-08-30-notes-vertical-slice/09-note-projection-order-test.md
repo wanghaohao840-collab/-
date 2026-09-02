@@ -179,4 +179,4 @@ deterministic, assertions require weakening, or production code must change.
 - Commit provenance:
   - `7f62f25` — test implementation commit.
   - `d04f0fa` — first handoff-record correction commit.
-  - `<DOCS_ONLY_HEAD>` — this docs-only finalization commit.
+  - This docs-only finalization commit is the current branch HEAD.
