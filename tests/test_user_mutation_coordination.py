@@ -15,8 +15,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.bootstrap import ApplicationServices
 from app.coordination import UserMutationCoordinator
 from app.history import CorruptHistoryError, HistoryRepository
+from app.note_models import NoteFilters
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
@@ -191,19 +193,29 @@ class TestCoordinatorContract:
 
 class TestAssistantCoordination:
     def test_concurrent_notes_merge_without_loss(self, tmp_path):
-        """Packet acceptance: two sessions' notes are both retained."""
-        runtime, user_id = _make_runtime(tmp_path)
-        first = PDFLearningAssistant(user_id=user_id, runtime=runtime)
-        second = PDFLearningAssistant(user_id=user_id, runtime=runtime)
+        """Packet acceptance: supported sessions retain both Note rows."""
+        services = ApplicationServices.create(tmp_path / "data")
+        try:
+            registry = services.session_registry
+            first_token = registry.register("Alice", "correct horse battery")
+            second_token = registry.login("alice", "correct horse battery")
+            first = registry.get_session(first_token).assistant
+            second = registry.get_session(second_token).assistant
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(
-                lambda args: args[0].add_note(args[1]),
-                [(first, "first-note"), (second, "second-note")],
-            ))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(
+                    lambda args: args[0].add_note(args[1]),
+                    [(first, "first-note"), (second, "second-note")],
+                ))
 
-        notes = runtime.history.load()["notes"]
-        assert {item["note"] for item in notes} == {"first-note", "second-note"}
+            notes = services.note_service.list_for_user(
+                first.user_id, NoteFilters()
+            ).items
+            assert {item.body_markdown for item in notes} == {
+                "first-note", "second-note"
+            }
+        finally:
+            services.stop()
 
     def test_import_failure_leaves_history_untouched(self, tmp_path):
         """RAG failure on import does not add a History entry."""

@@ -15,7 +15,9 @@ from types import SimpleNamespace
 import gradio as gr
 import pytest
 
+from app.bootstrap import ApplicationServices
 from app.database import initialize_database
+from app.note_models import NoteFilters
 from app.session import SessionRegistry
 from app.storage import UserStorage, read_json
 
@@ -209,9 +211,9 @@ class TestRejectedTokenNoStateChange:
 
     def test_forged_token_does_not_modify_history(self, tmp_path,
                                                    monkeypatch):
-        """A forged token calling a mutation handler must leave every
-        user's history unchanged."""
-        isolated = _make_isolated_registry(tmp_path)
+        """A forged token must leave Notes and legacy history unchanged."""
+        services = ApplicationServices.create(tmp_path / "data")
+        isolated = services.session_registry
         token = isolated.register("RealUser", "correct horse battery")
         session = isolated.get_session(token)
         assistant = session.assistant
@@ -219,7 +221,10 @@ class TestRejectedTokenNoStateChange:
         # Seed state.
         assistant.add_note("original-note", concept="original")
         history_path = assistant.history_repository.path
-        original_bytes = history_path.read_bytes()
+        original_bytes = history_path.read_bytes() if history_path.exists() else None
+        original_notes = services.note_service.list_for_user(
+            session.user_id, NoteFilters()
+        ).items
 
         monkeypatch.setattr("ui.gradio_app.session_registry", isolated)
         handler = _get_handler("add_note")
@@ -227,23 +232,27 @@ class TestRejectedTokenNoStateChange:
         with pytest.raises(gr.Error):
             handler("forged-token", "should-not-persist", "hack")
 
-        # History must be identical.
-        assert history_path.read_bytes() == original_bytes, (
-            "History was modified by forged-token handler call"
-        )
+        assert (history_path.read_bytes() if history_path.exists() else None) == original_bytes
+        assert services.note_service.list_for_user(
+            session.user_id, NoteFilters()
+        ).items == original_notes
+        services.stop()
 
     def test_expired_token_does_not_modify_history(self, tmp_path,
                                                     monkeypatch):
-        """An expired token calling a mutation handler must not change
-        any user's history."""
-        isolated = _make_isolated_registry(tmp_path)
+        """An expired token must not change Notes or legacy history."""
+        services = ApplicationServices.create(tmp_path / "data")
+        isolated = services.session_registry
         token = isolated.register("RealUser", "correct horse battery")
         session = isolated.get_session(token)
         assistant = session.assistant
 
         assistant.add_note("pre-existing", concept="safe")
         history_path = assistant.history_repository.path
-        original_bytes = history_path.read_bytes()
+        original_bytes = history_path.read_bytes() if history_path.exists() else None
+        original_notes = services.note_service.list_for_user(
+            session.user_id, NoteFilters()
+        ).items
 
         # Expire.
         isolated.idle_timeout = timedelta(seconds=-1)
@@ -253,9 +262,11 @@ class TestRejectedTokenNoStateChange:
         with pytest.raises(gr.Error):
             handler(token, "should-not-persist", "hack")
 
-        assert history_path.read_bytes() == original_bytes, (
-            "History was modified by expired-token handler call"
-        )
+        assert (history_path.read_bytes() if history_path.exists() else None) == original_bytes
+        assert services.note_service.list_for_user(
+            session.user_id, NoteFilters()
+        ).items == original_notes
+        services.stop()
 
     @pytest.mark.parametrize("name,args_fn", AUTHENTICATED_IMPORT_HANDLERS)
     @pytest.mark.parametrize("token_kind", ["missing", "forged", "expired"])
