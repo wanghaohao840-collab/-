@@ -182,5 +182,5 @@ Compute SHA256 and byte size for each final PDF. Delete the temporary builder, e
 ## Self-Review Result
 
 - Spec coverage: all evidence, five matrices, five PDFs, non-overwrite rules, role weighting, and QA requirements have tasks.
-- Placeholder scan: no `TBD`, `TODO`, or deferred implementation language remains.
+- Placeholder scan: no placeholder or deferred implementation language remains.
 - Interface consistency: Task 1 supplies canonical evidence, Task 2 supplies rewrite strategy, Task 3 generates artifacts, and Task 4 validates the exact outputs.
