@@ -225,6 +225,9 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
   await expect(page.locator(".notes-list__item")).toHaveCount(1);
 
   if (testInfo.project.name === "mobile") {
+    await expect(
+      page.getByRole("button", { name: "清空笔记", exact: true, includeHidden: true }),
+    ).toBeHidden();
     const clearResponse = await page.request.post(`${appUrl}/api/v1/notes/clear`, {
       headers: { "X-CSRF-Token": auth.csrf_token },
       data: { confirmation: "清空全部笔记" },
@@ -345,6 +348,34 @@ test("Notes approved visuals, accessibility, overflow and mobile primary targets
     await expect(page).toHaveScreenshot("notes-list.png");
     await page.locator(".notes-list__item").click();
     await expect(page).toHaveURL(new RegExp(`note=${note.id}`));
+    await expect(page.getByRole("button", { name: "保存笔记", includeHidden: true })).toHaveCount(1);
+    const editor = page.getByRole("region", { name: "笔记编辑器" });
+    const saveButton = editor.getByRole("button", { name: "保存笔记" });
+    const sourceButton = editor.getByRole("button", { name: "来源", exact: true });
+    const deleteButton = editor.getByRole("button", { name: "删除笔记" });
+    const tabList = editor.getByRole("tablist", { name: "笔记内容模式" });
+    const mobileNav = page.locator(".mobile-nav");
+    const [saveBox, sourceBox, deleteBox, tabListBox, navBox] = await Promise.all([
+      saveButton.boundingBox(),
+      sourceButton.boundingBox(),
+      deleteButton.boundingBox(),
+      tabList.boundingBox(),
+      mobileNav.boundingBox(),
+    ]);
+    expect(saveBox).not.toBeNull();
+    expect(sourceBox).not.toBeNull();
+    expect(deleteBox).not.toBeNull();
+    expect(tabListBox).not.toBeNull();
+    expect(navBox).not.toBeNull();
+    expect(saveBox!.y).toBeLessThan(tabListBox!.y);
+    expect(saveBox!.y).toBeGreaterThanOrEqual(0);
+    expect(saveBox!.x + saveBox!.width).toBeLessThanOrEqual(390);
+    expect(sourceBox!.height).toBeGreaterThanOrEqual(44);
+    expect(sourceBox!.width).toBeGreaterThanOrEqual(44);
+    expect(deleteBox!.height).toBeGreaterThanOrEqual(44);
+    expect(deleteBox!.width).toBeGreaterThanOrEqual(44);
+    expect(sourceBox!.y + sourceBox!.height).toBeLessThanOrEqual(navBox!.y);
+    expect(deleteBox!.y + deleteBox!.height).toBeLessThanOrEqual(navBox!.y);
     await settleVisuals(page);
     await expect(page).toHaveScreenshot("notes-editor.png");
   } else {

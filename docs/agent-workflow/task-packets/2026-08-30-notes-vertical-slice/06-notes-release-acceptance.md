@@ -1,9 +1,9 @@
 ---
 id: "notes-vertical-slice-06"
 title: "完成 Notes 产品发布验收"
-status: "done"
+status: "blocked"
 parallel-safe: false
-depends-on: ["notes-vertical-slice-01", "notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-04", "notes-vertical-slice-05", "notes-vertical-slice-07", "notes-vertical-slice-08", "notes-vertical-slice-09"]
+depends-on: ["notes-vertical-slice-01", "notes-vertical-slice-02", "notes-vertical-slice-03", "notes-vertical-slice-04", "notes-vertical-slice-05", "notes-vertical-slice-07", "notes-vertical-slice-08", "notes-vertical-slice-09", "notes-vertical-slice-10"]
 base-commit: "8ac2775dc2cb0563095f0fad5b4a83abcbf52fb9"
 owner: "Codex /root/notes_packet_06"
 ---
@@ -179,7 +179,7 @@ Stop with a reality-conflict report if any prerequisite packet is not done, hand
 
 ### Resolution
 
-- Resolved on 2026-08-31 without changing acceptance criteria: the official local `@penpot/mcp@stable` 2.15.4 bridge is listening on `4400/4401/4402`; the authenticated target file is open in the in-app browser and the Penpot UI reports `MCP connected`.
+- Resolved on 2026-08-31 without changing acceptance criteria: the official local `@penpot/mcp@stable` 2.17.0 bridge is listening on `4400/4401/4402`; the authenticated target file is open in the in-app browser and the Penpot UI reports `MCP connected`.
 - Docker Desktop was started from the existing local installation; `docker info --format '{{.OSType}}|{{.ServerVersion}}'` now returns `linux|29.6.2`.
 - Packet 06 returns to `in_progress` and must still perform its own MCP fresh read plus all visual, regression and Docker gates.
 
@@ -365,6 +365,9 @@ Stop with a reality-conflict report if any prerequisite packet is not done, hand
     inspection against the approved Penpot source. Dimensions are desktop
     `1440x1024`, tablet `1024x768`, mobile editor `390x844` and mobile list
     `390x844`; no automatic snapshot update was used.
+  - [x] Mobile acceptance does not claim a bulk-clear UI: the authenticated
+    lifecycle proves the hidden clear action plus the same clear API/tombstone
+    invariant, while per-note delete remains the visible destructive editor UI.
   - [x] Fresh Penpot MCP read confirmed file
     `3be9e5e1-190f-8090-8008-6ff3f3dcd54c`, saved revision `153`, seven pages
     and all fifteen checked-in Notes board IDs.

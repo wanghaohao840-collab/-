@@ -12,6 +12,8 @@ describe("NotesWorkspace", () => {
     const user = userEvent.setup();
     const save = vi.fn();
     render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={save} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
+    expect(screen.getAllByRole("button", { name: "保存笔记" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "保存笔记" })).toHaveClass("notes-editor__save");
     const body = screen.getByLabelText("笔记正文");
     await user.clear(body);
     await user.type(body, "新的学习笔记");
