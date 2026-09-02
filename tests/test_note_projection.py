@@ -179,8 +179,12 @@ def test_runtime_acquire_failure_is_recorded_without_release(tmp_path: Path) -> 
 
 def test_stale_upsert_after_delete_is_noop_and_cannot_revive(tmp_path: Path) -> None:
     _, notes, tasks = setup_domain(tmp_path)
-    note = notes.create("alice", "body", None, (), "r")
-    notes.soft_delete("alice", note.id, expected_version=1)
+    note = notes.create(
+        "alice", "body", None, (), "r", now="2026-09-02T00:00:00Z"
+    )
+    notes.soft_delete(
+        "alice", note.id, expected_version=1, now="2026-09-02T00:00:01Z"
+    )
     manager = FakeManager()
     runtime = SimpleNamespace(user_id="alice", lock=RLock(), memory_tool=SimpleNamespace(memory_manager=manager))
     worker = NoteProjectionWorker(tasks, notes, RuntimeRegistry(runtime), DefaultNoteMemoryProjection(), worker_id="w")
