@@ -395,6 +395,10 @@ QA 冷备份必须把 `app.db`、用户目录、Memory 与向量/图存储作为
 旧备份前必须确认不会把已删除内容重新带回。多副本部署仍需共享 Session、分布式
 用户锁、共享任务队列/唤醒与一致存储，不能只增加 Uvicorn worker 数量。
 
+Windows Docker Desktop 的登录恢复、五分钟巡检、每日冷备、每月隔离恢复演练、
+安全更新/回滚和 Qdrant POSIX 命名卷迁移见
+[`deploy/windows/README.md`](deploy/windows/README.md)。
+
 ## 使用流程
 
 1. 注册或登录。用户名长度为 3–32，密码长度为 8–128。
