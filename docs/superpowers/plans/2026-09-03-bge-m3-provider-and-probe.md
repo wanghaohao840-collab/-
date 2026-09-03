@@ -944,7 +944,7 @@ or accessing the network. Do not run a real probe before the operator fills the 
 the dormant CLI and a blank key field for the operator. This task does not activate
 remote RAG or rebuild/restart the production image.
 
-- [ ] **Step 1: Verify the full relevant baseline before stable integration.**
+- [x] **Step 1: Verify the full relevant baseline before stable integration.**
 
 ```powershell
 D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/memory tests/deploy -q --basetemp=.pytest-tmp-bge-e1-final
@@ -958,7 +958,7 @@ integrate only verified E1 commits using the repository's agreed Git workflow. P
 the pre-existing stable edits listed in Global Constraints. Record actual commit IDs;
 do not invent a branch or cherry-pick unrelated work. Rerun the E1 tests in stable cwd.
 
-- [ ] **Step 2: Prepare the key field without reading secrets into output.**
+- [x] **Step 2: Prepare the key field without reading secrets into output.**
 
 Read only existing RAG_EMBEDDING key names and `git check-ignore deploy/.env`; do not
 print the whole file or any existing value. If the segment is absent, use apply_patch
@@ -966,7 +966,7 @@ to add the exact dormant block from Task 3. If present, leave existing user valu
 unchanged and report only whether the key is set. Do not rewrite the whole `.env`,
 change encoding/ACL or add a fake credential. Confirm no duplicate key names.
 
-- [ ] **Step 3: Open the exact stable file and wait for the operator.**
+- [x] **Step 3: Open the exact stable file and wait for the operator.**
 
 Use `open_in_codex` for `D:\python_self_agent\deploy\.env` at the line containing
 `RAG_EMBEDDING_API_KEY=`. Tell the operator to fill only that field and save; do not
@@ -1011,6 +1011,36 @@ plan must similarly consume E2's tested registry/runtime interfaces. These are o
 continuations of the approved spec, not reasons to ask again which embedding model to use.
 
 ## Plan self-review and progress
+
+### E1 code integration and operator handoff (2026-09-03)
+
+- Verified commits `deba636`, `118d19d`, `770476a` were fast-forward integrated
+  into stable `D:\python_self_agent`, branch `codex/batch-import-async-tasks`.
+- Full worktree regression: **477 passed, 1 skipped in 239.32s**, using
+  `pytest tests/memory tests/deploy -q -rs --basetemp=.pytest-tmp-bge-e1-final`.
+  The single skip is the Windows backup symlink test (WinError 1314: the current
+  process cannot create symlinks). The fallback-telemetry tests now ran after
+  archiving only the initial failed-test telemetry within the worktree.
+- Stable integration regression: **105 passed**, using the three new test files
+  plus `tests/deploy/test_compose_contract.py`,
+  `--basetemp=.pytest-tmp-bge-stable-e1`. `pip check` and diff checks passed.
+- Added nine dormant RAG settings to ignored stable `deploy/.env`. The API key
+  field is blank at line 33, provider remains `simple`. Normalized-content hash
+  verified the complete original configuration was preserved; the existing ACL
+  is unchanged. No secret value was printed or committed.
+- All five pre-existing modified stable files were verified byte-for-byte
+  unchanged. Existing untracked data directories were preserved.
+- Requested the right-hand file panel at the key line; the app returned
+  `queued`, so visual display is not claimed verified. Operator can also open
+  `D:\python_self_agent\deploy\.env` directly.
+- App/Qdrant remain healthy; no image build, container restart, live embedding
+  API call, registry or vector-index write occurred. Local integration is not
+  production embedding activation. E2/E3 and deep smoke remain pending.
+- No push: the stable branch already had 293 unrelated unpublished ancestor
+  commits before E1. This handoff does not publish that history.
+- **Next action:** operator fills only `RAG_EMBEDDING_API_KEY`, saves and confirms
+  “已配置”; then perform Task 4 Step 4's offline check and public-text probe.
+  E1 live-provider acceptance remains incomplete until that probe passes.
 
 ### Task 3 verification (2026-09-03)
 
