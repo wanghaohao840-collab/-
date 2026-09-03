@@ -50,7 +50,7 @@ mapping. Candidate mode selects the remote profile without changing any environm
 `normalize_vector(value, dimension)` returns finite, nonzero, L2-normalized floats.
 `EmbeddingFailure` extends existing `RAGEmbeddingError` with safe code/status/retryable fields.
 
-- [ ] **Step 1: Add the complete failing contract tests.**
+- [x] **Step 1: Add the complete failing contract tests.**
 
 ```python
 # tests/memory/rag/test_embedding_profile.py
@@ -135,7 +135,7 @@ def test_normalize_without_padding_or_overflow():
     assert math.isclose(math.hypot(*result), 1.0)
 ```
 
-- [ ] **Step 2: Run red, then implement the complete module below.**
+- [x] **Step 2: Run red, then implement the complete module below.**
 
 Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/memory/rag/test_embedding_profile.py -q --basetemp=.pytest-tmp-bge-profile-red`.
 Expected first failure: missing `embedding_profile` module, not a real API request.
@@ -259,7 +259,7 @@ do not turn the key-bearing endpoint into an unrestricted user-facing proxy.
 E2 will derive the actual pipeline-specific chunking/preprocessing identity before
 activating an index; E1's profile describes the dormant client contract only.
 
-- [ ] **Step 3: Run green and commit the Task 1 deliverable.**
+- [x] **Step 3: Run green and commit the Task 1 deliverable.**
 
 ```powershell
 D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/memory/rag/test_embedding_profile.py -q --basetemp=.pytest-tmp-bge-profile-green
@@ -1012,11 +1012,40 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 
 ## Plan self-review and progress
 
+### Execution baseline (2026-09-03)
+
+- Isolated worktree: `.worktrees/bge-m3-provider-and-probe`, branch
+  `codex/bge-m3-provider-and-probe`, starting commit `e610bad`.
+- Reused the stable checkout's Python virtual environment; `pip check` passed.
+- Baseline `pytest tests/memory tests/deploy -q
+  --basetemp=.pytest-tmp-bge-baseline`: **375 passed, 4 skipped, 2 failed**.
+- Both failures are existing Windows health-recovery tests that reference the
+  checkout's ignored `deploy/.env`. The fresh worktree has no such file;
+  a read-only `Get-OperationsConfig` diagnostic reproduced the missing-file error
+  before Docker or HTTP checks execute. No production credentials were copied.
+- Operator approved a secret-free worktree `deploy/.env`. Baseline rerun with
+  `--basetemp=.pytest-tmp-bge-baseline-recheck`: **377 passed, 4 skipped**.
+  The initial failed-test telemetry was moved from worktree `deploy-state` to
+  `.operations-test-bge-initial-failure` so later fallback telemetry tests can run;
+  the production state directory was not touched.
+
+### Task 1 verification (2026-09-03)
+
+- Contract red: missing `embedding_profile` module; initial green: **31 passed**.
+- Review found that direct dataclass construction bypassed the env parser's
+  safety checks. Added 12 reproducing failures, then centralized remote safety
+  limits in `EmbeddingSettings.__post_init__`; also reject unresolved key
+  interpolation without inheriting environment secrets.
+- Hardened green: **43 passed** using
+  `tests/memory/rag/test_embedding_profile.py --basetemp=.pytest-tmp-bge-profile-hardened`.
+- `git diff --check` passed. Implementation files, not the initial code sketches
+  above, are authoritative for the reviewed hardening.
+
 - [x] Re-read approved spec, repository context, current settings/deployment contracts.
 - [x] Use a bounded E1 plan with named follow-on ownership for every remaining spec section.
 - [x] Provide complete initial modules and tests, explicit commands and expected outcomes.
 - [x] Static self-review: six Python code blocks parsed with the project venv in UTF-8 mode; no unfinished-code markers found. This is syntax validation, not executed unit tests.
-- [ ] Execute Task 1 red/green and record results.
+- [x] Execute Task 1 red/green and record results.
 - [ ] Execute Task 2 red/green and record results.
 - [ ] Execute Task 3 red/green and record results.
 - [ ] Integrate E1, open key entry and record operator confirmation/probe result.
