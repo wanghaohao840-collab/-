@@ -90,6 +90,19 @@ def test_environment_template_contains_no_real_secret():
     assert "sk-" not in source
 
 
+def test_qdrant_uses_stable_posix_named_volume():
+    source = COMPOSE.read_text(encoding="utf-8")
+    env_source = ENV_EXAMPLE.read_text(encoding="utf-8")
+    qdrant_block = source.split("  qdrant:", 1)[1].split("  neo4j:", 1)[0]
+
+    assert "type: volume" in qdrant_block
+    assert "source: qdrant_data" in qdrant_block
+    assert "target: /qdrant/storage" in qdrant_block
+    assert '${DEPLOY_DATA_ROOT:-./deploy-data}/qdrant' not in qdrant_block
+    assert "name: ${QDRANT_VOLUME_NAME:-zhiyan_qdrant_data}" in source
+    assert "QDRANT_VOLUME_NAME=zhiyan_qdrant_data" in env_source
+
+
 def test_environment_template_contains_operations_roots_and_cooldown():
     source = ENV_EXAMPLE.read_text(encoding="utf-8")
 

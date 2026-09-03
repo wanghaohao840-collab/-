@@ -149,6 +149,14 @@ function Get-OperationsConfig {
     }
     $script:OperationsNotifyCooldownMinutes = $notificationCooldownMinutes
 
+    $qdrantVolumeName = Read-DeployEnvValue -EnvFile $envPath -Name 'QDRANT_VOLUME_NAME'
+    if ([string]::IsNullOrWhiteSpace($qdrantVolumeName)) {
+        $qdrantVolumeName = 'zhiyan_qdrant_data'
+    }
+    if ($qdrantVolumeName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') {
+        throw 'QDRANT_VOLUME_NAME must be a safe Docker volume name'
+    }
+
     $statePath = Resolve-OperationsPath -Path $StateRoot -BasePath $repositoryPath
     $backupPath = Resolve-OperationsPath -Path $BackupRoot -BasePath $repositoryPath
 
@@ -165,6 +173,7 @@ function Get-OperationsConfig {
         StateRoot = $statePath
         BackupRoot = $backupPath
         DataRoot = $dataRoot
+        QdrantVolumeName = $qdrantVolumeName
         NotificationCooldownMinutes = $notificationCooldownMinutes
         Python = Join-Path $repositoryPath 'venv\Scripts\python.exe'
     }

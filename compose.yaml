@@ -37,7 +37,9 @@ services:
     expose:
       - "6333"
     volumes:
-      - "${DEPLOY_DATA_ROOT:-./deploy-data}/qdrant:/qdrant/storage"
+      - type: volume
+        source: qdrant_data
+        target: /qdrant/storage
     healthcheck:
       test:
         - CMD-SHELL
@@ -88,3 +90,7 @@ services:
 networks:
   app_net:
     driver: bridge
+
+volumes:
+  qdrant_data:
+    name: ${QDRANT_VOLUME_NAME:-zhiyan_qdrant_data}
