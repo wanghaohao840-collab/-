@@ -283,7 +283,7 @@ and asynchronous counterparts `aembed_documents` / `aembed_query`. Async callers
 use the async API or an existing worker thread; sync invocation inside an event loop
 fails explicitly instead of trying to nest `asyncio.run`.
 
-- [ ] **Step 1: Add complete failing protocol and failure tests.**
+- [x] **Step 1: Add complete failing protocol and failure tests.**
 
 ```python
 # tests/memory/rag/test_embedding_client.py
@@ -493,7 +493,7 @@ def test_oversized_response_is_rejected():
         client.embed_query("query")
 ```
 
-- [ ] **Step 2: Run red and add the complete client module.**
+- [x] **Step 2: Run red and add the complete client module.**
 
 Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/memory/rag/test_embedding_client.py -q --basetemp=.pytest-tmp-bge-client-red`.
 Expected initial failure: missing `embedding_client` module.
@@ -672,7 +672,7 @@ The asynchronous request deadline is intentional: HTTPX's read timeout alone is 
 inactivity timeout, not a total-request deadline. Each call closes its HTTP client;
 there is no cross-user embedding cache or long-lived event-loop thread.
 
-- [ ] **Step 3: Verify, then commit Task 2.**
+- [x] **Step 3: Verify, then commit Task 2.**
 
 ```powershell
 D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/memory/rag/test_embedding_profile.py tests/memory/rag/test_embedding_client.py -q --basetemp=.pytest-tmp-bge-client-green
@@ -1012,6 +1012,18 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 
 ## Plan self-review and progress
 
+### Task 2 verification (2026-09-03)
+
+- Task 1 committed as `deba636`.
+- Client red: missing `embedding_client` module; initial green: **78 passed**
+  across profile/client suites. Added boundary coverage for whole-input
+  prevalidation, UTF-8 size, no partial result, long Retry-After, slot cleanup,
+  slot-wait budget, safe transport errors, and explicit proxy/redirect disabling.
+- Final profile/client green: **86 passed**, using
+  `--basetemp=.pytest-tmp-bge-client-boundaries`; `pip check` and `git diff --check`
+  passed. HTTPX 0.28.1 is now an explicit dependency without upgrading the venv.
+- All requests used mock transports; no live credential or business data sent.
+
 ### Execution baseline (2026-09-03)
 
 - Isolated worktree: `.worktrees/bge-m3-provider-and-probe`, branch
@@ -1046,7 +1058,7 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 - [x] Provide complete initial modules and tests, explicit commands and expected outcomes.
 - [x] Static self-review: six Python code blocks parsed with the project venv in UTF-8 mode; no unfinished-code markers found. This is syntax validation, not executed unit tests.
 - [x] Execute Task 1 red/green and record results.
-- [ ] Execute Task 2 red/green and record results.
+- [x] Execute Task 2 red/green and record results.
 - [ ] Execute Task 3 red/green and record results.
 - [ ] Integrate E1, open key entry and record operator confirmation/probe result.
 
