@@ -16,6 +16,7 @@ def test_migration_preserves_legacy_and_records_evidence_contract():
     assert "LegacyQdrantRoot" in source
     assert "Export-LegacyQdrantDirectory" in source
     assert "Get-ComposeQdrantInventory" in source
+    assert "'--env-file', $config.EnvFile" in source
     assert "legacy_retained = $true" in source
     assert "Remove-Item -LiteralPath $legacy" not in source
     assert "docker volume rm" not in source.lower()

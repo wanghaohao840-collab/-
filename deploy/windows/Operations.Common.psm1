@@ -165,6 +165,11 @@ function Get-OperationsConfig {
     if ($qdrantVolumeName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') {
         throw 'QDRANT_VOLUME_NAME must be a safe Docker volume name'
     }
+    $pythonSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'OPERATIONS_PYTHON'
+    if ([string]::IsNullOrWhiteSpace($pythonSetting)) {
+        $pythonSetting = 'venv\Scripts\python.exe'
+    }
+    $operationsPython = Resolve-OperationsPath -Path $pythonSetting -BasePath $repositoryPath
 
     $statePath = Resolve-OperationsPath -Path $StateRoot -BasePath $repositoryPath
     $backupPath = Resolve-OperationsPath -Path $BackupRoot -BasePath $repositoryPath
@@ -184,7 +189,7 @@ function Get-OperationsConfig {
         DataRoot = $dataRoot
         QdrantVolumeName = $qdrantVolumeName
         NotificationCooldownMinutes = $notificationCooldownMinutes
-        Python = Join-Path $repositoryPath 'venv\Scripts\python.exe'
+        Python = $operationsPython
     }
 }
 

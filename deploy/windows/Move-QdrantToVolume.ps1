@@ -170,6 +170,10 @@ try {
         throw 'Migrated deployment did not become healthy'
     }
     $inventory = @(Get-ComposeQdrantInventory -Config $config)
+    Invoke-MigrationExternal -FilePath $config.Python -ArgumentList @(
+        (Join-Path $config.RepositoryRoot 'deploy\smoke_test.py'),
+        '--env-file', $config.EnvFile
+    ) | Out-Null
     $metadata = [ordered]@{
         format = 1
         created_at = (Get-Date).ToUniversalTime().ToString('o')

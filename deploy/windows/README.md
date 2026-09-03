@@ -11,6 +11,8 @@
   `zhiyan_qdrant_data`；
 - `DEPLOY_STATE_ROOT`：健康状态、操作锁、日志和演练报告；
 - `DEPLOY_BACKUP_ROOT`：日备、周备、迁移证据和 Qdrant 卷归档；
+- `OPERATIONS_PYTHON`：运维 smoke 使用的 Python；稳定部署默认
+  `./venv/Scripts/python.exe`，worktree 验证可指向稳定根目录的虚拟环境；
 - `deploy/.env`：秘密配置，不进入备份和 Git。
 
 不要把 Qdrant 的 `/qdrant/storage` 重新绑定到 NTFS，也不要直接访问 Docker
@@ -101,7 +103,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy\windows\Uninstall
 ```powershell
 docker compose --env-file deploy/.env up -d --force-recreate app
 D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py `
-  --base-url http://127.0.0.1:7860 --deep
+  --env-file deploy\.env --deep
 ```
 
 深度检查会实际调用 LLM；凭据未配置前不要运行。

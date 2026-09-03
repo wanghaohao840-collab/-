@@ -487,7 +487,7 @@ Expected: exit zero, original directory still exists, migration backup checksum 
 ```powershell
 docker compose --env-file deploy/.env up -d --build
 docker inspect (docker compose --env-file deploy/.env ps -q qdrant) --format '{{json .Mounts}}'
-D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py --base-url http://127.0.0.1:7860
+D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py --env-file deploy\.env
 ```
 
 Expected: Qdrant mount type is `volume`, source is `zhiyan_qdrant_data`, all services are healthy, and shallow smoke passes.
@@ -567,7 +567,7 @@ Do not run deep smoke yet. Wait for explicit confirmation that `LLM_API_KEY`, `L
 - [ ] **Step 5: After operator confirmation, execute deep smoke**
 
 ```powershell
-D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py --base-url http://127.0.0.1:7860 --deep
+D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py --env-file deploy\.env --deep
 ```
 
 Expected: authentication, document ingestion, retrieval, and a real LLM answer complete successfully with grounded evidence.

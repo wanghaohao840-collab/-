@@ -108,9 +108,9 @@ function Test-QdrantVolumeEmpty {
     $output = @(Invoke-QdrantVolumeExternal -FilePath 'docker' -ArgumentList @(
         'run', '--rm', '--user', '0:0',
         '--mount', "type=volume,source=$safeName,target=/volume,readonly",
-        '--entrypoint', 'sh', $HelperImage, '-ec', 'test -z "$(find /volume -mindepth 1 -maxdepth 1 -print -quit)" && printf empty'
+        '--entrypoint', 'ls', $HelperImage, '-A', '/volume'
     ) -ExternalInvoker $ExternalInvoker)
-    return (@($output | Where-Object { ([string]$_).Trim() -eq 'empty' }).Count -eq 1)
+    return (@($output | Where-Object { -not [string]::IsNullOrWhiteSpace(([string]$_).Trim()) }).Count -eq 0)
 }
 
 function Export-QdrantVolume {

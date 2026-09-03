@@ -64,6 +64,27 @@ def test_operations_config_defaults_and_validates_qdrant_volume(tmp_path: Path):
     assert "safe Docker volume name" in result.stderr
 
 
+def test_operations_config_allows_explicit_python_runtime(tmp_path: Path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    (repository / "data").mkdir()
+    env_file = repository / ".env"
+    runtime = tmp_path / "runtime" / "python.exe"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\n"
+        + f"OPERATIONS_PYTHON={runtime.as_posix()}\n",
+        encoding="utf-8",
+    )
+    script = (
+        f"Import-Module '{ps_quote(OPERATIONS)}' -Force; "
+        f"(Get-OperationsConfig -RepositoryRoot '{ps_quote(repository)}' -EnvFile '{ps_quote(env_file)}').Python"
+    )
+    result = run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(result.stdout.strip()) == runtime
+
+
 def test_volume_commands_use_read_only_source_mounts():
     source = MODULE.read_text(encoding="utf-8")
     assert "type=volume,source=$safeName,target=/source,readonly" in source
