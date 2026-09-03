@@ -116,6 +116,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy\windows\Install-O
 - `PythonSelfAgent-DailyBackup`：每天 03:00 一致性冷备份，保留 7 daily 与 4 weekly 备份集；
 - `PythonSelfAgent-MonthlyRestoreDrill`：first Sunday 04:00 隔离恢复演练。
 
+若旧版本在 `Register-ScheduledTask` 报 `0x80070057`，请先检查实际已注册的
+任务，不要把“前三项已成功、第四项失败”误认为全部失败。月度任务现通过
+Windows Task Scheduler 原生接口生成 XML，并关闭该任务不支持的统一调度
+引擎；全部四份 XML 在 ACL、防火墙和任务写入之前进行只读校验。
+更新脚本后可在管理员 PowerShell 重新执行上述安装命令，按原名更新四项任务，
+不会创建重复任务或改变容器数据。只读校验不代替实际注册与运行验收。
+
 检查任务定义与状态，并按需手动触发：
 
 ```powershell

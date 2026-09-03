@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import time
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -1075,7 +1076,7 @@ def assert_installer_monthly_static_contracts(source: str) -> None:
         "DaysOfWeek = [uint16]1",
         "WeeksOfMonth = [uint16]1",
         "$properties[$monthPropertyName] = [uint16]4095",
-        "-InputObject $task.Definition",
+        "-Xml $task.Xml",
     ):
         assert exact_contract in source
 
@@ -1289,10 +1290,11 @@ def test_operations_installer_builds_all_task_definitions_before_system_mutation
         "# All preflight checks and in-memory task validation are above this line."
     )
     registration = source.index(
-        "Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition"
+        "Register-ScheduledTask -TaskName $task.Name -Xml $task.Xml"
     )
 
     assert definition_start < validation < write_boundary < registration
+    assert source.index("Assert-OperationsTaskXml -TaskName $task.Name") < write_boundary
     for mutation in (
         "New-Item -ItemType Directory",
         "icacls.exe",
@@ -1302,6 +1304,116 @@ def test_operations_installer_builds_all_task_definitions_before_system_mutation
     ):
         assert source.index(mutation) > write_boundary
     assert "-Action $task.Action -Trigger $task.Trigger" not in source[registration:]
+
+
+@pytest.mark.parametrize("kind", ["logon", "health", "backup", "monthly"])
+def test_installer_task_xml_passes_native_validation_without_registration(kind: str):
+    trigger_script = {
+        "logon": "New-ScheduledTaskTrigger -AtLogOn",
+        "health": "New-ScheduledTaskTrigger -Daily -At '00:00'",
+        "backup": "New-ScheduledTaskTrigger -Daily -At '03:00'",
+        "monthly": "New-OperationsMonthlyRestoreDrillTrigger "
+        "-StartBoundary ([datetime]'2026-09-03T04:00:00')",
+    }[kind]
+    result = run_ps(
+        "$ErrorActionPreference='Stop'; & { "
+        + installer_prelude()
+        + "; $name='PythonSelfAgent-ValidationOnly-Test'; "
+        + "$before=@(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue); "
+        + f"$trigger={trigger_script}; "
+        + ("$r=New-ScheduledTaskTrigger -Once -At (Get-Date) "
+           "-RepetitionInterval (New-TimeSpan -Minutes 5) "
+           "-RepetitionDuration (New-TimeSpan -Days 1); "
+           "$trigger.Repetition=$r.Repetition; " if kind == "health" else "")
+        + "$action=New-ScheduledTaskAction -Execute 'powershell.exe' "
+        + "-Argument '-NoProfile -File \"D:\\test & space\\script.ps1\"'; "
+        + "$principal=New-ScheduledTaskPrincipal "
+        + "-UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) "
+        + "-LogonType Interactive -RunLevel Highest; "
+        + "$settings=New-OperationsTaskSettings -WakeToRun "
+        + ("$true; " if kind in ("backup", "monthly") else "$false; ")
+        + "$definition=New-ScheduledTask -Action $action -Settings $settings "
+        + "-Principal $principal "
+        + ("; " if kind == "monthly" else "-Trigger $trigger; ")
+        + "$xml=ConvertTo-OperationsTaskXml -Definition $definition -Trigger $trigger; "
+        + "Assert-OperationsTaskXml -TaskName $name -Xml $xml; "
+        + "$after=@(Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue); "
+        + "if ($before.Count -ne $after.Count) { throw 'validation registered a task' }; "
+        + "$xml }"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    root = ET.fromstring(result.stdout.strip())
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    assert root.findtext("t:Principals/t:Principal/t:RunLevel", namespaces=ns) == "HighestAvailable"
+    assert root.findtext("t:Principals/t:Principal/t:LogonType", namespaces=ns) == "InteractiveToken"
+    assert root.findtext("t:Settings/t:MultipleInstancesPolicy", namespaces=ns) == "IgnoreNew"
+    assert root.findtext("t:Settings/t:StartWhenAvailable", namespaces=ns) == "true"
+    assert root.findtext("t:Settings/t:WakeToRun", namespaces=ns) == (
+        "true" if kind in ("backup", "monthly") else "false"
+    )
+    assert root.findtext("t:Actions/t:Exec/t:Arguments", namespaces=ns) == (
+        '-NoProfile -File "D:\\test & space\\script.ps1"'
+    )
+    triggers = root.find("t:Triggers", ns)
+    assert triggers is not None and len(triggers) == 1
+    if kind == "monthly":
+        assert root.findtext("t:Settings/t:UseUnifiedSchedulingEngine", namespaces=ns) == "false"
+        calendar = triggers.find("t:CalendarTrigger", ns)
+        assert calendar.findtext("t:StartBoundary", namespaces=ns) == "2026-09-03T04:00:00"
+        schedule = calendar.find("t:ScheduleByMonthDayOfWeek", ns)
+        assert schedule is not None
+        assert schedule.findtext("t:Weeks/t:Week", namespaces=ns) == "1"
+        assert len(schedule.find("t:Weeks", ns)) == 1
+        assert [e.tag.rsplit("}", 1)[1] for e in schedule.find("t:DaysOfWeek", ns)] == ["Sunday"]
+        assert [e.tag.rsplit("}", 1)[1] for e in schedule.find("t:Months", ns)] == [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+    elif kind == "logon":
+        assert triggers.find("t:LogonTrigger", ns) is not None
+    elif kind == "health":
+        assert triggers.findtext("t:CalendarTrigger/t:Repetition/t:Interval", namespaces=ns) == "PT5M"
+    else:
+        assert triggers.find("t:CalendarTrigger/t:ScheduleByDay", ns) is not None
+
+
+def test_installer_xml_preflight_rejects_invalid_xml_without_creating_task():
+    result = run_ps(
+        "$ErrorActionPreference='Stop'; & { " + installer_prelude()
+        + "; try { Assert-OperationsTaskXml -TaskName 'PythonSelfAgent-ValidationOnly-Test' "
+        + "-Xml '<Task>invalid</Task>'; exit 81 } "
+        + "catch { if ($_.Exception.Message -notlike '*Task definition validation failed*') "
+        + "{ throw }; 'rejected' } }"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "rejected" in result.stdout
+
+
+def test_installer_actual_definition_loop_serializes_all_four_tasks():
+    source = INSTALL.read_text(encoding="utf-8")
+    definition_script = source[
+        source.index("$principal = New-ScheduledTaskPrincipal") : source.index(
+            "# All preflight checks and in-memory task validation are above this line."
+        )
+    ]
+    result = run_ps(
+        "$ErrorActionPreference='Stop'; & { " + installer_prelude()
+        + "; $currentUser=[Security.Principal.WindowsIdentity]::GetCurrent().Name; "
+        + "$config=[PSCustomObject]@{RepositoryRoot='D:\\test'; "
+        + "EnvFile='D:\\test\\deploy.env'; StateRoot='D:\\test-state'; "
+        + "BackupRoot='D:\\test-backups'}; "
+        + "$taskScripts=@{}; foreach ($suffix in @('LoginRecovery','Health',"
+        + "'DailyBackup','MonthlyRestoreDrill')) { "
+        + "$taskScripts['PythonSelfAgent-' + $suffix]='D:\\test\\script.ps1' }; "
+        + definition_script
+        + "; $taskDefinitions | ForEach-Object { "
+        + "if ([string]::IsNullOrWhiteSpace($_.Xml)) { throw 'missing XML' }; $_.Name } }"
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().splitlines() == [
+        "PythonSelfAgent-LoginRecovery", "PythonSelfAgent-Health",
+        "PythonSelfAgent-DailyBackup", "PythonSelfAgent-MonthlyRestoreDrill",
+    ]
 
 
 def test_installer_port_ownership_rejects_wrong_host_port_after_exact_one_container():

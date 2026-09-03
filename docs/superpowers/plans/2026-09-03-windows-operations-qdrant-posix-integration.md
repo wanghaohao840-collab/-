@@ -571,3 +571,39 @@ D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py --env-file dep
 ```
 
 Expected: authentication, document ingestion, retrieval, and a real LLM answer complete successfully with grounded evidence.
+
+## Stable-checkout integration and installer correction (2026-09-03)
+
+The operator subsequently authorized integration into `D:\python_self_agent` and
+formal administrator installation there. Merge `61f8b15` integrated the Notes
+branch; the stable Compose app and Qdrant passed shallow smoke. The pre-existing
+four GraphRAG packet edits were excluded from that commit and remain untouched.
+
+The first actual elevated installation registered LoginRecovery, Health, and
+DailyBackup, then failed on MonthlyRestoreDrill with `0x80070057`. A read-only
+reproduction showed that the local CIM provider could construct a monthly
+trigger but failed to export its task XML. The previous tests ended at object
+construction and therefore missed the failure. The default unified scheduling
+engine also does not support monthly day-of-week triggers.
+
+Correction: retain the validated first-Sunday/04:00 trigger contract, build its
+XML through the native Task Scheduler COM API on a trigger-free base definition,
+disable unified scheduling only for that monthly task, and validate all four XML
+definitions using `TASK_VALIDATE_ONLY` before any system mutations. Registration
+uses the validated XML with the existing task names, actions, principal, wake
+settings, and concurrency policy. Tests cover native XML validation, malformed
+XML rejection, exact monthly recurrence, unchanged actions/principal/settings,
+and execution of the installer's actual definition-building loop. Validation
+does not register test tasks or require administrator privileges.
+
+References:
+
+- [TaskFolder.RegisterTask: TASK_VALIDATE_ONLY](https://learn.microsoft.com/en-us/windows/win32/taskschd/taskfolder-registertask)
+- [Task Scheduler engine limitations](https://learn.microsoft.com/en-us/windows/win32/taskschd/what-s-new-in-task-scheduler)
+
+Verification: final combined deployment regression `193 passed, 4 skipped`
+(`.pytest-tmp-monthly-final-r2`); installer PowerShell parsing and `git diff --check`
+passed; stable App and Qdrant remained healthy. Formal four-task installation
+remains pending the operator rerunning
+the installer in the already-open administrator PowerShell. Do not report all
+four tasks installed based only on XML validation.

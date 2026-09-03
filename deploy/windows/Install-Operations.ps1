@@ -354,6 +354,56 @@ function New-OperationsMonthlyRestoreDrillTrigger {
     return $trigger
 }
 
+function ConvertTo-OperationsTaskXml {
+    param(
+        [Parameter(Mandatory)]$Definition,
+        [Parameter(Mandatory)]$Trigger
+    )
+
+    $xml = Export-ScheduledTask -InputObject $Definition -ErrorAction Stop
+    if ($Trigger.CimClass.CimClassName -ne 'MSFT_TaskMonthlyDOWTrigger') {
+        return $xml
+    }
+
+    # The local CIM provider can create a monthly object but cannot serialize it.
+    # Use Task Scheduler's native monthly trigger on a trigger-free definition.
+    $service = New-Object -ComObject 'Schedule.Service'
+    $service.Connect()
+    $nativeDefinition = $service.NewTask(0)
+    $nativeDefinition.XmlText = $xml
+    if ($nativeDefinition.Triggers.Count -ne 0) {
+        throw 'Monthly task XML must start with a trigger-free definition.'
+    }
+    # Unified scheduling does not support monthly day-of-week triggers.
+    $nativeDefinition.Settings.UseUnifiedSchedulingEngine = $false
+    $monthly = $nativeDefinition.Triggers.Create(5) # TASK_TRIGGER_MONTHLYDOW
+    $monthly.Enabled = $Trigger.Enabled
+    $monthly.StartBoundary = $Trigger.StartBoundary
+    $monthly.DaysOfWeek = $Trigger.DaysOfWeek
+    $monthly.WeeksOfMonth = $Trigger.WeeksOfMonth
+    $monthName = Resolve-OperationsMonthlyTriggerSchema -CimClass $Trigger.CimClass
+    $monthly.MonthsOfYear = $Trigger.PSObject.Properties[$monthName].Value
+    $monthly.RunOnLastWeekOfMonth = $false
+    return $nativeDefinition.XmlText
+}
+
+function Assert-OperationsTaskXml {
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][string]$Xml
+    )
+
+    try {
+        $service = New-Object -ComObject 'Schedule.Service'
+        $service.Connect()
+        # TASK_VALIDATE_ONLY=1 checks XML without creating/updating any task.
+        # TASK_LOGON_INTERACTIVE_TOKEN=3 matches the installer principal.
+        $null = $service.GetFolder('\').RegisterTask($TaskName, $Xml, 1, $null, $null, 3, $null)
+    } catch {
+        throw "Task definition validation failed for ${TaskName}: $($_.Exception.Message)"
+    }
+}
+
 $modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'
 Import-Module $modulePath -Force
 
@@ -419,9 +469,16 @@ $taskDefinitions = @(
 )
 
 foreach ($task in $taskDefinitions) {
-    $definition = New-ScheduledTask -Action $task.Action -Trigger $task.Trigger `
-        -Settings $task.Settings -Principal $principal -ErrorAction Stop
-    $task | Add-Member -NotePropertyName Definition -NotePropertyValue $definition
+    if ($task.Trigger.CimClass.CimClassName -eq 'MSFT_TaskMonthlyDOWTrigger') {
+        $definition = New-ScheduledTask -Action $task.Action `
+            -Settings $task.Settings -Principal $principal -ErrorAction Stop
+    } else {
+        $definition = New-ScheduledTask -Action $task.Action -Trigger $task.Trigger `
+            -Settings $task.Settings -Principal $principal -ErrorAction Stop
+    }
+    $xml = ConvertTo-OperationsTaskXml -Definition $definition -Trigger $task.Trigger
+    Assert-OperationsTaskXml -TaskName $task.Name -Xml $xml
+    $task | Add-Member -NotePropertyName Xml -NotePropertyValue $xml
 }
 
 # All preflight checks and in-memory task validation are above this line.
@@ -446,7 +503,7 @@ if ($PSCmdlet.ShouldProcess($firewallName, 'Replace private intranet firewall ru
 
 foreach ($task in $taskDefinitions) {
     if ($PSCmdlet.ShouldProcess($task.Name, 'Register scheduled task')) {
-        Register-ScheduledTask -TaskName $task.Name -InputObject $task.Definition `
+        Register-ScheduledTask -TaskName $task.Name -Xml $task.Xml `
             -Force | Out-Null
     }
 }
