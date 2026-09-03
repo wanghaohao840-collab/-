@@ -16,7 +16,12 @@
 - `deploy/.env`：秘密配置，不进入备份和 Git。
 
 不要把 Qdrant 的 `/qdrant/storage` 重新绑定到 NTFS，也不要直接访问 Docker
-Desktop 的内部虚拟磁盘文件。
+Desktop 的内部虚拟磁盘文件。该卷在 Compose 中声明为外部持久卷，因此
+`docker compose down --volumes` 不会删除它；全新部署需先运行：
+
+```powershell
+docker volume create --label com.zhiyan.role=qdrant-data zhiyan_qdrant_data
+```
 
 ## 从 NTFS 迁移 Qdrant
 

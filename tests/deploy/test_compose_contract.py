@@ -100,6 +100,7 @@ def test_qdrant_uses_stable_posix_named_volume():
     assert "target: /qdrant/storage" in qdrant_block
     assert '${DEPLOY_DATA_ROOT:-./deploy-data}/qdrant' not in qdrant_block
     assert "name: ${QDRANT_VOLUME_NAME:-zhiyan_qdrant_data}" in source
+    assert "external: true" in source.split("volumes:", 1)[1]
     assert "QDRANT_VOLUME_NAME=zhiyan_qdrant_data" in env_source
 
 

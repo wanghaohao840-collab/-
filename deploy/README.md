@@ -41,6 +41,7 @@ id -g
 
 ```sh
 mkdir -p deploy-data/app
+docker volume create --label com.zhiyan.role=qdrant-data zhiyan_qdrant_data
 docker compose --env-file deploy/.env up -d --build
 docker compose --env-file deploy/.env ps
 python3 deploy/smoke_test.py --env-file deploy/.env

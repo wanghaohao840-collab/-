@@ -93,4 +93,5 @@ networks:
 
 volumes:
   qdrant_data:
+    external: true
     name: ${QDRANT_VOLUME_NAME:-zhiyan_qdrant_data}
