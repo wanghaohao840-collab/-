@@ -972,7 +972,7 @@ Use `open_in_codex` for `D:\python_self_agent\deploy\.env` at the line containin
 `RAG_EMBEDDING_API_KEY=`. Tell the operator to fill only that field and save; do not
 request the key in chat. Report honestly: client/config prepared, runtime still legacy.
 
-- [ ] **Step 4: After explicit “已配置”, run the public-text probe and record safe output.**
+- [x] **Step 4: After explicit “已配置”, run the public-text probe and record safe output.**
 
 ```powershell
 D:\python_self_agent\venv\Scripts\python.exe -m deploy.embedding_probe --env-file deploy/.env
@@ -1012,6 +1012,30 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 
 ## Plan self-review and progress
 
+### E1 live-provider acceptance (2026-09-03)
+
+- Operator explicitly confirmed “已配置”. Ran from stable checkout using
+  `D:\python_self_agent\venv\Scripts\python.exe`, without printing credentials:
+  - `-m deploy.embedding_probe --env-file deploy/.env`: exit **0**,
+    `configuration_valid`, `key_configured=true`, `activation=unchanged`.
+  - `-m deploy.embedding_probe --env-file deploy/.env --probe`: exit **0**,
+    `probe_passed`, **3 vectors**, query dimension **1024**, elapsed **1.171s**.
+- Returned model: `BAAI/bge-m3`; profile fingerprint:
+  `28fbc9bca1667563d433a7ee539d4a24958a8442c041041e8540962c7e3ae88a`.
+  The client validated response model, indexes, finite/nonzero vectors and
+  dimensions, then L2-normalized the vectors. Only fixed public probe sentences
+  were sent; no business documents, filenames, user IDs or notes were uploaded.
+- Independently checked `RAG_EMBEDDING_PROVIDER=simple`; App and Qdrant remain
+  healthy. No runtime configuration edit, image rebuild, restart, index write,
+  migration or `smoke_test.py --deep` was performed in this acceptance step.
+- **E1 complete**: code, offline verification, stable integration and live
+  provider probe have passed. This is not E2/E3 or production retrieval acceptance.
+- **Next:** write E2's detailed plan against the actual E1 interfaces, then
+  implement RAG runtime injection and persisted index-identity checks before E3
+  rebuilding/cutover. Preserve all remaining requirements in the table above.
+- Verification evidence is committed locally; no credentials or runtime files
+  are staged. No push of the unrelated unpublished ancestor history.
+
 ### E1 code integration and operator handoff (2026-09-03)
 
 - Verified commits `deba636`, `118d19d`, `770476a` were fast-forward integrated
@@ -1038,9 +1062,9 @@ continuations of the approved spec, not reasons to ask again which embedding mod
   production embedding activation. E2/E3 and deep smoke remain pending.
 - No push: the stable branch already had 293 unrelated unpublished ancestor
   commits before E1. This handoff does not publish that history.
-- **Next action:** operator fills only `RAG_EMBEDDING_API_KEY`, saves and confirms
-  “已配置”; then perform Task 4 Step 4's offline check and public-text probe.
-  E1 live-provider acceptance remains incomplete until that probe passes.
+- Handoff gate at that time: operator fills only `RAG_EMBEDDING_API_KEY`, saves
+  and confirms “已配置”, then Task 4 Step 4 runs the public-text probe.
+  This gate is now resolved by the live-provider acceptance record above.
 
 ### Task 3 verification (2026-09-03)
 
@@ -1106,7 +1130,7 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 - [x] Execute Task 1 red/green and record results.
 - [x] Execute Task 2 red/green and record results.
 - [x] Execute Task 3 red/green and record results.
-- [ ] Integrate E1, open key entry and record operator confirmation/probe result.
+- [x] Integrate E1, open key entry and record operator confirmation/probe result.
 
 Planning is not implementation or live model verification. At plan creation the real
 key has not been read and no remote inference, container restart or index write has run.
