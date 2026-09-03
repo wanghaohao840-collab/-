@@ -8,6 +8,7 @@ from typing import Iterable
 from app.database import connect, transaction
 from app.import_models import (
     ImportBatchSummary,
+    ImportCancelDecision,
     ImportStage,
     ImportStatus,
     ImportTaskCreate,
@@ -107,6 +108,135 @@ class ImportTaskRepository:
                 (task_id, user_id),
             ).fetchone()
             return _task_from_row(row) if row is not None else None
+
+    def request_cancel(
+        self,
+        user_id: str,
+        batch_id: str,
+        task_id: str,
+        now: str | None = None,
+    ) -> ImportCancelDecision:
+        timestamp = now or _utc_now()
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
+            row = conn.execute(
+                """
+                select * from import_tasks
+                where id = ? and batch_id = ? and user_id = ?
+                """,
+                (task_id, batch_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError("import task was not found")
+
+            changed = False
+            if row["status"] in ("queued", "retry_wait"):
+                updated = conn.execute(
+                    """
+                    update import_tasks
+                    set status = 'cancelled', stage = 'cancelled',
+                        next_attempt_at = null, cancel_requested_at = ?,
+                        finished_at = ?, updated_at = ?
+                    where id = ? and batch_id = ? and user_id = ?
+                      and status in ('queued', 'retry_wait')
+                    """,
+                    (timestamp, timestamp, timestamp, task_id, batch_id, user_id),
+                )
+                changed = bool(updated.rowcount)
+                outcome = "cancelled"
+            elif row["status"] == "running" and row["stage"] == "committing":
+                outcome = "not_cancellable"
+            elif row["status"] == "running":
+                updated = conn.execute(
+                    """
+                    update import_tasks
+                    set cancel_requested_at = ?, updated_at = ?
+                    where id = ? and batch_id = ? and user_id = ?
+                      and status = 'running' and stage != 'committing'
+                      and cancel_requested_at is null
+                    """,
+                    (timestamp, timestamp, task_id, batch_id, user_id),
+                )
+                changed = bool(updated.rowcount)
+                outcome = "cancel_requested"
+            else:
+                outcome = "unchanged"
+
+            updated_row = conn.execute(
+                """
+                select * from import_tasks
+                where id = ? and batch_id = ? and user_id = ?
+                """,
+                (task_id, batch_id, user_id),
+            ).fetchone()
+            if changed:
+                conn.execute(
+                    """
+                    update import_batches set updated_at = ?
+                    where id = ? and user_id = ?
+                    """,
+                    (updated_row["updated_at"], batch_id, user_id),
+                )
+            conn.commit()
+            return ImportCancelDecision(
+                task=_task_from_row(updated_row),
+                outcome=outcome,
+            )
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def is_cancel_requested(self, user_id: str, task_id: str) -> bool:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                select cancel_requested_at from import_tasks
+                where id = ? and user_id = ?
+                """,
+                (task_id, user_id),
+            ).fetchone()
+            return row is not None and row["cancel_requested_at"] is not None
+
+    def try_begin_committing(
+        self,
+        user_id: str,
+        task_id: str,
+        now: str | None = None,
+    ) -> bool:
+        timestamp = now or _utc_now()
+        conn = connect(self.db_path)
+        try:
+            conn.execute("begin immediate")
+            updated = conn.execute(
+                """
+                update import_tasks
+                set stage = 'committing', updated_at = ?
+                where id = ? and user_id = ? and status = 'running'
+                  and stage != 'committing' and cancel_requested_at is null
+                """,
+                (timestamp, task_id, user_id),
+            )
+            if updated.rowcount:
+                conn.execute(
+                    """
+                    update import_batches set updated_at = ?
+                    where id = (
+                        select batch_id from import_tasks
+                        where id = ? and user_id = ?
+                    ) and user_id = ?
+                    """,
+                    (timestamp, task_id, user_id, user_id),
+                )
+            conn.commit()
+            return bool(updated.rowcount)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def claim_next(
         self,
@@ -212,6 +342,19 @@ class ImportTaskRepository:
             """status = 'succeeded', stage = 'succeeded', progress = 100,
                next_attempt_at = null, error_code = null, error_summary = null,
                finished_at = ?, updated_at = ?""",
+            (timestamp, timestamp),
+        )
+
+    def mark_cancelled(
+        self, user_id: str, task_id: str, now: str | None = None
+    ) -> ImportTaskRecord:
+        timestamp = now or _utc_now()
+        return self._transition_update(
+            user_id,
+            task_id,
+            "status = 'running' and cancel_requested_at is not null",
+            """status = 'cancelled', stage = 'cancelled',
+               next_attempt_at = null, finished_at = ?, updated_at = ?""",
             (timestamp, timestamp),
         )
 
@@ -452,7 +595,8 @@ class ImportTaskRepository:
                    coalesce(sum(t.status = 'running'), 0) as running,
                    coalesce(sum(t.status = 'retry_wait'), 0) as retry_wait,
                    coalesce(sum(t.status = 'succeeded'), 0) as succeeded,
-                   coalesce(sum(t.status = 'failed'), 0) as failed
+                   coalesce(sum(t.status = 'failed'), 0) as failed,
+                   coalesce(sum(t.status = 'cancelled'), 0) as cancelled
             from import_batches b
             left join import_tasks t on t.batch_id = b.id and t.user_id = b.user_id
             where b.id = ? and b.user_id = ?
@@ -482,6 +626,7 @@ class ImportTaskRepository:
             succeeded=row["succeeded"],
             failed=row["failed"],
             tasks=tuple(_task_from_row(task_row) for task_row in task_rows),
+            cancelled=row["cancelled"],
         )
 
 
@@ -509,6 +654,7 @@ def _task_from_row(row: sqlite3.Row) -> ImportTaskRecord:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         updated_at=row["updated_at"],
+        cancel_requested_at=row["cancel_requested_at"],
     )
 
 

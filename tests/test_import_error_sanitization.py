@@ -4,6 +4,7 @@ from app.auth import AuthService
 from app.database import initialize_database
 from app.import_models import ImportTaskCreate
 from app.import_repository import ImportTaskRepository
+import app.import_worker as import_worker
 from hello_agents.memory.rag.errors import sanitize_error_message
 
 
@@ -61,3 +62,21 @@ def test_repository_never_persists_quoted_multiword_secret(tmp_path):
     assert "import failed" in persisted.error_summary
     assert "correct horse battery" not in persisted.error_summary
     assert "horse battery" not in persisted.error_summary
+
+
+def test_internal_cancellation_signal_is_never_persisted_as_error_text(tmp_path):
+    repository, user_id, task = _running_task(tmp_path)
+    signal = import_worker.ImportCancelled(
+        r"D:\private\notes.md Authorization: Bearer secret-token"
+    )
+    decision = repository.request_cancel(user_id, task.batch_id, task.task_id)
+    assert decision.outcome == "cancel_requested"
+
+    repository.mark_cancelled(user_id, task.task_id)
+
+    persisted = repository.get_task(user_id, task.task_id)
+    assert persisted.status == "cancelled"
+    assert persisted.error_code is None
+    assert persisted.error_summary is None
+    assert "secret-token" not in repr(persisted)
+    assert isinstance(signal, BaseException)

@@ -181,6 +181,25 @@ class EpisodicMemory:
         self.sessions.clear()
         self._episodes.clear()
 
+    def remove(self, memory_id: str) -> bool:
+        """Remove one exact episode across SQLite, vector and in-memory state."""
+
+        episode = self._episodes.get(memory_id)
+        if episode is None:
+            return False
+        self._delete_episode_ids([memory_id])
+        self._episodes.pop(memory_id, None)
+        remaining = [
+            episode_id
+            for episode_id in self.sessions.get(episode.session_id, [])
+            if episode_id != memory_id
+        ]
+        if remaining:
+            self.sessions[episode.session_id] = remaining
+        else:
+            self.sessions.pop(episode.session_id, None)
+        return True
+
     def _delete_episode_ids(self, episode_ids: List[str]) -> None:
         """Delete both durable copies, restoring SQLite if cleanup is interrupted."""
 

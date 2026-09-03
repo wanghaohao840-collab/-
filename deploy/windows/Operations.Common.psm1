@@ -36,8 +36,17 @@ function Invoke-External {
         [string[]]$ArgumentList = @(),
         [int[]]$AllowExitCodes = @(0)
     )
-    $output = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { Protect-LogText ([string]$_) })
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 wraps native stderr as ErrorRecord objects.
+        # Docker writes ordinary progress to stderr even when it exits zero, so
+        # success must be decided exclusively from the native exit code.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { Protect-LogText ([string]$_) })
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($AllowExitCodes -notcontains $exitCode) {
         throw "$FilePath failed with exit code $exitCode`: $($output -join [Environment]::NewLine)"
     }
@@ -149,6 +158,19 @@ function Get-OperationsConfig {
     }
     $script:OperationsNotifyCooldownMinutes = $notificationCooldownMinutes
 
+    $qdrantVolumeName = Read-DeployEnvValue -EnvFile $envPath -Name 'QDRANT_VOLUME_NAME'
+    if ([string]::IsNullOrWhiteSpace($qdrantVolumeName)) {
+        $qdrantVolumeName = 'zhiyan_qdrant_data'
+    }
+    if ($qdrantVolumeName -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') {
+        throw 'QDRANT_VOLUME_NAME must be a safe Docker volume name'
+    }
+    $pythonSetting = Read-DeployEnvValue -EnvFile $envPath -Name 'OPERATIONS_PYTHON'
+    if ([string]::IsNullOrWhiteSpace($pythonSetting)) {
+        $pythonSetting = 'venv\Scripts\python.exe'
+    }
+    $operationsPython = Resolve-OperationsPath -Path $pythonSetting -BasePath $repositoryPath
+
     $statePath = Resolve-OperationsPath -Path $StateRoot -BasePath $repositoryPath
     $backupPath = Resolve-OperationsPath -Path $BackupRoot -BasePath $repositoryPath
 
@@ -165,8 +187,9 @@ function Get-OperationsConfig {
         StateRoot = $statePath
         BackupRoot = $backupPath
         DataRoot = $dataRoot
+        QdrantVolumeName = $qdrantVolumeName
         NotificationCooldownMinutes = $notificationCooldownMinutes
-        Python = Join-Path $repositoryPath 'venv\Scripts\python.exe'
+        Python = $operationsPython
     }
 }
 
@@ -363,6 +386,32 @@ function Get-FreeTcpPort {
     }
 }
 
+function Enter-OperationsLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StateRoot)
+
+    $root = [IO.Path]::GetFullPath($StateRoot)
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    $lockPath = Join-Path $root 'operations.lock'
+    try {
+        return [IO.File]::Open(
+            $lockPath,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None
+        )
+    } catch [IO.IOException] {
+        throw 'Another deployment operation is already in progress'
+    }
+}
+
+function Exit-OperationsLock {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][IDisposable]$Lock)
+
+    $Lock.Dispose()
+}
+
 function Wait-Until {
     [CmdletBinding()]
     param(
@@ -399,5 +448,7 @@ Export-ModuleMember -Function @(
     'Test-ComposeHealth',
     'Read-DeployEnvValue',
     'Get-FreeTcpPort',
+    'Enter-OperationsLock',
+    'Exit-OperationsLock',
     'Wait-Until'
 )

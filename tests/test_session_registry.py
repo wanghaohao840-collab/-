@@ -2,7 +2,7 @@ import pytest
 from datetime import timedelta
 
 from app.database import initialize_database
-from app.session import InvalidSessionError, SessionRegistry
+from app.session import InvalidCsrfTokenError, InvalidSessionError, SessionRegistry
 from app.storage import UserStorage
 
 
@@ -53,6 +53,53 @@ def test_logout_invalidates_session(tmp_path):
 
     with pytest.raises(InvalidSessionError):
         registry.get_session(token)
+
+
+def test_created_session_has_distinct_secure_csrf_token(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    registry = SessionRegistry(db_path=db_path, storage=UserStorage(tmp_path / "data"))
+
+    token = registry.register("Alice", "correct horse battery")
+    session = registry.get_session(token)
+
+    assert session.csrf_token
+    assert session.csrf_token != token
+    assert len(session.csrf_token) >= 32
+
+
+def test_validate_csrf_returns_current_session_and_rejects_invalid_values(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    registry = SessionRegistry(db_path=db_path, storage=UserStorage(tmp_path / "data"))
+    token = registry.register("Alice", "correct horse battery")
+    session = registry.get_session(token)
+
+    assert registry.validate_csrf(token, session.csrf_token) is session
+
+    for csrf_token in (None, "", "wrong-token"):
+        with pytest.raises(InvalidCsrfTokenError, match="Invalid CSRF token"):
+            registry.validate_csrf(token, csrf_token)
+
+
+def test_validate_csrf_rejects_another_session_token_and_logged_out_session(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    registry = SessionRegistry(db_path=db_path, storage=UserStorage(tmp_path / "data"))
+    alice_token = registry.register("Alice", "correct horse battery")
+    bob_token = registry.register("Bob", "correct horse battery")
+    alice = registry.get_session(alice_token)
+    bob = registry.get_session(bob_token)
+
+    with pytest.raises(InvalidCsrfTokenError, match="Invalid CSRF token"):
+        registry.validate_csrf(alice_token, bob.csrf_token)
+
+    registry.logout(alice_token)
+
+    with pytest.raises(InvalidSessionError):
+        registry.get_session(alice_token)
+    with pytest.raises(InvalidSessionError):
+        registry.validate_csrf(alice_token, alice.csrf_token)
 
 
 def test_same_user_sessions_share_one_runtime_but_keep_separate_assistants(tmp_path):

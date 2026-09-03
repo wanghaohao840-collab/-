@@ -6,7 +6,15 @@ on:
       - "Dockerfile"
       - "compose.yaml"
       - "requirements.txt"
+      - ".dockerignore"
       - "deploy/**"
+      - "app/**"
+      - "assistants/**"
+      - "hello_agents/**"
+      - "ui/**"
+      - "web/**"
+      - "server.py"
+      - "api/**"
       - ".github/workflows/deployment.yml"
       - "tests/deploy/**"
   push:
@@ -16,7 +24,15 @@ on:
       - "Dockerfile"
       - "compose.yaml"
       - "requirements.txt"
+      - ".dockerignore"
       - "deploy/**"
+      - "app/**"
+      - "assistants/**"
+      - "hello_agents/**"
+      - "ui/**"
+      - "web/**"
+      - "server.py"
+      - "api/**"
       - ".github/workflows/deployment.yml"
       - "tests/deploy/**"
 
@@ -32,6 +48,12 @@ jobs:
         run: python3 -m pip install -r requirements.txt
       - name: Provide the deployment tests' PowerShell command
         run: sudo ln -s "$(command -v pwsh)" /usr/local/bin/powershell.exe
+      - name: Verify React application
+        working-directory: web
+        run: |
+          npm ci
+          npm test
+          npm run build:app
       - name: Verify deployment contracts and Compose configuration
         run: |
           cp deploy/.env.example deploy/.env

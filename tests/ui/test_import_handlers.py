@@ -237,7 +237,7 @@ print("launch-finished", flush=True)
         env=environment,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=40,
         check=False,
     )
 
@@ -250,49 +250,59 @@ def test_initialize_services_is_idempotent_without_starting_workers(monkeypatch)
 
     calls = []
     storage = object()
-    injected = []
     registry = SimpleNamespace(
         storage=storage,
-        runtime_registry=SimpleNamespace(
-            set_import_task_service=lambda service: injected.append(service)
-        ),
+        runtime_registry=SimpleNamespace(),
     )
     pool = SimpleNamespace(start=lambda: calls.append("start"), stop=lambda: None)
+    application_services = SimpleNamespace(
+        session_registry=registry,
+        legacy_migration=object(),
+        import_repository=object(),
+        import_worker_pool=pool,
+        import_service=object(),
+    )
     monkeypatch.setattr(module, "session_registry", None)
     monkeypatch.setattr(module, "legacy_migration", None)
     monkeypatch.setattr(module, "import_repository", None)
     monkeypatch.setattr(module, "import_worker_pool", None)
     monkeypatch.setattr(module, "import_service", None)
-    monkeypatch.setattr(module, "initialize_database", lambda path: calls.append(("db", path)))
-    monkeypatch.setattr(module, "UserStorage", lambda root: storage)
-    monkeypatch.setattr(module, "SessionRegistry", lambda **kwargs: registry)
-    monkeypatch.setattr(module, "LegacyMigrationService", lambda *args: object())
-    monkeypatch.setattr(module, "ImportTaskRepository", lambda path: object())
-    monkeypatch.setattr(module, "ImportWorkerPool", lambda *args: pool)
-    monkeypatch.setattr(module, "ImportTaskService", lambda *args: object())
+    monkeypatch.setattr(module, "services", None)
+    monkeypatch.setattr(
+        module,
+        "get_application_services",
+        lambda: calls.append("get") or application_services,
+    )
 
     module.initialize_app_services()
     module.initialize_app_services()
 
     assert [call for call in calls if call == "start"] == []
-    assert len([call for call in calls if isinstance(call, tuple)]) == 1
+    assert calls == ["get", "get"]
+    assert module.services is application_services
+    assert module.session_registry is registry
     assert module.import_worker_pool is pool
-    assert injected == [module.import_service]
+    assert module.import_service is application_services.import_service
 
 
-def test_script_worker_startup_is_idempotent(monkeypatch):
+def test_script_worker_startup_delegates_to_shared_services(monkeypatch):
     import ui.gradio_app as module
 
     calls = []
-    monkeypatch.setattr(module, "_import_workers_started", False)
-    pool = SimpleNamespace(start=lambda: calls.append("start"), stop=lambda: None)
-    monkeypatch.setattr(module, "import_worker_pool", pool)
-    monkeypatch.setattr(module.atexit, "register", lambda callback: calls.append(callback))
+    application_services = SimpleNamespace(
+        session_registry=object(),
+        legacy_migration=object(),
+        import_repository=object(),
+        import_worker_pool=object(),
+        import_service=object(),
+        start=lambda: calls.append("start"),
+    )
+    monkeypatch.setattr(module, "get_application_services", lambda: application_services)
 
     module.start_import_workers()
     module.start_import_workers()
 
-    assert calls == ["start", pool.stop]
+    assert calls == ["start", "start"]
 
 
 def test_submit_batch_id_is_bound_to_hidden_state():

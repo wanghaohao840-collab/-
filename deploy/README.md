@@ -1,7 +1,7 @@
 # 单节点 Docker 部署
 
 本目录用于在一台 Linux 云主机或内网服务器上运行单副本文档学习助手。默认
-启动 Gradio 应用与 Qdrant；Neo4j 通过 `graph` Profile 按需启动。当前
+启动 FastAPI/React 应用与 Qdrant；Neo4j 通过 `graph` Profile 按需启动。当前
 Session 和用户锁位于进程内，因此必须保持一个应用容器、一个 worker。
 
 ## Windows operations
@@ -43,10 +43,13 @@ id -g
 
 不要提交 `deploy/.env`。
 
-使用同一个部署账号创建数据目录并启动：
+使用同一个部署账号创建宿主机数据目录并启动。Qdrant 使用
+`QDRANT_VOLUME_NAME` 指定的 Docker 命名卷，数据位于 Docker 主机的 POSIX
+存储中：
 
 ```sh
-mkdir -p deploy-data/app deploy-data/qdrant
+mkdir -p deploy-data/app
+docker volume create --label com.zhiyan.role=qdrant-data zhiyan_qdrant_data
 docker compose --env-file deploy/.env up -d --build
 docker compose --env-file deploy/.env ps
 python3 deploy/smoke_test.py --env-file deploy/.env
@@ -151,9 +154,17 @@ sh deploy/restore.sh \
 ## 数据与秘密边界
 
 - `deploy-data/app`：SQLite、用户文档、History、Memory 和报告；
-- `deploy-data/qdrant`：向量数据；
+- `QDRANT_VOLUME_NAME`（默认 `zhiyan_qdrant_data`）：POSIX 命名卷中的向量数据；
 - `deploy-data/neo4j/data`：可选图谱数据；
 - `deploy/.env`：LLM Key 与 Neo4j 密码，仅保存在部署主机；
 - `backups/`：数据归档和校验文件，不包含 `deploy/.env`。
 
 Qdrant 和 Neo4j 没有宿主机端口映射。应用端口仍应由防火墙限制在可信内网。
+
+## Windows Docker Desktop
+
+Windows 必须使用 Docker Desktop 的 Linux/WSL2 后端，并将 Qdrant 保存在命名
+卷中，不能把 `/qdrant/storage` 绑定到 NTFS。登录恢复、五分钟巡检、每日冷备、
+每月隔离恢复演练、安全更新，以及从旧 NTFS 目录迁移的完整步骤见
+[`windows/README.md`](windows/README.md)。正式计划任务只能从稳定部署目录安装，
+不能长期指向临时 Git worktree。

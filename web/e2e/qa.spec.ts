@@ -1,0 +1,157 @@
+import AxeBuilder from "@axe-core/playwright";
+import type { Page } from "@playwright/test";
+
+import { expect, qaTest as test, registerUser, settleVisuals, uniqueUsername } from "./fixtures";
+
+async function createQaConversation(page: Page, appUrl: string, username: string) {
+  const filename = `${username}.md`;
+  await registerUser(page, appUrl, username);
+  await page.goto(`${appUrl}/documents`);
+  await page.locator(".document-toolbar").getByRole("button", { name: "导入文档" }).click();
+  await page.getByLabel("选择文档").setInputFiles({
+    name: filename,
+    mimeType: "text/markdown",
+    buffer: Buffer.from("# QA evidence\nDeterministic evidence for the product loop."),
+  });
+  const imported = page.waitForResponse((response) => response.url() === `${appUrl}/api/v1/imports` && response.request().method() === "POST");
+  await page.getByRole("button", { name: "开始导入" }).click();
+  expect((await imported).status()).toBe(202);
+  const row = page.getByRole("listitem", { name: filename });
+  await expect(row).toBeVisible({ timeout: 30_000 });
+  await row.getByRole("button", { name: "开始问答" }).click();
+  const dialog = page.getByRole("dialog", { name: "新建对话" });
+  await expect(dialog.getByRole("checkbox", { name: filename })).toBeChecked();
+  const created = page.waitForResponse((response) => response.url() === `${appUrl}/api/v1/qa/conversations` && response.request().method() === "POST");
+  await dialog.getByRole("button", { name: "创建对话" }).click();
+  expect((await created).status()).toBe(201);
+  await expect(page).toHaveURL(/\/qa\?conversation=/);
+  await expect(page.getByText("基于 1 篇文档")).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  return { filename, conversationId: new URL(page.url()).searchParams.get("conversation")! };
+}
+
+async function askAndWait(page: Page, question = "这篇文档的结论是什么？") {
+  await page.getByLabel("向这些文档提问").fill(question);
+  const answer = page.getByText("这是确定性的可信回答，可通过右侧引用核对来源。");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(answer).toBeVisible({ timeout: 15_000 });
+  return answer;
+}
+
+async function openSources(page: Page) {
+  await page.getByRole("button", { name: "引用 1", exact: true }).click();
+  await expect(page.getByText("这是由隔离测试适配器生成的可验证证据片段。").filter({ visible: true })).toBeVisible();
+  await expect(page.getByText("[E2E-S1]").filter({ visible: true })).toBeVisible();
+}
+
+test("real server preserves answer, isolates users, cancels summary and deletes durably", async ({ appUrl, browser, page }, testInfo) => {
+  test.slow();
+  const ownerName = uniqueUsername("qa_owner");
+  const { conversationId } = await createQaConversation(page, appUrl, ownerName);
+  await askAndWait(page);
+  await page.reload();
+  await expect(page.getByText("这是确定性的可信回答，可通过右侧引用核对来源。")).toHaveCount(1);
+
+  await page.getByRole("button", { name: "生成摘要" }).click();
+  const summary = page.locator(".qa-summary-status");
+  await expect(summary).toContainText("生成中", { timeout: 15_000 });
+  await expect(summary.getByRole("button", { name: "取消生成" })).toBeVisible();
+
+  await page.reload();
+
+  await expect(summary).toContainText("生成中", { timeout: 15_000 });
+  await expect(summary.getByRole("button", { name: "取消生成" })).toBeVisible();
+  await expect(page.getByLabel("向这些文档提问")).toBeDisabled();
+  await expect(page.getByRole("button", { name: "生成摘要" })).toBeDisabled();
+  await summary.getByRole("button", { name: "取消生成" }).click();
+  await expect(summary).toContainText(/已取消|已完成/, { timeout: 15_000 });
+
+  const otherPage = await browser.newPage();
+  try {
+    await registerUser(otherPage, appUrl, uniqueUsername("qa_other"));
+    const probe = await otherPage.request.get(`${appUrl}/api/v1/qa/conversations/${conversationId}`);
+    expect(probe.status()).toBe(404);
+    expect(await probe.text()).not.toContain(ownerName);
+  } finally {
+    await otherPage.close();
+  }
+
+  await page.context().grantPermissions(["clipboard-write"], { origin: appUrl });
+  await openSources(page);
+  await page.getByRole("button", { name: "复制引用 1" }).filter({ visible: true }).click();
+  await expect(page.getByText("引用 1 已复制").filter({ visible: true })).toBeVisible();
+  if (testInfo.project.name !== "desktop") {
+    await page.getByRole("dialog", { name: "引用来源" }).getByRole("button", { name: "关闭引用来源" }).press("Escape");
+  }
+
+  if (testInfo.project.name === "desktop") {
+    await page.getByRole("button", { name: "删除对话" }).click();
+  } else {
+    await page.getByRole("button", { name: "对话", exact: true }).click();
+    await page.getByRole("dialog", { name: "选择对话" }).getByRole("button", { name: "删除当前对话" }).click();
+  }
+  const deletion = page.getByRole("dialog", { name: "永久删除对话" });
+  await expect(deletion).toContainText("消息、引用、摘要和问答记忆");
+  await deletion.getByRole("button", { name: "永久删除", exact: true }).click();
+  await expect(deletion).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "建立第一个对话" })).toBeVisible();
+});
+
+test("failed answer survives reload and retries without duplicating the turn", async ({ appUrl, page }, testInfo) => {
+  test.slow();
+  await createQaConversation(page, appUrl, uniqueUsername("qa_failure"));
+  await page.getByLabel("向这些文档提问").fill("[fail-once] 请给出安全回答");
+  await page.getByRole("button", { name: "发送" }).click();
+  await expect(page.getByText("QA_ENGINE_UNAVAILABLE")).toBeVisible({ timeout: 15_000 });
+  if (testInfo.project.name === "mobile") {
+    await settleVisuals(page);
+    await expect(page).toHaveScreenshot("qa-failure.png");
+  }
+  await page.reload();
+  await expect(page.getByText("QA_ENGINE_UNAVAILABLE")).toBeVisible();
+  await page.getByRole("button", { name: "重试回答" }).click();
+  await expect(page.getByText("这是确定性的可信回答，可通过右侧引用核对来源。")).toHaveCount(1, { timeout: 15_000 });
+  await expect(page.locator(".qa-message--user")).toHaveCount(1);
+});
+
+test("QA workspace has no serious accessibility violations", async ({ appUrl, page }, testInfo) => {
+  test.slow();
+  await createQaConversation(page, appUrl, uniqueUsername(`qa_axe_${testInfo.project.name}`));
+  await askAndWait(page);
+  await openSources(page);
+  const results = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"]).analyze();
+  const violations = results.violations.filter((item) => item.impact === "serious" || item.impact === "critical");
+  expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
+  if (testInfo.project.name !== "desktop") {
+    const dialog = page.getByRole("dialog", { name: "引用来源" });
+    await dialog.getByRole("button", { name: "关闭引用来源" }).press("Escape");
+    await expect(page.getByRole("button", { name: "引用 1" })).toBeFocused();
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(await page.evaluate(() => document.documentElement.clientWidth));
+});
+
+test("QA approved visual states", async ({ appUrl, page }, testInfo) => {
+  test.slow();
+  await createQaConversation(page, appUrl, `qa_visual_${testInfo.project.name}`);
+  await askAndWait(page);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await expect(page.getByRole("heading", { level: 1, name: "智能问答" })).toBeInViewport();
+  await expect(page.getByLabel("向这些文档提问")).toBeInViewport({ ratio: 1 });
+  await settleVisuals(page);
+  await expect(page).toHaveScreenshot("qa-default.png");
+
+  if (testInfo.project.name === "desktop") {
+    await page.getByRole("button", { name: "生成摘要" }).click();
+    await expect(page.locator(".qa-summary-status")).toBeVisible();
+    await settleVisuals(page);
+    await expect(page).toHaveScreenshot("qa-summary.png");
+    await expect(page.locator(".qa-summary-status")).toContainText("已完成", { timeout: 15_000 });
+    await page.getByRole("button", { name: "删除对话" }).click();
+    await settleVisuals(page);
+    await expect(page).toHaveScreenshot("qa-delete.png");
+  } else {
+    await openSources(page);
+    await settleVisuals(page);
+    await expect(page).toHaveScreenshot("qa-sources.png");
+  }
+});

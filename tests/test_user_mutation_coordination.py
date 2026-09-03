@@ -15,8 +15,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.bootstrap import ApplicationServices
 from app.coordination import UserMutationCoordinator
 from app.history import CorruptHistoryError, HistoryRepository
+from app.note_models import NoteFilters
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
@@ -191,19 +193,33 @@ class TestCoordinatorContract:
 
 class TestAssistantCoordination:
     def test_concurrent_notes_merge_without_loss(self, tmp_path):
-        """Packet acceptance: two sessions' notes are both retained."""
-        runtime, user_id = _make_runtime(tmp_path)
-        first = PDFLearningAssistant(user_id=user_id, runtime=runtime)
-        second = PDFLearningAssistant(user_id=user_id, runtime=runtime)
+        """Packet acceptance: supported sessions retain both Note rows."""
+        services = ApplicationServices.create(tmp_path / "data")
+        registry = services.session_registry
+        first_token = None
+        second_token = None
+        try:
+            first_token = registry.register("Alice", "correct horse battery")
+            second_token = registry.login("alice", "correct horse battery")
+            first = registry.get_session(first_token).assistant
+            second = registry.get_session(second_token).assistant
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            list(pool.map(
-                lambda args: args[0].add_note(args[1]),
-                [(first, "first-note"), (second, "second-note")],
-            ))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(
+                    lambda args: args[0].add_note(args[1]),
+                    [(first, "first-note"), (second, "second-note")],
+                ))
 
-        notes = runtime.history.load()["notes"]
-        assert {item["note"] for item in notes} == {"first-note", "second-note"}
+            notes = services.note_service.list_for_user(
+                first.user_id, NoteFilters()
+            ).items
+            assert {item.body_markdown for item in notes} == {
+                "first-note", "second-note"
+            }
+        finally:
+            registry.logout(second_token)
+            registry.logout(first_token)
+            services.stop()
 
     def test_import_failure_leaves_history_untouched(self, tmp_path):
         """RAG failure on import does not add a History entry."""
@@ -381,9 +397,8 @@ class TestAssistantCoordination:
         assert loaded["notes"] == [{"note": "keep-me"}]
         assert not src.exists()
 
-    def test_structured_question_scope_committed_after_generation(self, tmp_path):
-        """After ask(), the history question record carries document_ids,
-        document_names, and mode."""
+    def test_question_scope_reaches_generation_without_flat_history_commit(self, tmp_path):
+        """Generation receives structured scope while durable QA owns history."""
         runtime, user_id = _make_runtime(tmp_path)
         runtime.history.update(lambda h: h["documents"].append({
             "document_id": "doc-a",
@@ -398,8 +413,8 @@ class TestAssistantCoordination:
 
         assistant.ask("hello", selected_documents=["Alpha.md | doc-a"], mode="summary")
 
-        questions = runtime.history.load()["questions"]
-        assert len(questions) == 1
-        assert questions[0]["document_ids"] == ["doc-a"]
-        assert questions[0]["document_names"] == ["Alpha.md"]
-        assert questions[0]["mode"] == "summary"
+        action, kwargs = runtime.rag_tool.calls[-1]
+        assert action == "ask"
+        assert kwargs["document_ids"] == ["doc-a"]
+        assert kwargs["mode"] == "summary"
+        assert runtime.history.load()["questions"] == []

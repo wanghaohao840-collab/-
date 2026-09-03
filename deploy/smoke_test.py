@@ -146,7 +146,11 @@ def _host_for_request(bind_address: str) -> str:
 
 def _check_app_http(bind_address: str, port: str) -> None:
     host = _host_for_request(bind_address)
-    for path in ("/", "/config"):
+    checks = (
+        ("/healthz", "health", {"status": "ok"}),
+        ("/legacy/config", "legacy config", {"mode": "blocks"}),
+    )
+    for path, label, expected in checks:
         url = f"http://{host}:{port}{path}"
         try:
             with urlopen(url, timeout=5) as response:
@@ -154,6 +158,21 @@ def _check_app_http(bind_address: str, port: str) -> None:
                     raise SmokeFailure(
                         f"application returned HTTP {response.status} for {path}"
                     )
+                content_type = response.headers.get("Content-Type", "")
+                if not content_type.lower().startswith("application/json"):
+                    raise SmokeFailure(
+                        f"{label} returned unexpected content type: {content_type}"
+                    )
+                try:
+                    payload = json.loads(response.read().decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise SmokeFailure(f"{label} returned invalid JSON") from exc
+                if any(payload.get(key) != value for key, value in expected.items()):
+                    raise SmokeFailure(
+                        f"{label} response marker is missing: {expected}"
+                    )
+        except SmokeFailure:
+            raise
         except (OSError, URLError, ValueError) as exc:
             raise SmokeFailure(
                 f"application HTTP check failed for {path}: {exc}"
@@ -328,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
             env.get("APP_BIND_ADDRESS", "0.0.0.0"),
             env.get("APP_PORT", "7860"),
         )
-        print("PASS: Gradio HTTP endpoint")
+        print("PASS: FastAPI health and legacy-config endpoints")
 
         _check_inside_container(env_file, args.project_name)
         print("PASS: Qdrant readiness, data write, and local import")

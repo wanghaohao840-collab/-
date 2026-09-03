@@ -56,6 +56,42 @@ class PayloadIndexClient:
         self.calls.append(kwargs)
 
 
+class DeleteClient:
+    """Small concrete client exercising Qdrant filter/selector semantics."""
+
+    def __init__(self, points):
+        self.points = list(points)
+        self.delete_calls = []
+
+    @staticmethod
+    def _matches(point, query_filter):
+        if query_filter is None:
+            return True
+        for condition in getattr(query_filter, "must", []):
+            actual = point.payload.get(condition.key)
+            match = condition.match
+            if hasattr(match, "any"):
+                if actual not in match.any:
+                    return False
+            elif actual != match.value:
+                return False
+        return True
+
+    def count(self, *, collection_name, count_filter, exact):
+        return SimpleNamespace(
+            count=sum(self._matches(point, count_filter) for point in self.points)
+        )
+
+    def delete(self, *, collection_name, points_selector, wait):
+        self.delete_calls.append(points_selector)
+        query_filter = getattr(points_selector, "filter", None)
+        self.points = [
+            point for point in self.points
+            if not self._matches(point, query_filter)
+        ]
+        return SimpleNamespace(status="completed")
+
+
 def test_uncertain_create_reconciles_by_reading_collection():
     client = UncertainCreateClient(create_then_raise=True)
     store = QdrantVectorStore(client=client, retry_delays=(0, 0, 0))
@@ -135,3 +171,41 @@ def test_qdrant_filter_maps_numeric_and_datetime_ranges():
     assert conditions["importance"].range.gte == 0.5
     assert conditions["timestamp"].range.gte == start
     assert conditions["timestamp"].range.lte == end
+
+
+def test_qdrant_delete_intersects_logical_id_and_user_and_reports_confirmed_matches():
+    store = QdrantVectorStore(client=PayloadIndexClient(), retry_delays=())
+    store.models = None
+    points = [
+        SimpleNamespace(
+            id=store._qdrant_id("note:alice:one"),
+            payload={"_vector_store_id": "note:alice:one", "user_id": "alice"},
+        ),
+        SimpleNamespace(
+            id=store._qdrant_id("note:bob:one"),
+            payload={"_vector_store_id": "note:bob:one", "user_id": "bob"},
+        ),
+    ]
+    client = DeleteClient(points)
+    store.client = client
+
+    assert store.delete_by_filter(
+        "notes", {"_id": ["note:alice:one"], "user_id": "alice"}
+    ) == 1
+    assert [point.payload["user_id"] for point in client.points] == ["bob"]
+    selector = client.delete_calls[0]
+    assert {condition.key for condition in selector.filter.must} == {
+        "_vector_store_id", "user_id"
+    }
+    assert store.delete_by_filter(
+        "notes", {"_id": ["note:alice:one"], "user_id": "alice"}
+    ) == 0
+    assert len(client.delete_calls) == 1
+
+
+def test_qdrant_delete_missing_and_disappeared_targets_return_zero():
+    missing_client = DeleteClient([])
+    store = QdrantVectorStore(client=missing_client, retry_delays=())
+    store.models = None
+    assert store.delete_by_filter("notes", {"_id": ["missing"]}) == 0
+    assert missing_client.delete_calls == []

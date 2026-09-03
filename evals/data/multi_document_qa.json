@@ -1,0 +1,44 @@
+[
+  {
+    "case_id": "joint_scope",
+    "query": "哪些文档提到了 alpha？",
+    "mode": "joint",
+    "document_ids": ["doc-1", "doc-2"],
+    "required_document_ids": ["doc-1", "doc-2"],
+    "forbidden_document_ids": ["doc-3"],
+    "required_answer_markers": ["RAG回答"],
+    "minimum_llm_calls": 1
+  },
+  {
+    "case_id": "comparison_structure",
+    "query": "对比两篇文档的共同点和差异",
+    "mode": "compare",
+    "document_ids": ["doc-1", "doc-2"],
+    "required_document_ids": ["doc-1", "doc-2"],
+    "forbidden_document_ids": ["doc-3"],
+    "required_answer_markers": ["RAG回答"],
+    "required_prompt_markers": ["共同点", "差异点", "逐文档依据"],
+    "minimum_llm_calls": 1
+  },
+  {
+    "case_id": "summary_coverage",
+    "query": "联合总结这些文档",
+    "mode": "summary",
+    "document_ids": ["doc-1", "doc-2"],
+    "required_document_ids": ["doc-1", "doc-2"],
+    "forbidden_document_ids": ["doc-3"],
+    "required_answer_markers": ["RAG回答"],
+    "minimum_llm_calls": 3
+  },
+  {
+    "case_id": "missing_document_context",
+    "query": "对比共同点",
+    "mode": "compare",
+    "document_ids": ["doc-1", "doc-missing"],
+    "required_document_ids": ["doc-1", "doc-missing"],
+    "forbidden_document_ids": ["doc-2", "doc-3"],
+    "required_answer_markers": ["RAG回答"],
+    "required_prompt_markers": ["doc-missing"],
+    "minimum_llm_calls": 1
+  }
+]

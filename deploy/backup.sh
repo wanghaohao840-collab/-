@@ -55,6 +55,14 @@ read_env_value() {
 
 data_root="${DEPLOY_DATA_ROOT:-$(read_env_value DEPLOY_DATA_ROOT)}"
 data_root="${data_root:-./deploy-data}"
+qdrant_volume="${QDRANT_VOLUME_NAME:-$(read_env_value QDRANT_VOLUME_NAME)}"
+qdrant_volume="${qdrant_volume:-zhiyan_qdrant_data}"
+case "$qdrant_volume" in
+    *[!A-Za-z0-9_.-]*|[-.]*|"")
+        echo "Unsafe QDRANT_VOLUME_NAME: $qdrant_volume" >&2
+        exit 1
+        ;;
+esac
 
 [ -d "$data_root" ] || {
     echo "DEPLOY_DATA_ROOT must exist before backup: $data_root" >&2
@@ -78,6 +86,7 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 archive_name="assistant-$timestamp.tar.gz"
 archive="$backup_abs/$archive_name"
 metadata="$archive.meta"
+qdrant_archive="$archive.qdrant-volume.tar.gz"
 
 restart_services() {
     status="$?"
@@ -92,16 +101,31 @@ restart_services() {
 trap restart_services EXIT HUP INT TERM
 
 docker compose --env-file "$env_file" stop >/dev/null
+docker volume inspect "$qdrant_volume" >/dev/null
+helper_image="$(docker compose --env-file "$env_file" images -q qdrant)"
+[ -n "$helper_image" ] || {
+    echo "Unable to resolve the Qdrant helper image" >&2
+    exit 1
+}
+docker run --rm --user 0:0 \
+    --mount "type=volume,source=$qdrant_volume,target=/source,readonly" \
+    --mount "type=bind,source=$backup_abs,target=/backup" \
+    --entrypoint tar "$helper_image" \
+    -C /source -czf "/backup/$(basename "$qdrant_archive")" .
 tar -C "$data_abs" -czf "$archive" .
 (
     cd "$backup_abs"
     sha256sum "$archive_name" > "$archive_name.sha256"
+    sha256sum "$(basename "$qdrant_archive")" > "$(basename "$qdrant_archive").sha256"
 )
 {
     printf 'created_at=%s\n' "$timestamp"
     printf 'data_root=%s\n' "$data_abs"
     printf 'running_services=%s\n' "$(printf '%s' "$running_services" | tr '\n' ' ')"
     printf 'git_revision=%s\n' "$(git rev-parse HEAD 2>/dev/null || printf unknown)"
+    printf 'format=2\n'
+    printf 'qdrant_volume_name=%s\n' "$qdrant_volume"
+    printf 'qdrant_archive=%s\n' "$(basename "$qdrant_archive")"
     printf 'images='
     docker compose --env-file "$env_file" images --format json 2>/dev/null \
         | tr '\n' ' '

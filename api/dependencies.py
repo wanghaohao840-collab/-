@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import Depends, Header, Request
+
+from api.config import ApiConfig
+from app.document_library import DocumentLibraryService
+from app.import_service import ImportTaskService
+from app.qa_service import QaService
+from app.note_service import NoteService
+from app.session import SessionRegistry, UserSession
+
+
+def get_session_registry(request: Request) -> SessionRegistry:
+    return request.app.state.services.session_registry
+
+
+def get_document_library_service(request: Request) -> DocumentLibraryService:
+    return request.app.state.services.document_library
+
+
+def get_import_service(request: Request) -> ImportTaskService:
+    return request.app.state.services.import_service
+
+
+def get_qa_service(request: Request) -> QaService:
+    return request.app.state.services.qa_service
+
+
+def get_note_service(request: Request) -> NoteService | None:
+    # Keep disabled-route capability checks usable with lightweight hosts that
+    # have not constructed the optional Note facade.
+    return getattr(request.app.state.services, "note_service", None)
+
+
+def get_session_token(request: Request) -> str | None:
+    config: ApiConfig = request.app.state.api_config
+    return request.cookies.get(config.cookie_name)
+
+
+def get_current_session(
+    request: Request,
+    registry: Annotated[SessionRegistry, Depends(get_session_registry)],
+) -> UserSession:
+    return registry.get_session(get_session_token(request))
+
+
+def get_csrf_validated_session(
+    request: Request,
+    registry: Annotated[SessionRegistry, Depends(get_session_registry)],
+    csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
+) -> UserSession:
+    return registry.validate_csrf(get_session_token(request), csrf_token)

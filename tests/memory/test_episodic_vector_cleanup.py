@@ -148,3 +148,44 @@ def test_clear_restores_prior_sqlite_deletes_when_document_delete_fails():
     assert set(memory._episodes) == {low.episode_id, high.episode_id}
     assert memory.sessions == {"session": [low.episode_id, high.episode_id]}
     assert set(store.vectors) == {low.episode_id, high.episode_id}
+
+
+def test_remove_deletes_one_exact_episode_and_is_idempotent():
+    store = InMemoryVectorStore(collection_name="episodic")
+    memory, low, high = _memory_with_episodes(store, RecordingDocumentStore())
+    memory.doc_store.rows = {
+        low.episode_id: _row(low),
+        high.episode_id: _row(high),
+    }
+    store.add_vectors(
+        vectors=[[1.0], [2.0]],
+        metadata=[{"memory_type": "episodic"}, {"memory_type": "episodic"}],
+        ids=[low.episode_id, high.episode_id],
+    )
+
+    assert memory.remove(low.episode_id) is True
+    assert memory.remove(low.episode_id) is False
+    assert set(memory._episodes) == {high.episode_id}
+    assert memory.sessions == {"session": [high.episode_id]}
+    assert set(memory.doc_store.rows) == {high.episode_id}
+    assert set(store.vectors) == {high.episode_id}
+
+
+def test_remove_preserves_in_memory_state_when_durable_cleanup_fails():
+    store = FailingVectorStore()
+    memory, low, high = _memory_with_episodes(store, RecordingDocumentStore())
+    memory.doc_store.rows = {low.episode_id: _row(low), high.episode_id: _row(high)}
+    store.add_vectors(
+        vectors=[[1.0], [2.0]],
+        metadata=[{"memory_type": "episodic"}, {"memory_type": "episodic"}],
+        ids=[low.episode_id, high.episode_id],
+    )
+
+    try:
+        memory.remove(low.episode_id)
+    except RuntimeError as error:
+        assert str(error) == "vector delete failed"
+    else:
+        raise AssertionError("remove should propagate durable cleanup failure")
+    assert set(memory._episodes) == {low.episode_id, high.episode_id}
+    assert memory.sessions == {"session": [low.episode_id, high.episode_id]}

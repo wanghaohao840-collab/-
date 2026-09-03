@@ -291,11 +291,8 @@ class SimpleRAGPipeline:
         version = int(existing_metadata.get("document_version", 0)) + 1 if existing_points else 1
         updated_at = utc_now_iso()
 
-        # Count before removal.
-        before = self._vector_store.count(self._collection)
-        removed = self._remove_document_chunks(document_id)
-
-        # Upsert new chunks.
+        # Build replacement points before the commit boundary; no durable state
+        # changes until the callback has allowed the replacement to proceed.
         new_points: list[VectorPoint] = []
         for chunk in prepared:
             chunk.metadata.update(
@@ -308,6 +305,12 @@ class SimpleRAGPipeline:
                 vector=chunk.vector,
                 payload=chunk.metadata,
             ))
+        report_progress(
+            progress_callback, "committing", 0, 1, "committing"
+        )
+        removed = self._remove_document_chunks(document_id)
+
+        # Upsert new chunks.
         persistence_steps = int(bool(new_points)) + int(save_cache)
         persisted = 0
         if new_points:

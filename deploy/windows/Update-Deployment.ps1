@@ -14,6 +14,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Backup.Common.psm1') -Force
 
 $stableImages = [ordered]@{
     app = 'python_self_agent-app:local'
@@ -34,10 +35,11 @@ function Invoke-UpdateCommand {
 function Invoke-UpdateScript {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Parameters
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Parameters,
+        [Parameter(Mandatory)][IO.FileStream]$InheritedOperationLock
     )
     if ($null -eq $CommandRunner) {
-        return @(& $ScriptPath @Parameters)
+        return @(& $ScriptPath @Parameters -InheritedOperationLock $InheritedOperationLock)
     }
     $arguments = @('-NoProfile', '-NonInteractive', '-File', $ScriptPath)
     foreach ($name in $Parameters.Keys) {
@@ -151,9 +153,29 @@ function Get-VerifiedBackupArchive {
         -not $match.Groups['name'].Value.Equals([IO.Path]::GetFileName($archive), [StringComparison]::Ordinal)) {
         throw 'The cold backup checksum sidecar is invalid'
     }
-    $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+    $actual = Get-BackupSha256 -LiteralPath $archive
     if (-not $actual.Equals($match.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The cold backup checksum verification failed'
+    }
+    $metadata = Get-Content -LiteralPath "$archive.meta" -Raw | ConvertFrom-Json
+    if ($null -ne $metadata.PSObject.Properties['format'] -and [int]$metadata.format -ge 2) {
+        $qdrantArchive = "$archive.qdrant-volume.tar.gz"
+        $qdrantChecksum = "$qdrantArchive.sha256"
+        foreach ($required in @($qdrantArchive, $qdrantChecksum)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+                throw "The cold backup is missing Qdrant volume evidence: $required"
+            }
+        }
+        $qdrantLine = (Get-Content -LiteralPath $qdrantChecksum -Raw).Trim()
+        $qdrantMatch = [regex]::Match($qdrantLine, '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^\\/]+)$')
+        if (-not $qdrantMatch.Success -or
+            -not $qdrantMatch.Groups['name'].Value.Equals([IO.Path]::GetFileName($qdrantArchive), [StringComparison]::Ordinal)) {
+            throw 'The Qdrant backup checksum sidecar is invalid'
+        }
+        $qdrantActual = Get-BackupSha256 -LiteralPath $qdrantArchive
+        if (-not $qdrantActual.Equals($qdrantMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The Qdrant backup checksum does not match its archive'
+        }
     }
     return $archive
 }
@@ -195,9 +217,11 @@ $rollbackTagsReady = $false
 $candidateRollbackRequired = $false
 $rollbackSucceeded = $null
 $reportPath = $null
+$operationLock = $null
 
 try {
     $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+    $operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
     Assert-BackupDriveCapacity -Path $config.BackupRoot
     if (-not (Test-UpdateHealth -Config $config)) {
         throw 'The current app and qdrant services must be healthy before an upgrade'
@@ -230,7 +254,7 @@ try {
         StateRoot = $config.StateRoot
         BackupRoot = $config.BackupRoot
         HealthTimeoutSeconds = $HealthTimeoutSeconds
-    })
+    }) -InheritedOperationLock $operationLock
     $backupArchive = Get-VerifiedBackupArchive -BackupOutput $backupOutput -Config $config
 
     $stage = 'resolve-images'
@@ -304,7 +328,7 @@ try {
     $compensationErrors = @()
     $rollbackFailurePriority = $null
     $imagesRestored = $false
-    $runningServicesReady = $false
+    $oldContainersReady = $false
     $dataRestored = $false
 
     if ($rollbackTagsReady) {
@@ -323,29 +347,25 @@ try {
     }
 
     if ($candidateRollbackRequired -and $imagesRestored) {
-        $stage = 'rollback-running-services'
+        $stage = 'rollback-recreate-old-images'
         try {
+            Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
+                Get-ComposeArguments -Config $config -Command @(
+                    'up', '-d', '--no-build', '--force-recreate', 'app', 'qdrant'
+                )
+            ) | Out-Null
             $runningServices = @(Get-RunningUpdateServices -Config $config)
             if ($runningServices -notcontains 'app' -or $runningServices -notcontains 'qdrant') {
-                $stage = 'rollback-prepare-services'
-                Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
-                    Get-ComposeArguments -Config $config -Command @(
-                        'up', '-d', '--no-build', '--no-recreate', 'app', 'qdrant'
-                    )
-                ) | Out-Null
-                $runningServices = @(Get-RunningUpdateServices -Config $config)
+                throw 'Both previous-image services must be running before data restore'
             }
-            if ($runningServices -notcontains 'app' -or $runningServices -notcontains 'qdrant') {
-                throw 'Both app and qdrant must be running before data restore'
-            }
-            $runningServicesReady = $true
+            $oldContainersReady = $true
         } catch {
             $rollbackFailurePriority = 'high'
-            $compensationErrors += Protect-LogText "establish running services: $($_.Exception.Message)"
+            $compensationErrors += Protect-LogText "recreate previous-image services: $($_.Exception.Message)"
         }
     }
 
-    if ($candidateRollbackRequired -and $imagesRestored -and $runningServicesReady -and $null -ne $backupArchive) {
+    if ($candidateRollbackRequired -and $imagesRestored -and $oldContainersReady -and $null -ne $backupArchive) {
         $stage = 'rollback-data'
         try {
             Invoke-UpdateScript -ScriptPath (Join-Path $PSScriptRoot 'Restore-Deployment.ps1') -Parameters ([ordered]@{
@@ -355,7 +375,7 @@ try {
                 StateRoot = $config.StateRoot
                 BackupRoot = $config.BackupRoot
                 HealthTimeoutSeconds = $HealthTimeoutSeconds
-            }) | Out-Null
+            }) -InheritedOperationLock $operationLock | Out-Null
             $dataRestored = $true
         } catch {
             $rollbackFailurePriority = 'high'
@@ -364,14 +384,9 @@ try {
 
     }
 
-    if ($candidateRollbackRequired -and $imagesRestored -and $runningServicesReady -and $dataRestored) {
-        $stage = 'rollback-recreate'
+    if ($candidateRollbackRequired -and $imagesRestored -and $oldContainersReady -and $dataRestored) {
+        $stage = 'rollback-health'
         try {
-            Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
-                Get-ComposeArguments -Config $config -Command @(
-                    'up', '-d', '--no-build', '--force-recreate', 'app', 'qdrant'
-                )
-            ) | Out-Null
             if (-not (Wait-ForUpdateHealth -Config $config)) {
                 throw 'The restored deployment did not become healthy'
             }
@@ -415,4 +430,8 @@ try {
         throw "Upgrade failed at $failureStage`: $failureDetail. HIGH PRIORITY rollback failure: $($compensationErrors -join '; ')"
     }
     throw "Upgrade failed at $failureStage`: $failureDetail"
+} finally {
+    if ($null -ne $operationLock) {
+        Exit-OperationsLock -Lock $operationLock
+    }
 }

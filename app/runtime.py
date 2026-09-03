@@ -29,6 +29,7 @@ class UserRuntime:
     active_session_count: int = 0
     active_background_count: int = 0
     import_task_service: object | None = None
+    note_service: object | None = None
 
     def close(self) -> None:
         close = getattr(self.rag_tool, "close", None)
@@ -46,6 +47,7 @@ class UserRuntimeRegistry:
         self._runtimes: dict[str, UserRuntime] = {}
         self._lock = RLock()
         self.import_task_service: object | None = None
+        self.note_service: object | None = None
 
     def set_import_task_service(self, service: object | None) -> None:
         """Inject the optional durable-import service into all user runtimes.
@@ -59,6 +61,14 @@ class UserRuntimeRegistry:
             self.import_task_service = service
             for runtime in self._runtimes.values():
                 runtime.import_task_service = service
+
+    def set_note_service(self, service: object | None) -> None:
+        """Inject the shared Note facade into existing and future runtimes."""
+
+        with self._lock:
+            self.note_service = service
+            for runtime in self._runtimes.values():
+                runtime.note_service = service
 
     def get_or_create(self, user_id: str) -> UserRuntime:
         with self._lock:
@@ -108,6 +118,7 @@ class UserRuntimeRegistry:
                 reports=ReportService(self.db_path, self.storage),
                 recovery=recovery,
                 import_task_service=self.import_task_service,
+                note_service=self.note_service,
             )
             self._runtimes[user_id] = runtime
             return runtime

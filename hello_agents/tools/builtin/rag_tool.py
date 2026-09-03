@@ -8,6 +8,7 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import ContextVar
 from pathlib import Path
 from threading import RLock
 from typing import Dict, Any, List, Optional
@@ -97,6 +98,12 @@ class RAGTool(Tool):
         self._pipelines: Dict[str, Any] = {}
         self._document_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._document_summary_cache_lock = RLock()
+        self._action_data_context = ContextVar(
+            f"rag_action_data_{id(self)}", default={}
+        )
+        self._action_error_context = ContextVar(
+            f"rag_action_error_{id(self)}", default=None
+        )
 
         self.llm = HelloAgentsLLM()
 
@@ -115,6 +122,38 @@ class RAGTool(Tool):
                 graph_state_path=graph_state_path,
                 required=enable_graph is True,
             )
+
+    @property
+    def _last_action_data(self) -> Dict[str, Any]:
+        context = getattr(self, "_action_data_context", None)
+        if context is None:
+            context = ContextVar(f"rag_action_data_{id(self)}", default={})
+            self._action_data_context = context
+        return context.get()
+
+    @_last_action_data.setter
+    def _last_action_data(self, value: Dict[str, Any]) -> None:
+        context = getattr(self, "_action_data_context", None)
+        if context is None:
+            context = ContextVar(f"rag_action_data_{id(self)}", default={})
+            self._action_data_context = context
+        context.set(dict(value or {}))
+
+    @property
+    def _last_action_error(self) -> BaseException | None:
+        context = getattr(self, "_action_error_context", None)
+        if context is None:
+            context = ContextVar(f"rag_action_error_{id(self)}", default=None)
+            self._action_error_context = context
+        return context.get()
+
+    @_last_action_error.setter
+    def _last_action_error(self, value: BaseException | None) -> None:
+        context = getattr(self, "_action_error_context", None)
+        if context is None:
+            context = ContextVar(f"rag_action_error_{id(self)}", default=None)
+            self._action_error_context = context
+        context.set(value)
 
     def _summary_cache_key(
         self,
@@ -1394,6 +1433,7 @@ class RAGTool(Tool):
             return f"❌ 最多选择 {MAX_SELECTED_DOCUMENTS} 篇文档"
         pipeline = self._get_pipeline(rag_namespace)
         selected_mode = self._resolve_qa_mode(query, mode, summary_mode)
+        conversation_context = str(kwargs.get("conversation_context") or "").strip()
         retrieval_kwargs = {
             key: kwargs[key]
             for key in ("retrieval_mode", "use_mmr", "mmr_lambda", "vector_weight")
@@ -1413,6 +1453,7 @@ class RAGTool(Tool):
                 limit=limit,
                 min_score=min_score,
                 structured_output=bool(kwargs.get("structured_output", False)),
+                conversation_context=conversation_context,
                 graph_mode=graph_mode,
                 graph_node_limit=graph_node_limit,
                 graph_relation_limit=graph_relation_limit,
@@ -1453,6 +1494,7 @@ class RAGTool(Tool):
                 return f"🔍 未在所选文档 {', '.join(scope)} 中找到与 '{query}' 相关的知识，无法生成答案"
             return f"🔍 未找到与 '{query}' 相关的知识，无法生成答案"
 
+        history_section = self._qa_history_section(conversation_context)
         fixed_prompt = f"""请根据下面资料回答用户问题。
 
 要求：
@@ -1462,6 +1504,8 @@ class RAGTool(Tool):
 
 用户问题：
 {query}
+
+{history_section}
 
 资料：
 
@@ -1516,6 +1560,8 @@ class RAGTool(Tool):
 用户问题：
 {query}
 
+{history_section}
+
 资料：
 {context}
 
@@ -1530,6 +1576,15 @@ class RAGTool(Tool):
             used_results,
             truncated=truncated,
             graph_sources=graph_sources,
+        )
+
+    @staticmethod
+    def _qa_history_section(conversation_context: str) -> str:
+        if not conversation_context:
+            return ""
+        return (
+            "对话上下文（仅用于理解本轮问题，不作为检索查询或事实依据）：\n"
+            f"{conversation_context}"
         )
 
     def _graph_context_for_documents(
@@ -2007,6 +2062,7 @@ class RAGTool(Tool):
         limit: int,
         min_score: float,
         structured_output: bool = False,
+        conversation_context: str = "",
         graph_mode: str = "auto",
         graph_node_limit: int = 8,
         graph_relation_limit: int = 16,
@@ -2055,7 +2111,10 @@ class RAGTool(Tool):
         ) or "无"
         try:
             budget = self._context_budget(
-                f"对比分析\n问题：{query}\n信息缺失：{missing_text}"
+                "对比分析\n"
+                f"问题：{query}\n"
+                f"{self._qa_history_section(conversation_context)}\n"
+                f"信息缺失：{missing_text}"
             )
             context, used_results, truncated = self._build_context(
                 results, token_budget=budget, return_details=True
@@ -2096,6 +2155,8 @@ class RAGTool(Tool):
 
 用户问题：
 {query}
+
+{self._qa_history_section(conversation_context)}
 
 请按以下结构回答：
 1. 共同点

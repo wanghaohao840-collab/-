@@ -64,6 +64,28 @@ function Test-RegularNonReparseFile {
     return -not [bool]($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
 }
 
+function Get-BackupSha256 {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $fileHash = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($null -ne $fileHash) {
+        return (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash
+    }
+
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '')
+        } finally {
+            $algorithm.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Assert-BackupTreeSafe {
     [CmdletBinding()]
     param(
@@ -135,11 +157,20 @@ function Get-CompleteBackupSets {
         } else {
             '{0}-W{1}' -f $match.Groups['year'].Value, $match.Groups['week'].Value
         }
+        $qdrantArchive = "$archive.qdrant-volume.tar.gz"
+        $qdrantChecksum = "$qdrantArchive.sha256"
+        $hasQdrantArchive = Test-RegularNonReparseFile -LiteralPath $qdrantArchive
+        $hasQdrantChecksum = Test-RegularNonReparseFile -LiteralPath $qdrantChecksum
+        if ($hasQdrantArchive -xor $hasQdrantChecksum) {
+            continue
+        }
         $sets += [PSCustomObject]@{
             Key = $key
             Archive = $archive
             Checksum = $checksum
             Metadata = $metadata
+            QdrantArchive = if ($hasQdrantArchive) { $qdrantArchive } else { $null }
+            QdrantChecksum = if ($hasQdrantChecksum) { $qdrantChecksum } else { $null }
         }
     }
     return @($sets | Sort-Object -Property Key -Descending)
@@ -168,8 +199,11 @@ function Remove-BackupSet {
     )
 
     $root = [IO.Path]::GetFullPath($AllowedRoot).TrimEnd('\', '/')
-    foreach ($property in @('Archive', 'Checksum', 'Metadata')) {
+    foreach ($property in @('Archive', 'Checksum', 'Metadata', 'QdrantArchive', 'QdrantChecksum')) {
         $literalPath = [string]$BackupSet.$property
+        if ([string]::IsNullOrWhiteSpace($literalPath)) {
+            continue
+        }
         $safePath = Assert-SafePath -Path $literalPath -AllowedRoot $root
         $parent = [IO.Path]::GetDirectoryName($safePath).TrimEnd('\', '/')
         if (-not $parent.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
@@ -187,6 +221,7 @@ function Remove-BackupSet {
 Export-ModuleMember -Function @(
     'Assert-BackupPathAncestorsSafe',
     'Assert-BackupTreeSafe',
+    'Get-BackupSha256',
     'Get-CompleteBackupSets',
     'Get-IsoWeekInfo',
     'Get-RetentionPlan',

@@ -1,0 +1,14 @@
+# Document Library Vertical Slice SDD Progress
+
+- Planning base: `7ae7314`
+- Task 1: complete (commits `d21d79d..90eccf1`, review clean; Penpot revision `119`; focused contract `4 passed`)
+- Minor for final review: reconcile superseded revision `115` wording in `01-penpot-design-source.md` with the authoritative revision `118` export / revision `119` semantic evidence.
+- Task 2: complete (commits `90eccf1..7d810ec`, review clean; RED `11 failed`; GREEN `29 passed`; compatibility `2 passed`)
+- Task 3: complete (commits `1b878b2..d8d748a`, review clean after two corrective rounds; final GREEN `164 passed`)
+- Task 4: complete (commits `6d9ed6f..45959a5`, review clean after two corrective rounds; final GREEN `121 passed`)
+- Task 5: complete (implementation `9571ee9`; corrections through `3b22198`; final independent re-review approved with no findings; focused GREEN `36 passed`; final frontend `101 passed`; typecheck/lint/build, component map `6/6`, token and diff checks PASS)
+- Task 5a: complete (commits `67132d2`, `a291e79`; independent review approved; desktop card/halo pixel geometry matches Penpot; frontend `101/101`)
+- Task 5b: complete (implementation `e9707ee`; terminal-only import batches render no DOM; frontend `102/102`; typecheck/lint/build, component map `6/6`, token and diff checks PASS)
+- Task 6: complete (implementation `af469ba`; Python `227/227`, frontend `102/102`, E2E `46 passed` with 2 existing conditional skips; six reviewed no-update snapshots; process/runtime cleanup clean)
+- Corrective packets 07–09: complete (`f909bc2`, `50d0ee6`, `7f385f4`; focused tests and full npm audit green)
+- Final integration review: accepted (`948 passed`, frontend `102/102`, E2E `46 passed` + 2 existing conditional skips, npm audit 0, Docker Linux daemon and Penpot MCP green)

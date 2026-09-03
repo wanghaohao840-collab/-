@@ -13,8 +13,15 @@ __pycache__/
 .worktrees/
 .idea/
 
+web/dist/
+web/node_modules/
+web/playwright-report/
+web/test-results/
+
 .runtime/
 data/
+!evals/data/
+!evals/data/multi_document_qa.json
 
 *.db
 memory_data/
@@ -32,3 +39,4 @@ deploy-data/
 backups/
 deploy-state/
 .operations-test/
+.operations-test-*/

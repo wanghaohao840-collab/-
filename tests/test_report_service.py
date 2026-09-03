@@ -1,7 +1,9 @@
 from app.database import initialize_database
 from app.auth import AuthService
 from app.reports import ReportService
+from app.qa_models import QaReportTurn
 from app.storage import UserStorage
+from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
 def create_user(db_path):
@@ -35,3 +37,37 @@ def test_report_service_hides_missing_files(tmp_path):
     storage.report_path(user_id, record.id).unlink()
 
     assert service.list_reports(user_id) == []
+
+
+def test_learning_report_uses_qa_projection_without_exposing_history_path(
+    tmp_path,
+) -> None:
+    assistant = object.__new__(PDFLearningAssistant)
+    assistant.user_id = "user-1"
+    assistant.session_id = "session-1"
+    assistant.current_document = None
+    assistant.history_path = tmp_path / "secret" / "history.json"
+    assistant.history = {
+        "documents": [],
+        "questions": [{"question": "legacy stale", "answer": "stale"}],
+        "notes": [],
+    }
+    assistant._load_latest_history = lambda: assistant.history
+    assistant.memory_tool = type("Memory", (), {"execute": lambda *_: "memory"})()
+    assistant.rag_tool = type("Rag", (), {"execute": lambda *_: "rag"})()
+    turns = (
+        QaReportTurn(
+            "repository question",
+            "repository answer",
+            ("doc-1",),
+            ("One.pdf",),
+            "joint",
+            "2026-08-27T00:00:00Z",
+        ),
+    )
+
+    report = assistant.generate_report(turns)
+
+    assert "repository question" in report
+    assert "legacy stale" not in report
+    assert str(assistant.history_path) not in report

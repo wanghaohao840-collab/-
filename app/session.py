@@ -16,9 +16,14 @@ class InvalidSessionError(ValueError):
     """Raised when a session token is missing, expired, or logged out."""
 
 
+class InvalidCsrfTokenError(ValueError):
+    """Raised when a state-changing request has no valid CSRF token."""
+
+
 @dataclass
 class UserSession:
     token: str
+    csrf_token: str
     user_id: str
     username: str
     runtime: UserRuntime
@@ -74,6 +79,27 @@ class SessionRegistry:
     def get_assistant(self, token: str | None) -> PDFLearningAssistant:
         return self.get_session(token).assistant
 
+    def validate_csrf(self, token: str | None, csrf_token: str | None) -> UserSession:
+        session = self.get_session(token)
+        if not csrf_token or not secrets.compare_digest(session.csrf_token, csrf_token):
+            raise InvalidCsrfTokenError("Invalid CSRF token")
+        return session
+
+    def clear_document_selection(self, user_id: str, document_id: str) -> int:
+        """Clear one deleted document from this user's active sessions."""
+
+        cleared = 0
+        with self._lock:
+            for session in self._sessions.values():
+                if (
+                    session.user_id == user_id
+                    and session.assistant.current_document_id == document_id
+                ):
+                    session.assistant.current_document_id = None
+                    session.assistant.current_document = None
+                    cleared += 1
+        return cleared
+
     def _create_session(self, user_id: str, username: str) -> str:
         with self._lock:
             self._cleanup_expired_locked()
@@ -81,6 +107,7 @@ class SessionRegistry:
                 raise InvalidSessionError("Too many active sessions")
 
             token = secrets.token_urlsafe(32)
+            csrf_token = secrets.token_urlsafe(32)
             runtime = self.runtime_registry.acquire_session(user_id)
             try:
                 assistant = PDFLearningAssistant(
@@ -91,6 +118,7 @@ class SessionRegistry:
                 raise
             self._sessions[token] = UserSession(
                 token=token,
+                csrf_token=csrf_token,
                 user_id=user_id,
                 username=username,
                 runtime=runtime,

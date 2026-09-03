@@ -171,6 +171,33 @@ class MemoryManager:
 
         return all_results[:limit]
 
+    def remove_memory(
+        self,
+        memory_id: str,
+        *,
+        memory_type: str,
+        missing_ok: bool = False,
+    ) -> bool:
+        """Remove one exact memory without broad metadata matching."""
+
+        module = self.memory_types.get(memory_type)
+        remove = getattr(module, "remove", None)
+        if not callable(remove):
+            return False
+        if memory_type == "semantic":
+            removed = bool(
+                remove(
+                    memory_id,
+                    user_id=self.user_id,
+                    missing_ok=missing_ok,
+                )
+            )
+        else:
+            removed = bool(remove(memory_id))
+        if removed:
+            self._save_snapshot()
+        return removed
+
     def forget_memories(
         self,
         strategy: str = "importance_based",

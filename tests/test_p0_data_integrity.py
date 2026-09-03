@@ -1,80 +1,48 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
-from app.auth import AuthService
 from threading import RLock
 
+from app.bootstrap import ApplicationServices
 from app.coordination import UserMutationCoordinator
-from app.database import initialize_database
 from app.history import EMPTY_HISTORY, HistoryRepository
-from app.reports import ReportService
+from app.note_models import NoteFilters
 from app.storage import UserStorage
 from assistants.pdf_learning_assistant import PDFLearningAssistant
 
 
-class FakeTool:
-    def execute(self, action, **kwargs):
-        return f"{action}-ok"
-
-
-def make_runtime(tmp_path, user_id="user-1", with_reports=False):
-    storage = UserStorage(tmp_path / "data")
-    paths = storage.ensure_user_dirs(user_id)
-    from threading import RLock
-
-    reports = None
-    if with_reports:
-        db_path = tmp_path / "app.db"
-        initialize_database(db_path)
-        user_id = AuthService(db_path).register("Alice", "correct horse battery").id
-        paths = storage.ensure_user_dirs(user_id)
-        reports = ReportService(db_path, storage)
-    lock = RLock()
-    history_repo = HistoryRepository(paths.history)
-    history_repo.save({
-        "documents": [],
-        "questions": [],
-        "notes": [],
-        "sessions": [],
-    })
-    coordinator = UserMutationCoordinator(
-        user_id=user_id,
-        lock=lock,
-        history=history_repo,
-        document_root=paths.documents,
-    )
-    return SimpleNamespace(
-        paths=paths,
-        lock=lock,
-        coordinator=coordinator,
-        rag_tool=FakeTool(),
-        memory_tool=FakeTool(),
-        history=history_repo,
-        reports=reports,
-    ), user_id
+def make_runtime(tmp_path, username="userone"):
+    services = ApplicationServices.create(tmp_path / "data")
+    token = services.session_registry.register(username, "correct horse battery")
+    return services.session_registry.get_session(token), services
 
 
 def test_two_sessions_merge_concurrent_notes(tmp_path):
-    runtime, user_id = make_runtime(tmp_path)
-    first = PDFLearningAssistant(user_id=user_id, runtime=runtime)
-    second = PDFLearningAssistant(user_id=user_id, runtime=runtime)
+    first, services = make_runtime(tmp_path)
+    second_token = services.session_registry.login("userone", "correct horse battery")
+    second = services.session_registry.get_session(second_token)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda pair: pair[0].add_note(pair[1]), [
+                (first.assistant, "first-note"),
+                (second.assistant, "second-note"),
+            ]))
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(lambda pair: pair[0].add_note(pair[1]), [
-            (first, "first-note"),
-            (second, "second-note"),
-        ]))
-
-    notes = runtime.history.load()["notes"]
-    assert {item["note"] for item in notes} == {"first-note", "second-note"}
+        notes = services.note_service.list_for_user(first.user_id, NoteFilters()).items
+        assert {note.body_markdown for note in notes} == {"first-note", "second-note"}
+        assert not first.runtime.paths.history.exists()
+    finally:
+        services.session_registry.logout(first.token)
+        services.session_registry.logout(second_token)
+        services.stop()
 
 
 def test_delete_and_clear_remove_original_uploads(tmp_path):
-    runtime, user_id = make_runtime(tmp_path)
-    assistant = PDFLearningAssistant(user_id=user_id, runtime=runtime)
+    session, services = make_runtime(tmp_path)
+    runtime = session.runtime
+    assistant = session.assistant
     first = runtime.paths.documents / "doc-1.md"
     second = runtime.paths.documents / "doc-2.md"
     first.write_text("one", encoding="utf-8")
@@ -89,31 +57,39 @@ def test_delete_and_clear_remove_original_uploads(tmp_path):
         "sessions": [],
     })
 
-    assistant.current_document_id = "doc-1"
-    assistant.current_document = str(first)
-    assistant.delete_current_document()
-    assert not first.exists()
-    assert second.exists()
+    try:
+        assistant.current_document_id = "doc-1"
+        assistant.current_document = str(first)
+        assistant.delete_current_document()
+        assert not first.exists()
+        assert second.exists()
 
-    assistant.clear_all_documents()
-    assert not second.exists()
-    assert runtime.history.load()["notes"] == [{"note": "keep"}]
+        assistant.clear_all_documents()
+        assert not second.exists()
+        assert runtime.history.load()["notes"] == [{"note": "keep"}]
+    finally:
+        services.session_registry.logout(session.token)
+        services.stop()
 
 
 def test_word_export_uses_selected_immutable_snapshot(tmp_path):
-    runtime, user_id = make_runtime(tmp_path, with_reports=True)
-    assistant = PDFLearningAssistant(user_id=user_id, runtime=runtime)
-    assistant.add_note("snapshot-note")
-    markdown_path = Path(assistant.export_report_markdown())
-    report_id = markdown_path.stem
-    assistant.add_note("later-note")
+    session, services = make_runtime(tmp_path)
+    try:
+        assistant = session.assistant
+        assistant.add_note("snapshot-note")
+        markdown_path = Path(assistant.export_report_markdown())
+        report_id = markdown_path.stem
+        assistant.add_note("later-note")
 
-    docx_path = Path(assistant.export_report_docx(report_id))
-    from docx import Document
+        docx_path = Path(assistant.export_report_docx(report_id))
+        from docx import Document
 
-    text = "\n".join(paragraph.text for paragraph in Document(docx_path).paragraphs)
-    assert "snapshot-note" in text
-    assert "later-note" not in text
+        text = "\n".join(paragraph.text for paragraph in Document(docx_path).paragraphs)
+        assert "snapshot-note" in text
+        assert "later-note" not in text
+    finally:
+        services.session_registry.logout(session.token)
+        services.stop()
 
 
 # ── packet 04 additions: cross-user access denial ───────────────────────
@@ -121,15 +97,17 @@ def test_word_export_uses_selected_immutable_snapshot(tmp_path):
 
 def test_cross_user_cannot_read_others_report(tmp_path):
     """User A's report ID must raise FileNotFoundError for user B."""
-    runtime_a, user_a = make_runtime(tmp_path / "a", user_id="alice",
-                                      with_reports=True)
-    assistant_a = PDFLearningAssistant(user_id=user_a, runtime=runtime_a)
-    report_path = Path(assistant_a.export_report_markdown())
-    report_id = report_path.stem
+    session_a, services = make_runtime(tmp_path / "a", username="alice")
+    try:
+        report_path = Path(session_a.assistant.export_report_markdown())
+        report_id = report_path.stem
 
-    # User B tries to read user A's report — must fail.
-    with pytest.raises(FileNotFoundError):
-        runtime_a.reports.read_report("bob", report_id)
+        # User B tries to read user A's report — must fail.
+        with pytest.raises(FileNotFoundError):
+            session_a.runtime.reports.read_report("bob", report_id)
+    finally:
+        services.session_registry.logout(session_a.token)
+        services.stop()
 
 
 def test_cross_user_document_not_accessible_via_direct_path(tmp_path):
