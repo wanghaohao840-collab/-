@@ -69,6 +69,17 @@ def test_common_module_redacts_named_secrets_and_url_credentials():
     assert "[REDACTED]" in result.stdout
 
 
+def test_external_command_allows_native_stderr_when_exit_code_is_zero():
+    result = run_ps(
+        import_module()
+        + "$output=@(Invoke-External -FilePath 'cmd.exe' -ArgumentList "
+        + "@('/d','/s','/c','\"echo progress 1>&2 & exit /b 0\"')); "
+        + "if(($output -join ' ') -notmatch 'progress'){throw 'stderr was not captured'}"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_safe_path_rejects_sibling_prefix(tmp_path: Path):
     root = tmp_path / "data"
     sibling = tmp_path / "data-escape" / "file.txt"

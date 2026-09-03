@@ -36,8 +36,17 @@ function Invoke-External {
         [string[]]$ArgumentList = @(),
         [int[]]$AllowExitCodes = @(0)
     )
-    $output = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { Protect-LogText ([string]$_) })
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5.1 wraps native stderr as ErrorRecord objects.
+        # Docker writes ordinary progress to stderr even when it exits zero, so
+        # success must be decided exclusively from the native exit code.
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { Protect-LogText ([string]$_) })
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($AllowExitCodes -notcontains $exitCode) {
         throw "$FilePath failed with exit code $exitCode`: $($output -join [Environment]::NewLine)"
     }
