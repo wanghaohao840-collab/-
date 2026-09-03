@@ -13,6 +13,9 @@ def test_backup_script_is_cold_and_excludes_secrets():
     assert "sha256sum" in source
     assert "tar -C" in source
     assert "--volumes" not in source
+    assert "QDRANT_VOLUME_NAME" in source
+    assert "target=/source,readonly" in source
+    assert "qdrant-volume.tar.gz" in source
 
 
 def test_restore_script_validates_and_keeps_a_rollback():
@@ -23,6 +26,8 @@ def test_restore_script_validates_and_keeps_a_rollback():
     assert "rollback" in source
     assert "rm -rf" not in source
     assert "docker compose" in source
+    assert "QDRANT_VOLUME_NAME" in source
+    assert "qdrant-volume.tar.gz" in source
 
 
 def test_deployment_readme_documents_restart_and_restore_commands():
