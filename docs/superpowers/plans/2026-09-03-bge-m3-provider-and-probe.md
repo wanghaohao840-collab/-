@@ -696,7 +696,7 @@ its JSON output never contains API keys or raw model responses. The parser reads
 the provided dotenv file with interpolation disabled; it does not merge LLM credentials
 or unrelated process environment variables.
 
-- [ ] **Step 1: Add complete failing probe/config tests.**
+- [x] **Step 1: Add complete failing probe/config tests.**
 
 ```python
 # tests/deploy/test_embedding_probe.py
@@ -796,7 +796,7 @@ def test_template_is_dormant_and_docker_copies_probe():
     assert "deploy/embedding_probe.py" in (root / "Dockerfile").read_text(encoding="utf-8")
 ```
 
-- [ ] **Step 2: Run red, then implement the complete probe.**
+- [x] **Step 2: Run red, then implement the complete probe.**
 
 Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/deploy/test_embedding_probe.py -q --basetemp=.pytest-tmp-bge-probe-red`.
 Expected: missing probe module, later missing template/Docker additions until Step 3.
@@ -874,7 +874,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 3: Add the exact template, documentation and image-copy changes.**
+- [x] **Step 3: Add the exact template, documentation and image-copy changes.**
 
 Append this block to `deploy/.env.example` (after checking no duplicate RAG_EMBEDDING keys):
 
@@ -923,7 +923,7 @@ API 费用以平台当前政策为准，免费服务也有限流。探测通过�
 应先评审代理配置与密钥传输边界，不能关闭 TLS 校验绕过连接失败。
 ```
 
-- [ ] **Step 4: Run the complete E1 tests, then commit Task 3.**
+- [x] **Step 4: Run the complete E1 tests, then commit Task 3.**
 
 ```powershell
 D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/memory/rag/test_embedding_profile.py tests/memory/rag/test_embedding_client.py tests/deploy/test_embedding_probe.py tests/deploy/test_compose_contract.py -q --basetemp=.pytest-tmp-bge-probe-green
@@ -1012,6 +1012,22 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 
 ## Plan self-review and progress
 
+### Task 3 verification (2026-09-03)
+
+- Task 2 committed as `118d19d`.
+- Probe red: missing `deploy.embedding_probe`; initial profile/client/probe/
+  Compose contract green: **100 passed**.
+- Parser review reproduced three failures: quoted-key duplicate accepted,
+  malformed statement ignored, and a multiline value mistaken for a setting.
+  Replaced line regex checks with python-dotenv parser bindings; reject parse
+  errors and RAG duplicates before building a RAG-only mapping. No environment
+  interpolation, LLM credential inheritance, or dotenv warning-and-continue path.
+- Hardened targeted suite: **105 passed** with
+  `--basetemp=.pytest-tmp-bge-probe-hardened`; CLI `--help` and `git diff --check`
+  passed. The parser binding contract is covered by these regression tests.
+- Updated only the template, operator guide and Dockerfile COPY list; no image
+  rebuild, running-container change or real API call performed.
+
 ### Task 2 verification (2026-09-03)
 
 - Task 1 committed as `deba636`.
@@ -1059,7 +1075,7 @@ continuations of the approved spec, not reasons to ask again which embedding mod
 - [x] Static self-review: six Python code blocks parsed with the project venv in UTF-8 mode; no unfinished-code markers found. This is syntax validation, not executed unit tests.
 - [x] Execute Task 1 red/green and record results.
 - [x] Execute Task 2 red/green and record results.
-- [ ] Execute Task 3 red/green and record results.
+- [x] Execute Task 3 red/green and record results.
 - [ ] Integrate E1, open key entry and record operator confirmation/probe result.
 
 Planning is not implementation or live model verification. At plan creation the real

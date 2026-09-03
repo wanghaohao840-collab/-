@@ -96,6 +96,32 @@ python3 deploy/smoke_test.py --env-file deploy/.env
 python3 deploy/smoke_test.py --env-file deploy/.env --deep
 ```
 
+## 候选文档嵌入配置与探测
+
+候选模型使用 `BAAI/bge-m3`，不要选 `Pro/`。在本地 `deploy/.env` 的
+`RAG_EMBEDDING_API_KEY=` 后填写密钥，不替换任何 `LLM_*`。
+保持 `RAG_EMBEDDING_PROVIDER=simple`，直到版本化索引重建和切换验收完成。
+
+从仓库根目录仅校验配置，不联网：
+
+```powershell
+D:\python_self_agent\venv\Scripts\python.exe -m deploy.embedding_probe --env-file deploy/.env
+```
+
+明确发送内置公开句子进行候选模型连通性测试：
+
+```powershell
+D:\python_self_agent\venv\Scripts\python.exe -m deploy.embedding_probe --env-file deploy/.env --probe
+```
+
+Linux 环境将解释器路径替换为项目环境的 `python`，仍从仓库根目录执行。
+探测输出不包含密钥、全文向量或业务文档。密钥只在本地填写，不发送到聊天。
+API 费用以平台当前政策为准，免费服务也有限流。探测通过只证明候选配置
+及请求协议可用，不代表文档检索已切换，不代替检索质量评测或 deep smoke。
+
+客户端使用直接 HTTPS 连接，不继承系统代理。若网络必须使用企业代理，
+应先评审代理配置与密钥传输边界，不能关闭 TLS 校验绕过连接失败。
+
 ## 日常操作
 
 查看状态和日志：
