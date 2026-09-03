@@ -1,8 +1,6 @@
 #Requires -Version 5.1
 Set-StrictMode -Version Latest
 
-Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
-
 function Assert-SafeDockerResourceName {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Name)
