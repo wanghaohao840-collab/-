@@ -5,6 +5,11 @@ import subprocess
 ROOT = Path(__file__).parents[2]
 MODULE = ROOT / "deploy" / "windows" / "QdrantVolume.Common.psm1"
 OPERATIONS = ROOT / "deploy" / "windows" / "Operations.Common.psm1"
+BACKUP_COMMON = ROOT / "deploy" / "windows" / "Backup.Common.psm1"
+BACKUP = ROOT / "deploy" / "windows" / "Backup-Deployment.ps1"
+RESTORE = ROOT / "deploy" / "windows" / "Restore-Deployment.ps1"
+DRILL = ROOT / "deploy" / "windows" / "Invoke-RestoreDrill.ps1"
+UPDATE = ROOT / "deploy" / "windows" / "Update-Deployment.ps1"
 
 
 def ps_quote(value: Path | str) -> str:
@@ -65,3 +70,44 @@ def test_volume_commands_use_read_only_source_mounts():
     assert "type=bind,source=$sourcePath,target=/source,readonly" in source
     assert "type=bind,source=$archiveParent,target=/backup,readonly" in source
     assert "RequiredPrefix" in source
+
+
+def test_backup_set_tracks_complete_qdrant_volume_sidecars(tmp_path: Path):
+    archive = tmp_path / "assistant-20260903T030000Z.tar.gz"
+    for path in (
+        archive,
+        Path(f"{archive}.sha256"),
+        Path(f"{archive}.meta"),
+        Path(f"{archive}.qdrant-volume.tar.gz"),
+        Path(f"{archive}.qdrant-volume.tar.gz.sha256"),
+    ):
+        path.write_text("evidence", encoding="utf-8")
+    script = (
+        f"Import-Module '{ps_quote(OPERATIONS)}' -Force; "
+        f"Import-Module '{ps_quote(BACKUP_COMMON)}' -Force; "
+        f"$set=@(Get-CompleteBackupSets -Directory '{ps_quote(tmp_path)}' -Prefix 'assistant-'); "
+        "if($set.Count -ne 1){throw 'set missing'}; "
+        "$set[0] | Select-Object Archive,QdrantArchive,QdrantChecksum | ConvertTo-Json -Compress"
+    )
+    result = run_powershell(script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "qdrant-volume.tar.gz" in result.stdout
+
+
+def test_backup_restore_and_drill_treat_volume_payload_as_first_class_state():
+    backup = BACKUP.read_text(encoding="utf-8")
+    restore = RESTORE.read_text(encoding="utf-8")
+    drill = DRILL.read_text(encoding="utf-8")
+    update = UPDATE.read_text(encoding="utf-8")
+
+    assert "Export-QdrantVolume" in backup
+    assert "qdrant_volume_name" in backup
+    assert "qdrant-volume.tar.gz" in backup
+    assert "Clear-QdrantVolume" in restore
+    assert "Import-QdrantVolume" in restore
+    assert "qdrant-rollback-" in restore
+    assert "QDRANT_VOLUME_NAME" in drill
+    assert "zhiyan-drill-" in drill
+    assert "Remove-QdrantVolume" in drill
+    assert "missing Qdrant volume evidence" in update
+    assert "Qdrant backup checksum" in update

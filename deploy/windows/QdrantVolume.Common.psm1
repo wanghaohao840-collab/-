@@ -78,6 +78,24 @@ function New-QdrantVolume {
     return $false
 }
 
+function Test-QdrantVolumeExists {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [scriptblock]$ExternalInvoker
+    )
+
+    $safeName = Assert-SafeDockerResourceName -Name $Name
+    try {
+        $output = @(Invoke-QdrantVolumeExternal -FilePath 'docker' -ArgumentList @(
+            'volume', 'inspect', '--format', '{{.Name}}', $safeName
+        ) -ExternalInvoker $ExternalInvoker)
+    } catch {
+        return $false
+    }
+    return @($output | Where-Object { ([string]$_).Trim() -eq $safeName }).Count -eq 1
+}
+
 function Test-QdrantVolumeEmpty {
     [CmdletBinding()]
     param(
@@ -90,7 +108,7 @@ function Test-QdrantVolumeEmpty {
     $output = @(Invoke-QdrantVolumeExternal -FilePath 'docker' -ArgumentList @(
         'run', '--rm', '--user', '0:0',
         '--mount', "type=volume,source=$safeName,target=/volume,readonly",
-        $HelperImage, 'sh', '-ec', 'test -z "$(find /volume -mindepth 1 -maxdepth 1 -print -quit)" && printf empty'
+        '--entrypoint', 'sh', $HelperImage, '-ec', 'test -z "$(find /volume -mindepth 1 -maxdepth 1 -print -quit)" && printf empty'
     ) -ExternalInvoker $ExternalInvoker)
     return (@($output | Where-Object { ([string]$_).Trim() -eq 'empty' }).Count -eq 1)
 }
@@ -119,7 +137,7 @@ function Export-QdrantVolume {
         'run', '--rm', '--user', '0:0',
         '--mount', "type=volume,source=$safeName,target=/source,readonly",
         '--mount', "type=bind,source=$archiveParent,target=/backup",
-        $HelperImage, 'tar', '-C', '/source', '-czf', "/backup/$archiveName", '.'
+        '--entrypoint', 'tar', $HelperImage, '-C', '/source', '-czf', "/backup/$archiveName", '.'
     ) -ExternalInvoker $ExternalInvoker | Out-Null
     if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) {
         throw 'Qdrant export did not create the requested archive'
@@ -152,7 +170,7 @@ function Import-QdrantVolume {
         'run', '--rm', '--user', '0:0',
         '--mount', "type=volume,source=$safeName,target=/target",
         '--mount', "type=bind,source=$archiveParent,target=/backup,readonly",
-        $HelperImage, 'tar', '-C', '/target', '-xzf', "/backup/$archiveName"
+        '--entrypoint', 'tar', $HelperImage, '-C', '/target', '-xzf', "/backup/$archiveName"
     ) -ExternalInvoker $ExternalInvoker | Out-Null
 }
 
@@ -178,7 +196,24 @@ function Import-QdrantDirectory {
         'run', '--rm', '--user', '0:0',
         '--mount', "type=bind,source=$sourcePath,target=/source,readonly",
         '--mount', "type=volume,source=$safeName,target=/target",
-        $HelperImage, 'sh', '-ec', 'tar -C /source -cf - . | tar -C /target -xf -'
+        '--entrypoint', 'sh', $HelperImage, '-ec', 'tar -C /source -cf - . | tar -C /target -xf -'
+    ) -ExternalInvoker $ExternalInvoker | Out-Null
+}
+
+function Clear-QdrantVolume {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$HelperImage,
+        [scriptblock]$ExternalInvoker
+    )
+
+    $safeName = Assert-SafeDockerResourceName -Name $Name
+    Invoke-QdrantVolumeExternal -FilePath 'docker' -ArgumentList @(
+        'run', '--rm', '--user', '0:0',
+        '--mount', "type=volume,source=$safeName,target=/target",
+        '--entrypoint', 'sh', $HelperImage, '-ec',
+        'find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +'
     ) -ExternalInvoker $ExternalInvoker | Out-Null
 }
 
@@ -217,4 +252,4 @@ function Get-QdrantInventory {
     return @($items)
 }
 
-Export-ModuleMember -Function Assert-SafeDockerResourceName, Get-QdrantVolumeName, Get-QdrantHelperImage, New-QdrantVolume, Test-QdrantVolumeEmpty, Export-QdrantVolume, Import-QdrantVolume, Import-QdrantDirectory, Remove-QdrantVolume, Get-QdrantInventory
+Export-ModuleMember -Function Assert-SafeDockerResourceName, Get-QdrantVolumeName, Get-QdrantHelperImage, New-QdrantVolume, Test-QdrantVolumeExists, Test-QdrantVolumeEmpty, Export-QdrantVolume, Import-QdrantVolume, Import-QdrantDirectory, Clear-QdrantVolume, Remove-QdrantVolume, Get-QdrantInventory

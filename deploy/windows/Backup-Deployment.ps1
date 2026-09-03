@@ -16,6 +16,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Common.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'QdrantVolume.Common.psm1') -Force
 
 function Assert-InheritedOperationsLock {
     param(
@@ -143,14 +144,20 @@ function Write-BackupMetadata {
         [Parameter(Mandatory)][string]$Archive,
         [Parameter(Mandatory)][string]$Hash,
         [Parameter(Mandatory)][DateTime]$CreatedUtc,
-        [Parameter(Mandatory)][ValidateSet('daily', 'weekly')][string]$Kind
+        [Parameter(Mandatory)][ValidateSet('daily', 'weekly')][string]$Kind,
+        [string]$QdrantArchive,
+        [string]$QdrantHash,
+        [string]$QdrantVolumeName
     )
     $payload = [ordered]@{
         archive = [IO.Path]::GetFileName($Archive)
         sha256 = $Hash
         created_at = $CreatedUtc.ToString('o')
         kind = $Kind
-        format = 1
+        format = if ([string]::IsNullOrWhiteSpace($QdrantArchive)) { 1 } else { 2 }
+        qdrant_volume_name = $QdrantVolumeName
+        qdrant_archive = if ([string]::IsNullOrWhiteSpace($QdrantArchive)) { $null } else { [IO.Path]::GetFileName($QdrantArchive) }
+        qdrant_sha256 = $QdrantHash
     } | ConvertTo-Json
     [IO.File]::WriteAllText(
         "$Archive.meta",
@@ -204,7 +211,8 @@ Assert-BackupTreeSafe -Path $weeklyDirectory -AllowedRoot $backupPath | Out-Null
 $now = (Get-Date).ToUniversalTime()
 $stamp = $now.ToString('yyyyMMddTHHmmssZ')
 $archive = Join-Path $dailyDirectory "assistant-$stamp.tar.gz"
-foreach ($candidate in @($archive, "$archive.sha256", "$archive.meta")) {
+$qdrantArchive = "$archive.qdrant-volume.tar.gz"
+foreach ($candidate in @($archive, "$archive.sha256", "$archive.meta", $qdrantArchive, "$qdrantArchive.sha256")) {
     if (Test-Path -LiteralPath $candidate) {
         throw "Refusing to overwrite an existing backup file: $candidate"
     }
@@ -215,9 +223,20 @@ $operationError = $null
 $restartError = $null
 try {
     Invoke-ComposeForServices -Config $config -Action stop -Services $runningServices
+    $qdrantHash = $null
+    $qdrantVolumeName = Get-QdrantVolumeName -Config $config
+    if (Test-QdrantVolumeExists -Name $qdrantVolumeName -ExternalInvoker $ExternalInvoker) {
+        $helperImage = Get-QdrantHelperImage -Config $config -ExternalInvoker $ExternalInvoker
+        Export-QdrantVolume -Name $qdrantVolumeName -Archive $qdrantArchive -HelperImage $helperImage -ExternalInvoker $ExternalInvoker | Out-Null
+        $qdrantHash = Write-BackupChecksum -Archive $qdrantArchive
+    } elseif ($null -eq $ExternalInvoker) {
+        throw "Required Qdrant volume was not found: $qdrantVolumeName"
+    }
     Invoke-BackupExternal -FilePath 'tar.exe' -ArgumentList @('-C', $dataRoot, '-czf', $archive, '.') | Out-Null
     $hash = Write-BackupChecksum -Archive $archive
-    Write-BackupMetadata -Archive $archive -Hash $hash -CreatedUtc $now -Kind daily
+    Write-BackupMetadata -Archive $archive -Hash $hash -CreatedUtc $now -Kind daily `
+        -QdrantArchive $(if ($null -ne $qdrantHash) { $qdrantArchive } else { $null }) `
+        -QdrantHash $qdrantHash -QdrantVolumeName $qdrantVolumeName
 
     $createdSet = @(Get-CompleteBackupSets -Directory $dailyDirectory -Prefix 'assistant-' | Where-Object {
         $_.Archive.Equals($archive, [StringComparison]::OrdinalIgnoreCase)
@@ -248,18 +267,26 @@ if (-not (Test-BackupHealth -Config $config)) {
 $iso = Get-IsoWeekInfo -UtcDate $now
 $weeklyName = 'assistant-week-{0:D4}-W{1:D2}.tar.gz' -f $iso.Year, $iso.Week
 $weeklyArchive = Join-Path $weeklyDirectory $weeklyName
+$weeklyQdrantArchive = "$weeklyArchive.qdrant-volume.tar.gz"
 $weeklySet = @(Get-CompleteBackupSets -Directory $weeklyDirectory -Prefix 'assistant-week-' | Where-Object {
     $_.Archive.Equals($weeklyArchive, [StringComparison]::OrdinalIgnoreCase)
 })
 if ($weeklySet.Count -eq 0) {
-    foreach ($candidate in @($weeklyArchive, "$weeklyArchive.sha256", "$weeklyArchive.meta")) {
+    foreach ($candidate in @($weeklyArchive, "$weeklyArchive.sha256", "$weeklyArchive.meta", $weeklyQdrantArchive, "$weeklyQdrantArchive.sha256")) {
         if (Test-Path -LiteralPath $candidate) {
             throw "Incomplete weekly set already exists; refusing to overwrite it: $candidate"
         }
     }
     Copy-Item -LiteralPath $archive -Destination $weeklyArchive
+    $weeklyQdrantHash = $null
+    if (Test-Path -LiteralPath $qdrantArchive -PathType Leaf) {
+        Copy-Item -LiteralPath $qdrantArchive -Destination $weeklyQdrantArchive
+        $weeklyQdrantHash = Write-BackupChecksum -Archive $weeklyQdrantArchive
+    }
     $weeklyHash = Write-BackupChecksum -Archive $weeklyArchive
-    Write-BackupMetadata -Archive $weeklyArchive -Hash $weeklyHash -CreatedUtc $now -Kind weekly
+    Write-BackupMetadata -Archive $weeklyArchive -Hash $weeklyHash -CreatedUtc $now -Kind weekly `
+        -QdrantArchive $(if ($null -ne $weeklyQdrantHash) { $weeklyQdrantArchive } else { $null }) `
+        -QdrantHash $weeklyQdrantHash -QdrantVolumeName $qdrantVolumeName
     $weeklySet = @(Get-CompleteBackupSets -Directory $weeklyDirectory -Prefix 'assistant-week-' | Where-Object {
         $_.Archive.Equals($weeklyArchive, [StringComparison]::OrdinalIgnoreCase)
     })
@@ -281,6 +308,8 @@ foreach ($set in @($weeklyPlan.Remove)) {
     Archive = $archive
     Checksum = "$archive.sha256"
     Metadata = "$archive.meta"
+    QdrantArchive = if (Test-Path -LiteralPath $qdrantArchive -PathType Leaf) { $qdrantArchive } else { $null }
+    QdrantChecksum = if (Test-Path -LiteralPath "$qdrantArchive.sha256" -PathType Leaf) { "$qdrantArchive.sha256" } else { $null }
     WeeklyArchive = $weeklyArchive
 }
 } finally {

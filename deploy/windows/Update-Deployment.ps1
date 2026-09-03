@@ -157,6 +157,26 @@ function Get-VerifiedBackupArchive {
     if (-not $actual.Equals($match.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'The cold backup checksum verification failed'
     }
+    $metadata = Get-Content -LiteralPath "$archive.meta" -Raw | ConvertFrom-Json
+    if ($null -ne $metadata.PSObject.Properties['format'] -and [int]$metadata.format -ge 2) {
+        $qdrantArchive = "$archive.qdrant-volume.tar.gz"
+        $qdrantChecksum = "$qdrantArchive.sha256"
+        foreach ($required in @($qdrantArchive, $qdrantChecksum)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+                throw "The cold backup is missing Qdrant volume evidence: $required"
+            }
+        }
+        $qdrantLine = (Get-Content -LiteralPath $qdrantChecksum -Raw).Trim()
+        $qdrantMatch = [regex]::Match($qdrantLine, '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^\\/]+)$')
+        if (-not $qdrantMatch.Success -or
+            -not $qdrantMatch.Groups['name'].Value.Equals([IO.Path]::GetFileName($qdrantArchive), [StringComparison]::Ordinal)) {
+            throw 'The Qdrant backup checksum sidecar is invalid'
+        }
+        $qdrantActual = Get-BackupSha256 -LiteralPath $qdrantArchive
+        if (-not $qdrantActual.Equals($qdrantMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The Qdrant backup checksum does not match its archive'
+        }
+    }
     return $archive
 }
 

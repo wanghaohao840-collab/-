@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Common.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'QdrantVolume.Common.psm1') -Force
 
 function Assert-InheritedOperationsLock {
     param(
@@ -194,6 +195,23 @@ if (-not $preExtractionHash.Equals($checksumMatch.Groups['hash'].Value, [StringC
     throw 'Backup checksum changed during restore validation'
 }
 
+$qdrantArchivePath = "$archivePath.qdrant-volume.tar.gz"
+$qdrantChecksumPath = "$qdrantArchivePath.sha256"
+$useQdrantVolume = Test-Path -LiteralPath $qdrantArchivePath -PathType Leaf
+if ($useQdrantVolume) {
+    Assert-RegularNonReparseFile -LiteralPath $qdrantChecksumPath
+    $qdrantChecksumLine = (Get-Content -LiteralPath $qdrantChecksumPath -Raw).Trim()
+    $qdrantChecksumMatch = [regex]::Match($qdrantChecksumLine, '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^\\/]+)$')
+    if (-not $qdrantChecksumMatch.Success -or
+        -not $qdrantChecksumMatch.Groups['name'].Value.Equals([IO.Path]::GetFileName($qdrantArchivePath), [StringComparison]::Ordinal)) {
+        throw 'Qdrant checksum sidecar does not match the selected archive name'
+    }
+    $qdrantActualHash = Get-BackupSha256 -LiteralPath $qdrantArchivePath
+    if (-not $qdrantActualHash.Equals($qdrantChecksumMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Qdrant backup checksum mismatch'
+    }
+}
+
 $ownsOperationLock = $null -eq $InheritedOperationLock
 if ($ownsOperationLock) {
     $operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
@@ -209,6 +227,7 @@ $stagingPath = "$dataRoot.staging-$stamp-$([Guid]::NewGuid().ToString('N'))"
 $rollbackPath = "$dataRoot.rollback-$stamp"
 $failedPath = "$dataRoot.failed-$stamp"
 $diagnosticPath = "$failedPath.diagnostic"
+$qdrantRollbackArchive = Join-Path $config.StateRoot "qdrant-rollback-$stamp.tar.gz"
 foreach ($candidate in @($stagingPath, $rollbackPath, $failedPath, $diagnosticPath)) {
     Assert-SafePath -Path $candidate -AllowedRoot $dataParent | Out-Null
     if (Test-Path -LiteralPath $candidate) { throw "Restore diagnostic path already exists: $candidate" }
@@ -226,12 +245,35 @@ foreach ($requiredDirectory in @('app', 'qdrant')) {
 $runningServices = @(Get-RunningDeploymentServices -Config $config)
 $rollbackCreated = $false
 $candidateInstalled = $false
+$qdrantCandidateInstalled = $false
+$qdrantRollbackCreated = $false
+$qdrantVolumeName = $null
+$qdrantHelperImage = $null
 try {
     Invoke-ComposeForServices -Config $config -Action stop -Services $runningServices
+    if ($useQdrantVolume) {
+        New-Item -ItemType Directory -Force -Path $config.StateRoot | Out-Null
+        Assert-SafePath -Path $qdrantRollbackArchive -AllowedRoot $config.StateRoot | Out-Null
+        if (Test-Path -LiteralPath $qdrantRollbackArchive) {
+            throw "Qdrant rollback archive already exists: $qdrantRollbackArchive"
+        }
+        $qdrantVolumeName = Get-QdrantVolumeName -Config $config
+        $qdrantHelperImage = Get-QdrantHelperImage -Config $config -ExternalInvoker $ExternalInvoker
+        if (-not (Test-QdrantVolumeExists -Name $qdrantVolumeName -ExternalInvoker $ExternalInvoker)) {
+            throw "Production Qdrant volume was not found: $qdrantVolumeName"
+        }
+        Export-QdrantVolume -Name $qdrantVolumeName -Archive $qdrantRollbackArchive -HelperImage $qdrantHelperImage -ExternalInvoker $ExternalInvoker | Out-Null
+        $qdrantRollbackCreated = $true
+    }
     Rename-Sibling -LiteralPath $dataRoot -Destination $rollbackPath
     $rollbackCreated = $true
     Rename-Sibling -LiteralPath $stagingPath -Destination $dataRoot
     $candidateInstalled = $true
+    if ($useQdrantVolume) {
+        Clear-QdrantVolume -Name $qdrantVolumeName -HelperImage $qdrantHelperImage -ExternalInvoker $ExternalInvoker
+        Import-QdrantVolume -Name $qdrantVolumeName -Archive $qdrantArchivePath -HelperImage $qdrantHelperImage -RequireEmpty -ExternalInvoker $ExternalInvoker
+        $qdrantCandidateInstalled = $true
+    }
     Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
     if (-not (Test-RestoreHealth -Config $config)) { throw 'Deployment did not become healthy after the restore swap' }
 } catch {
@@ -262,6 +304,15 @@ try {
             $compensationErrors += 'restore rollback: rollback directory is missing'
         }
     }
+    if ($useQdrantVolume -and $qdrantRollbackCreated) {
+        try {
+            Clear-QdrantVolume -Name $qdrantVolumeName -HelperImage $qdrantHelperImage -ExternalInvoker $ExternalInvoker
+            Import-QdrantVolume -Name $qdrantVolumeName -Archive $qdrantRollbackArchive -HelperImage $qdrantHelperImage -RequireEmpty -ExternalInvoker $ExternalInvoker
+            $qdrantCandidateInstalled = $false
+        } catch {
+            $compensationErrors += "restore Qdrant rollback: $($_.Exception.Message)"
+        }
+    }
     $restartSucceeded = $false
     try {
         Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
@@ -285,6 +336,8 @@ try {
         compensation_errors = @($compensationErrors | ForEach-Object { Protect-LogText $_ })
         failed_candidate = if (Test-Path -LiteralPath $failedPath) { $failedPath } else { $null }
         retained_staging = if (Test-Path -LiteralPath $stagingPath) { $stagingPath } else { $null }
+        qdrant_rollback = if ($qdrantRollbackCreated) { $qdrantRollbackArchive } else { $null }
+        qdrant_candidate_installed = $qdrantCandidateInstalled
     } | ConvertTo-Json
     try { [IO.File]::WriteAllText($diagnosticPath, $diagnostic, (New-Object System.Text.UTF8Encoding($false))) } catch {}
     if ($compensationErrors.Count -gt 0) {
@@ -293,7 +346,13 @@ try {
     throw $restoreError
 }
 
-[PSCustomObject]@{ RestoredArchive = $archivePath; DataRoot = $dataRoot; Rollback = $rollbackPath }
+[PSCustomObject]@{
+    RestoredArchive = $archivePath
+    DataRoot = $dataRoot
+    Rollback = $rollbackPath
+    QdrantVolume = $qdrantVolumeName
+    QdrantRollback = if ($qdrantRollbackCreated) { $qdrantRollbackArchive } else { $null }
+}
 } finally {
     if ($ownsOperationLock) {
         Exit-OperationsLock -Lock $operationLock

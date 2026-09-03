@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 
 Import-Module (Join-Path $PSScriptRoot 'Operations.Common.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'Backup.Common.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'QdrantVolume.Common.psm1') -Force
 
 function Invoke-DrillExternal {
     param(
@@ -89,9 +90,11 @@ function Write-PrivateDrillEnv {
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination,
         [Parameter(Mandatory)][string]$DataRoot,
-        [Parameter(Mandatory)][int]$Port
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$QdrantVolumeName
     )
-    $overrideNames = @('APP_BIND_ADDRESS', 'APP_PORT', 'DEPLOY_DATA_ROOT', 'DEPLOY_ENV_FILE')
+    Assert-SafeDockerResourceName -Name $QdrantVolumeName | Out-Null
+    $overrideNames = @('APP_BIND_ADDRESS', 'APP_PORT', 'DEPLOY_DATA_ROOT', 'DEPLOY_ENV_FILE', 'QDRANT_VOLUME_NAME')
     $preserved = @()
     foreach ($line in [IO.File]::ReadAllLines($Source)) {
         $match = [regex]::Match($line, '^\s*([^#=\s]+)\s*=')
@@ -104,7 +107,8 @@ function Write-PrivateDrillEnv {
         'APP_BIND_ADDRESS=127.0.0.1',
         "APP_PORT=$Port",
         "DEPLOY_DATA_ROOT=$(ConvertTo-ComposePath $DataRoot)",
-        "DEPLOY_ENV_FILE=$(ConvertTo-ComposePath $Destination)"
+        "DEPLOY_ENV_FILE=$(ConvertTo-ComposePath $Destination)",
+        "QDRANT_VOLUME_NAME=$QdrantVolumeName"
     )
     [IO.File]::WriteAllLines(
         $Destination,
@@ -232,6 +236,8 @@ $temporaryEnv = $null
 $projectName = $null
 $port = $null
 $composeAttempted = $false
+$drillVolumeCreated = $false
+$drillVolumeName = $null
 $failureMessage = $null
 $failureStage = $null
 $failureCategory = $null
@@ -260,6 +266,8 @@ try {
     Assert-RegularNonReparseFile -LiteralPath $archivePath
     Assert-RegularNonReparseFile -LiteralPath $checksumPath
     $archiveName = [IO.Path]::GetFileName($archivePath)
+    $qdrantArchivePath = $backupSet.QdrantArchive
+    $qdrantChecksumPath = $backupSet.QdrantChecksum
 
     $stage = 'checksum-validation'
     $checksumLine = (Get-Content -LiteralPath $checksumPath -Raw).Trim()
@@ -271,6 +279,21 @@ try {
     $actualHash = Get-BackupSha256 -LiteralPath $archivePath
     if (-not $actualHash.Equals($checksumMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Backup checksum mismatch'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($qdrantArchivePath)) {
+        $qdrantArchivePath = Assert-SafePath -Path $qdrantArchivePath -AllowedRoot $dailyDirectory
+        $qdrantChecksumPath = Assert-SafePath -Path $qdrantChecksumPath -AllowedRoot $dailyDirectory
+        Assert-RegularNonReparseFile -LiteralPath $qdrantArchivePath
+        Assert-RegularNonReparseFile -LiteralPath $qdrantChecksumPath
+        $qdrantLine = (Get-Content -LiteralPath $qdrantChecksumPath -Raw).Trim()
+        $qdrantMatch = [regex]::Match($qdrantLine, '^(?<hash>[0-9a-fA-F]{64})  (?<name>[^\\/]+)$')
+        if (-not $qdrantMatch.Success -or
+            -not $qdrantMatch.Groups['name'].Value.Equals([IO.Path]::GetFileName($qdrantArchivePath), [StringComparison]::Ordinal)) {
+            throw 'Qdrant checksum sidecar does not match the selected archive name'
+        }
+        if (-not (Get-BackupSha256 -LiteralPath $qdrantArchivePath).Equals($qdrantMatch.Groups['hash'].Value, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Qdrant backup checksum mismatch'
+        }
     }
 
     $stage = 'member-validation'
@@ -296,6 +319,7 @@ try {
     Assert-SafePath -Path $drillDirectory -AllowedRoot $drillsRoot | Out-Null
     New-Item -ItemType Directory -Path $drillDataRoot | Out-Null
     $projectName = "assistant-drill-$($drillId.Substring(0, 12))"
+    $drillVolumeName = "zhiyan-drill-$($drillId.Substring(0, 20))"
     $port = Get-FreeTcpPort
     while ($port -eq 7860) { $port = Get-FreeTcpPort }
 
@@ -310,7 +334,19 @@ try {
     }
 
     $stage = 'environment-setup'
-    Write-PrivateDrillEnv -Source $config.EnvFile -Destination $temporaryEnv -DataRoot $drillDataRoot -Port $port
+    Write-PrivateDrillEnv -Source $config.EnvFile -Destination $temporaryEnv -DataRoot $drillDataRoot -Port $port -QdrantVolumeName $drillVolumeName
+    if (-not [string]::IsNullOrWhiteSpace($qdrantArchivePath) -or $null -eq $ExternalInvoker) {
+        $helperImage = Get-QdrantHelperImage -Config $config -ExternalInvoker $ExternalInvoker
+        if (-not (New-QdrantVolume -Name $drillVolumeName -ExternalInvoker $ExternalInvoker)) {
+            throw "Restore drill volume already exists: $drillVolumeName"
+        }
+        $drillVolumeCreated = $true
+        if (-not [string]::IsNullOrWhiteSpace($qdrantArchivePath)) {
+            Import-QdrantVolume -Name $drillVolumeName -Archive $qdrantArchivePath -HelperImage $helperImage -RequireEmpty -ExternalInvoker $ExternalInvoker
+        } else {
+            Import-QdrantDirectory -Name $drillVolumeName -SourceDirectory (Join-Path $drillDataRoot 'qdrant') -HelperImage $helperImage -RequireEmpty -ExternalInvoker $ExternalInvoker
+        }
+    }
     $stage = 'compose-start'
     $composeAttempted = $true
     Invoke-DrillExternal -FilePath 'docker' -ArgumentList (
@@ -379,6 +415,17 @@ if ($null -eq $failureMessage -and $null -ne $drillDirectory) {
     }
 }
 
+if ($null -eq $failureMessage -and $drillVolumeCreated) {
+    try {
+        Remove-QdrantVolume -Name $drillVolumeName -RequiredPrefix 'zhiyan-drill-' -ExternalInvoker $ExternalInvoker
+        $drillVolumeCreated = $false
+    } catch {
+        $failureMessage = "drill volume cleanup failed: $($_.Exception.Message)"
+        $failureStage = 'volume-cleanup'
+        $failureCategory = 'cleanup'
+    }
+}
+
 $safeFailure = if ($null -eq $failureMessage) { $null } else {
     Protect-DrillText -Text $failureMessage -DeploymentEnvFile $redactionEnvFile
 }
@@ -399,6 +446,8 @@ $report = [ordered]@{
     failure_stage = $failureStage
     failure_category = $failureCategory
     retained_data = $retainedData
+    qdrant_volume = $drillVolumeName
+    retained_qdrant_volume = if ($drillVolumeCreated) { $drillVolumeName } else { $null }
     error = $safeFailure
 } | ConvertTo-Json
 if ($null -eq $reportPath) {
