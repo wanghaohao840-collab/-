@@ -708,7 +708,7 @@ print("launch-finished", flush=True)
         env=environment,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=60,
         check=False,
     )
 

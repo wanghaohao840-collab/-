@@ -75,6 +75,7 @@ class FakeAssistant:
 @pytest.fixture(autouse=True)
 def reset_fake_assistant(monkeypatch):
     monkeypatch.setattr(runtime_module, "RAGTool", OfflineRAGTool)
+    monkeypatch.setattr(runtime_module, "MemoryTool", OfflineMemoryTool)
     FakeAssistant.outcomes = []
     FakeAssistant.loaded = {}
     FakeAssistant.completed = threading.Event()
@@ -95,6 +96,18 @@ class OfflineRAGTool:
 
     def list_documents(self):
         return list(self.document_ids)
+
+    def close(self):
+        pass
+
+
+class OfflineMemoryTool:
+    """No-backend memory adapter for acceptance tests that do not use memory."""
+
+    def __init__(self, *, user_id, **_kwargs):
+        self.user_id = user_id
+        self.coordination_lock = None
+        self.memory_manager = SimpleNamespace(memory_types={})
 
     def close(self):
         pass

@@ -7,7 +7,7 @@
 - 用户注册、登录、退出和会话过期管理；
 - 用户级文档、RAG、Memory、历史和报告数据隔离；
 - PDF、TXT、Markdown（`.md`）和 Word（`.docx`）导入；
-- 持久化批量异步导入、阶段进度、失败重试和重启恢复；
+- 持久化批量异步导入、阶段进度、暂停/恢复、取消、失败重试、历史查询和重启恢复；
 - 单文档及多文档联合问答、对比分析和联合总结；
 - JSON 本地 RAG 与 Qdrant RAG 后端切换；
 - 文档检索、PDF 页码来源、相关度和可复制引用；
@@ -43,26 +43,54 @@
 
 > 存储层已预留 `.markdown` 扩展名，但当前 Gradio 上传控件和 RAG 解析入口尚未完整贯通该扩展名，因此端到端支持列表以表格为准。
 
-### Durable batch imports
+### 持久化批量导入、控制与历史
 
-The upload panel accepts up to 20 PDF, TXT, Markdown, or DOCX files in one
-batch. Each file may be at most 100 MiB and a batch may be at most 500 MiB.
-The server stages each source and stores its task state in SQLite, so an
-accepted import continues after logout or browser close.
+上传面板每批最多接受 20 个 PDF、TXT、Markdown 或 DOCX 文件；单文件最多
+100 MiB，单批最多 500 MiB。服务端先暂存原文件，再将任务身份和状态写入
+SQLite，因此浏览器关闭或退出登录不会终止已接受的任务。同一用户的导入和
+补偿串行执行，最多并行处理四个不同用户。
 
-- Imports are serial for one user and run for at most four users in parallel.
-- Progress reports the durable stages: staging, parsing, chunking, embedding,
-  RAG persistence, and committing.
-- Transient failures retry after 2, 10, and 30 seconds. Failed files can be
-  retried individually or as all failed entries in a batch.
-- On restart, a running task with its staged source resumes; a missing staged
-  source becomes a failed task. Failed staged files are retained for retry,
-  while successful imports remove their staging copy.
-- Clearing all documents is unavailable while that user has queued, running,
-  or retry-wait import tasks.
+任务状态含义：
 
-The first version intentionally has no cancellation, priority scheduling, or
-distributed workers.
+| 状态 | 含义 |
+|---|---|
+| `queued` | 已持久化，等待 worker 领取 |
+| `running` | 当前尝试正在执行 |
+| `retry_wait` | 瞬时故障后等待自动重试 |
+| `pause_requested` | 暂停请求已持久化，等待安全检查点协作响应 |
+| `paused` | 本次尝试的产物已补偿，暂存源仍保留，可恢复 |
+| `cancel_requested` | 取消请求已持久化，等待安全检查点或清理 worker 响应 |
+| `cancelled` | 任务拥有的暂存、正式文件、RAG、History 和 Memory 导入事件已清理 |
+| `succeeded` | 导入提交完成；正式文档保留，暂存副本尽力删除 |
+| `failed` | 导入失败或控制清理失败；界面只显示脱敏错误摘要 |
+
+协作检查点位于暂存、解析、切块、每批嵌入、每批 RAG 持久化和 History /
+Memory 提交边界。暂停或取消先写入 SQLite；已经进入的外部原子调用不会被
+强制中断，worker 会在下一个检查点补偿任务拥有的产物。恢复暂停任务时沿用
+原 `task_id` 和 `document_id`，从该任务开头重新执行，而不是从阶段内部续跑；
+RAG、History 和 Memory 写入按任务身份幂等，因此重启重跑不会生成重复记录。
+
+- 瞬时故障在 2、10、30 秒后自动重试；失败项可以单独重试或按批次重试。
+- 任务级和批次级均提供暂停、恢复和取消。批次控制只改变当时符合条件的任务；
+  已成功任务保持成功，取消清理由同一用户的串行调度边界逐项完成。
+- 取消会删除该任务拥有的暂存/临时/正式文件以及 RAG、History、Memory 导入
+  产物。若补偿失败，任务安全落入 `failed`，错误码为
+  `pause_cleanup_failed` 或 `cancel_cleanup_failed`；修复清理条件后再次取消只
+  执行 cleanup，不会重新导入。
+- 进程重启时，仍有暂存源的中断任务会恢复排队并从任务开头重跑；暂存源缺失
+  则安全失败。重启也会继续完成已标记为 deleting 的历史删除。
+- “导入历史”按状态多选、文件名和创建日期范围过滤；刷新由按钮或筛选器变化
+  触发，上一页/下一页使用稳定游标。选择批次后才加载任务，选择任务后才读取
+  事件时间线；一秒活动任务刷新不会查询历史。
+- 删除历史仅允许已全部终态的批次，并要求显式勾选确认。删除会移除暂存副本、
+  导入任务和事件行，但不会删除已经成功导入的正式文档、用户学习 History、
+  RAG 或 Memory 内容；中断后由两阶段删除恢复继续完成。
+- `IMPORT_TASK_RETENTION_DAYS=0` 是默认值，表示不自动删除历史。设置正整数后，
+  空闲维护每小时至多删除 10 个早于阈值且全部终态的批次；正式文档仍保留。
+- 清空全部文档在该用户存在活动导入时不可用。
+
+首版明确不包含优先级队列、阶段内断点续传、强制中断外部原子调用、多进程或
+分布式 worker 协调、自动删除正式文档，以及历史视图的一秒实时轮询。
 
 ### 多文档问答
 

@@ -247,6 +247,22 @@ def _format_import_error(task) -> str:
     return safe[:500]
 
 
+def _sanitize_import_display_text(value, *, private_values=()) -> str:
+    safe = sanitize_error_message(
+        str(value or ""),
+        secrets=tuple(item for item in private_values if item),
+    )
+    for private in private_values:
+        if private:
+            safe = safe.replace(str(private), "[redacted]")
+    safe = _URL_USERINFO_RE.sub(r"\1[credentials-redacted]@", safe)
+    safe = _BEARER_CREDENTIAL_RE.sub("[credentials-redacted]", safe)
+    safe = _CREDENTIAL_ASSIGNMENT_RE.sub("[credentials-redacted]", safe)
+    safe = _WINDOWS_PATH_RE.sub("[路径已脱敏]", safe)
+    safe = _UNIX_PATH_RE.sub("[路径已脱敏]", safe)
+    return " ".join(safe.split())[:500]
+
+
 def format_batch_summary(summary: ImportBatchSummary) -> str:
     return (
         "批量导入进度\n\n"
@@ -577,6 +593,321 @@ def _retain_import_task_selection(summary, batch_id, selected_task):
     ):
         return selection
     return ""
+
+
+_IMPORT_HISTORY_PAGE_LIMIT = 20
+
+
+def _import_history_filters(statuses, filename_query, created_from, created_to):
+    if statuses is None:
+        parsed_statuses = []
+    elif isinstance(statuses, str):
+        parsed_statuses = [statuses] if statuses else []
+    elif isinstance(statuses, (list, tuple)):
+        parsed_statuses = list(statuses)
+    else:
+        raise gr.Error("Import history filters are invalid")
+    return {
+        "statuses": parsed_statuses,
+        "filename_query": filename_query or "",
+        "created_from": created_from or None,
+        "created_to": created_to or None,
+    }
+
+
+def _format_history_batch_table(page) -> list[list[object]]:
+    rows = []
+    for batch in page.batches:
+        filenames = ", ".join(
+            _sanitize_import_display_text(task.original_name)
+            for task in batch.tasks
+        )
+        statuses = ", ".join(
+            f"{_IMPORT_STATUS_LABELS.get(status, '未知')}:{count}"
+            for status, count in (
+                ("queued", batch.queued),
+                ("running", batch.running),
+                ("retry_wait", batch.retry_wait),
+                ("pause_requested", batch.pause_requested),
+                ("paused", batch.paused),
+                ("cancel_requested", batch.cancel_requested),
+                ("cancelled", batch.cancelled),
+                ("succeeded", batch.succeeded),
+                ("failed", batch.failed),
+            )
+            if count
+        )
+        rows.append(
+            [
+                _format_import_timestamp(batch.created_at),
+                filenames,
+                statuses or "-",
+                batch.total,
+                batch.succeeded,
+                batch.failed,
+                batch.cancelled,
+            ]
+        )
+    return rows
+
+
+def _format_history_events(events, *, private_values=()) -> list[list[str]]:
+    rows = []
+    for event in events:
+        event_private_values = (
+            event.user_id,
+            event.task_id,
+            event.batch_id,
+            *private_values,
+        )
+        rows.append(
+            [
+                _sanitize_import_display_text(
+                    event.event_type, private_values=event_private_values
+                ),
+                _IMPORT_STATUS_LABELS.get(event.status, "未知"),
+                _IMPORT_STAGE_LABELS.get(event.stage, "未知"),
+                _format_import_timestamp(event.created_at),
+                _sanitize_import_display_text(
+                    event.message, private_values=event_private_values
+                ),
+            ]
+        )
+    return rows
+
+
+def _history_cursor(value):
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise gr.Error("Import history navigation state is invalid")
+    return value
+
+
+def _history_cursor_stack(value):
+    if value in (None, ""):
+        return []
+    if not isinstance(value, (list, tuple)) or any(
+        item is not None and not isinstance(item, str) for item in value
+    ):
+        raise gr.Error("Import history navigation state is invalid")
+    return list(value)
+
+
+def _history_page_result(page, current_cursor, previous_cursors, action=""):
+    return (
+        _format_history_batch_table(page),
+        current_cursor or "",
+        list(previous_cursors),
+        page.next_cursor or "",
+        "",
+        [],
+        "",
+        [],
+        False,
+        action,
+    )
+
+
+def _load_import_history_page(
+    session_token,
+    statuses,
+    filename_query,
+    created_from,
+    created_to,
+    cursor,
+    previous_cursors,
+    *,
+    action="",
+):
+    filters = _import_history_filters(
+        statuses, filename_query, created_from, created_to
+    )
+    try:
+        page = import_service.list_task_history(
+            session_token,
+            filters,
+            cursor,
+            limit=_IMPORT_HISTORY_PAGE_LIMIT,
+        )
+    except ValueError as exc:
+        raise gr.Error(str(exc))
+    return _history_page_result(page, cursor, previous_cursors, action)
+
+
+def refresh_import_history(
+    session_token, statuses=None, filename_query="", created_from="", created_to=""
+):
+    _require_session(session_token)
+    return _load_import_history_page(
+        session_token,
+        statuses,
+        filename_query,
+        created_from,
+        created_to,
+        None,
+        [],
+    )
+
+
+def next_import_history_page(
+    session_token,
+    statuses,
+    filename_query,
+    created_from,
+    created_to,
+    current_cursor,
+    previous_cursors,
+    next_cursor,
+):
+    _require_session(session_token)
+    current = _history_cursor(current_cursor)
+    next_value = _history_cursor(next_cursor)
+    stack = _history_cursor_stack(previous_cursors)
+    if next_value is None:
+        return _load_import_history_page(
+            session_token,
+            statuses,
+            filename_query,
+            created_from,
+            created_to,
+            current,
+            stack,
+        )
+    return _load_import_history_page(
+        session_token,
+        statuses,
+        filename_query,
+        created_from,
+        created_to,
+        next_value,
+        [*stack, current],
+    )
+
+
+def previous_import_history_page(
+    session_token,
+    statuses,
+    filename_query,
+    created_from,
+    created_to,
+    current_cursor,
+    previous_cursors,
+):
+    _require_session(session_token)
+    _history_cursor(current_cursor)
+    stack = _history_cursor_stack(previous_cursors)
+    if not stack:
+        target = None
+        remaining = []
+    else:
+        target = stack[-1]
+        remaining = stack[:-1]
+    return _load_import_history_page(
+        session_token,
+        statuses,
+        filename_query,
+        created_from,
+        created_to,
+        target,
+        remaining,
+    )
+
+
+def _history_selected_row(evt, length):
+    row_index = evt.index[0] if isinstance(evt.index, (list, tuple)) else evt.index
+    if not isinstance(row_index, int) or not 0 <= row_index < length:
+        return None
+    return row_index
+
+
+def select_import_history_batch(
+    session_token,
+    statuses,
+    filename_query,
+    created_from,
+    created_to,
+    current_cursor,
+    evt: gr.SelectData,
+):
+    _require_session(session_token)
+    filters = _import_history_filters(
+        statuses, filename_query, created_from, created_to
+    )
+    try:
+        page = import_service.list_task_history(
+            session_token,
+            filters,
+            _history_cursor(current_cursor),
+            limit=_IMPORT_HISTORY_PAGE_LIMIT,
+        )
+    except ValueError as exc:
+        raise gr.Error(str(exc))
+    row = _history_selected_row(evt, len(page.batches))
+    if row is None:
+        return "", [], "", [], False
+    batch = page.batches[row]
+    return batch.batch_id, format_task_table(batch), "", [], False
+
+
+def select_import_history_task(
+    session_token, selected_batch_id, evt: gr.SelectData
+):
+    _require_session(session_token)
+    if not isinstance(selected_batch_id, str) or not selected_batch_id:
+        return "", []
+    try:
+        batch = import_service.get_batch(session_token, selected_batch_id)
+    except KeyError:
+        raise _safe_import_control_error() from None
+    row = _history_selected_row(evt, len(batch.tasks))
+    if row is None:
+        return "", []
+    task = batch.tasks[row]
+    try:
+        events = import_service.list_task_events(
+            session_token, task.task_id, limit=200
+        )
+    except ValueError as exc:
+        raise gr.Error(str(exc))
+    return (batch.batch_id, task.task_id), _format_history_events(
+        events,
+        private_values=(task.document_id, task.staged_relative_path),
+    )
+
+
+def delete_import_history_batch(
+    session_token,
+    statuses,
+    filename_query,
+    created_from,
+    created_to,
+    selected_batch_id,
+    confirmed=False,
+):
+    _require_session(session_token)
+    if confirmed is not True:
+        raise gr.Error("Please confirm deletion before continuing")
+    if not isinstance(selected_batch_id, str) or not selected_batch_id:
+        raise gr.Error("Please select an import history batch")
+    try:
+        import_service.delete_batch_history(session_token, selected_batch_id)
+    except (InvalidImportTransition, KeyError, ValueError):
+        raise _safe_import_control_error() from None
+    return _load_import_history_page(
+        session_token,
+        statuses,
+        filename_query,
+        created_from,
+        created_to,
+        None,
+        [],
+        action="Import history batch deleted",
+    )
+
+
+def clear_import_history_ui():
+    return ([], "", "", "", [], "", [], "", "", [], "", [], False, "")
 
 
 def refresh_documents(session_token):
@@ -1134,6 +1465,63 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             cancel_import_batch_btn = gr.Button("取消当前批次")
         import_timer = gr.Timer(value=1, active=True)
 
+        with gr.Accordion("导入历史", open=False):
+            import_history_statuses = gr.Dropdown(
+                label="状态",
+                choices=[
+                    (label, status) for status, label in _IMPORT_STATUS_LABELS.items()
+                ],
+                value=[],
+                multiselect=True,
+                interactive=True,
+            )
+            with gr.Row():
+                import_history_filename = gr.Textbox(
+                    label="文件名包含",
+                    placeholder="例如：chapter.md",
+                )
+                import_history_from = gr.Textbox(
+                    label="创建日期从",
+                    placeholder="YYYY-MM-DD",
+                )
+                import_history_to = gr.Textbox(
+                    label="创建日期到",
+                    placeholder="YYYY-MM-DD",
+                )
+            refresh_import_history_btn = gr.Button("刷新历史")
+            import_history_table = gr.Dataframe(
+                headers=["创建时间", "文件", "状态", "总数", "成功", "失败", "已取消"],
+                datatype=["str", "str", "str", "number", "number", "number", "number"],
+                interactive=False,
+            )
+            import_history_current_cursor = gr.State("")
+            import_history_previous_cursors = gr.State([])
+            import_history_next_cursor = gr.State("")
+            selected_import_history_batch_id = gr.State("")
+            selected_import_history_task_id = gr.State("")
+            with gr.Row():
+                previous_import_history_btn = gr.Button("上一页")
+                next_import_history_btn = gr.Button("下一页")
+            import_history_tasks = gr.Dataframe(
+                headers=["文件名", "状态", "阶段", "进度", "尝试次数", "下次重试", "错误"],
+                datatype=["str", "str", "str", "number", "number", "str", "str"],
+                interactive=False,
+            )
+            import_history_timeline = gr.Dataframe(
+                headers=["事件", "状态", "阶段", "时间", "消息"],
+                datatype=["str", "str", "str", "str", "str"],
+                interactive=False,
+            )
+            import_history_delete_confirmation = gr.Checkbox(
+                label="我确认删除所选终态批次的导入历史",
+                value=False,
+            )
+            delete_import_history_btn = gr.Button("删除所选历史批次")
+            import_history_action_status = gr.Textbox(
+                label="历史操作结果",
+                interactive=False,
+            )
+
     # =========================
     # 2. 文档 问答
     # =========================
@@ -1586,6 +1974,25 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
         # =========================
         # 上传文档：所有组件都定义完之后再绑定
         # =========================
+        import_history_filter_inputs = [
+            session_token,
+            import_history_statuses,
+            import_history_filename,
+            import_history_from,
+            import_history_to,
+        ]
+        import_history_page_outputs = [
+            import_history_table,
+            import_history_current_cursor,
+            import_history_previous_cursors,
+            import_history_next_cursor,
+            selected_import_history_batch_id,
+            import_history_tasks,
+            selected_import_history_task_id,
+            import_history_timeline,
+            import_history_delete_confirmation,
+            import_history_action_status,
+        ]
         login_btn.click(
             fn=login_user,
             inputs=[username_input, password_input],
@@ -1604,6 +2011,11 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             fn=clear_import_selection_and_confirmation,
             inputs=None,
             outputs=[selected_import_task_id, import_cancel_confirmation],
+            queue=False,
+        ).then(
+            fn=refresh_import_history,
+            inputs=import_history_filter_inputs,
+            outputs=import_history_page_outputs,
             queue=False,
         )
 
@@ -1625,6 +2037,11 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             fn=clear_import_selection_and_confirmation,
             inputs=None,
             outputs=[selected_import_task_id, import_cancel_confirmation],
+            queue=False,
+        ).then(
+            fn=refresh_import_history,
+            inputs=import_history_filter_inputs,
+            outputs=import_history_page_outputs,
             queue=False,
         )
 
@@ -1690,6 +2107,17 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 import_tasks,
                 selected_import_task_id,
                 import_cancel_confirmation,
+            ],
+            queue=False,
+        ).then(
+            fn=clear_import_history_ui,
+            inputs=None,
+            outputs=[
+                import_history_statuses,
+                import_history_filename,
+                import_history_from,
+                import_history_to,
+                *import_history_page_outputs,
             ],
             queue=False,
         )
@@ -1780,6 +2208,76 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 selected_import_task_id,
                 import_cancel_confirmation,
             ],
+        )
+
+        refresh_import_history_btn.click(
+            fn=refresh_import_history,
+            inputs=import_history_filter_inputs,
+            outputs=import_history_page_outputs,
+            queue=False,
+        )
+        for import_history_filter in (
+            import_history_statuses,
+            import_history_filename,
+            import_history_from,
+            import_history_to,
+        ):
+            import_history_filter.change(
+                fn=refresh_import_history,
+                inputs=import_history_filter_inputs,
+                outputs=import_history_page_outputs,
+                queue=False,
+            )
+        next_import_history_btn.click(
+            fn=next_import_history_page,
+            inputs=[
+                *import_history_filter_inputs,
+                import_history_current_cursor,
+                import_history_previous_cursors,
+                import_history_next_cursor,
+            ],
+            outputs=import_history_page_outputs,
+            queue=False,
+        )
+        previous_import_history_btn.click(
+            fn=previous_import_history_page,
+            inputs=[
+                *import_history_filter_inputs,
+                import_history_current_cursor,
+                import_history_previous_cursors,
+            ],
+            outputs=import_history_page_outputs,
+            queue=False,
+        )
+        import_history_table.select(
+            fn=select_import_history_batch,
+            inputs=[
+                *import_history_filter_inputs,
+                import_history_current_cursor,
+            ],
+            outputs=[
+                selected_import_history_batch_id,
+                import_history_tasks,
+                selected_import_history_task_id,
+                import_history_timeline,
+                import_history_delete_confirmation,
+            ],
+            queue=False,
+        )
+        import_history_tasks.select(
+            fn=select_import_history_task,
+            inputs=[session_token, selected_import_history_batch_id],
+            outputs=[selected_import_history_task_id, import_history_timeline],
+            queue=False,
+        )
+        delete_import_history_btn.click(
+            fn=delete_import_history_batch,
+            inputs=[
+                *import_history_filter_inputs,
+                selected_import_history_batch_id,
+                import_history_delete_confirmation,
+            ],
+            outputs=import_history_page_outputs,
         )
 
 
