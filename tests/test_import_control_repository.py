@@ -140,6 +140,7 @@ def test_illegal_and_foreign_user_commands_do_not_mutate(repository, command, so
     ).id
     task = _task_in_state(repo, user_id, source, error_code="ordinary_failure")
     before = repo.get_task(user_id, task.task_id)
+    before_events = repo.list_task_events(user_id, task.task_id)
 
     with pytest.raises(KeyError):
         getattr(repo, command)(other_user_id, task.task_id, now=NOW)
@@ -147,7 +148,7 @@ def test_illegal_and_foreign_user_commands_do_not_mutate(repository, command, so
         getattr(repo, command)(user_id, task.task_id, now=NOW)
 
     assert repo.get_task(user_id, task.task_id) == before
-    assert repo.list_task_events(user_id, task.task_id) == []
+    assert repo.list_task_events(user_id, task.task_id) == before_events
     assert repo.list_task_events(other_user_id, task.task_id) == []
 
 
@@ -200,7 +201,7 @@ def test_duplicate_concurrent_command_appends_exactly_one_event(repository):
 
     assert len([result for result in results if result is not None]) == 1
     assert [event.event_type for event in repo.list_task_events(user_id, task.task_id)] == [
-        "paused"
+        "submitted", "paused"
     ]
 
 
@@ -224,7 +225,7 @@ def test_batch_controls_are_atomic_user_scoped_and_noop_when_nothing_is_eligible
         event.event_type
         for task in paused.tasks
         for event in repo.list_task_events(user_id, task.task_id)
-    ) == ["pause_requested", "paused"]
+    ) == ["pause_requested", "paused", "submitted", "submitted"]
     event_count = sum(
         len(repo.list_task_events(user_id, task.task_id)) for task in paused.tasks
     )
@@ -456,34 +457,14 @@ def test_list_events_is_user_scoped_ordered_and_limit_is_capped(repository):
         "event-other", "correct horse battery"
     ).id
     task = _task_in_state(repo, user_id, "queued")
-    with connect(repo.db_path) as conn:
-        row = conn.execute(
-            "select batch_id, status, stage from import_tasks where id = ?",
-            (task.task_id,),
-        ).fetchone()
-        conn.executemany(
-            """
-            insert into import_task_events
-                (batch_id, task_id, user_id, event_type, status, stage, message, created_at)
-            values (?, ?, ?, ?, ?, ?, null, ?)
-            """,
-            [
-                (
-                    row["batch_id"],
-                    task.task_id,
-                    user_id,
-                    f"event-{index:03d}",
-                    row["status"],
-                    row["stage"],
-                    "2026-08-10T00:00:00Z",
-                )
-                for index in range(205)
-            ],
-        )
+    for _ in range(103):
+        repo.request_pause(user_id, task.task_id, now=NOW)
+        repo.resume_task(user_id, task.task_id, now=NOW)
 
     events = repo.list_task_events(user_id, task.task_id, limit=999)
 
     assert len(events) == 200
-    assert [event.event_type for event in events[:2]] == ["event-000", "event-001"]
+    assert [event.event_type for event in events[:3]] == ["submitted", "paused", "resumed"]
+    assert [event.event_id for event in events] == sorted(event.event_id for event in events)
     assert repo.list_task_events(other_user_id, task.task_id) == []
     assert repo.list_task_events(user_id, task.task_id, limit=0) == []

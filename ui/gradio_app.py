@@ -694,7 +694,7 @@ def _history_cursor_stack(value):
     return list(value)
 
 
-def _history_page_result(page, current_cursor, previous_cursors, action=""):
+def _history_page_result(page, current_cursor, previous_cursors, rendered_page, action=""):
     return (
         _format_history_batch_table(page),
         current_cursor or "",
@@ -705,6 +705,7 @@ def _history_page_result(page, current_cursor, previous_cursors, action=""):
         "",
         [],
         False,
+        rendered_page,
         action,
     )
 
@@ -732,7 +733,15 @@ def _load_import_history_page(
         )
     except ValueError as exc:
         raise gr.Error(str(exc))
-    return _history_page_result(page, cursor, previous_cursors, action)
+    # gr.State is server-owned: bind the exact displayed rows, not a later
+    # positional query. Scope the snapshot to this authentication/filter/page.
+    rendered_page = {
+        "session_token": session_token,
+        "filters": filters,
+        "cursor": cursor,
+        "rows": [(batch.batch_id, batch.updated_at) for batch in page.batches],
+    }
+    return _history_page_result(page, cursor, previous_cursors, rendered_page, action)
 
 
 def refresh_import_history(
@@ -828,25 +837,32 @@ def select_import_history_batch(
     created_from,
     created_to,
     current_cursor,
+    rendered_page,
     evt: gr.SelectData,
 ):
     _require_session(session_token)
     filters = _import_history_filters(
         statuses, filename_query, created_from, created_to
     )
-    try:
-        page = import_service.list_task_history(
-            session_token,
-            filters,
-            _history_cursor(current_cursor),
-            limit=_IMPORT_HISTORY_PAGE_LIMIT,
-        )
-    except ValueError as exc:
-        raise gr.Error(str(exc))
-    row = _history_selected_row(evt, len(page.batches))
+    empty = ("", [], "", [], False)
+    if (
+        not isinstance(rendered_page, dict)
+        or rendered_page.get("session_token") != session_token
+        or rendered_page.get("filters") != filters
+        or rendered_page.get("cursor") != _history_cursor(current_cursor)
+    ):
+        return empty
+    rows = rendered_page.get("rows", [])
+    row = _history_selected_row(evt, len(rows))
     if row is None:
-        return "", [], "", [], False
-    batch = page.batches[row]
+        return empty
+    batch_id, updated_at = rows[row]
+    try:
+        batch = import_service.get_batch(session_token, batch_id)
+    except KeyError:
+        return empty
+    if batch.lifecycle_state != "active" or batch.updated_at != updated_at:
+        return empty
     return batch.batch_id, format_task_table(batch), "", [], False
 
 
@@ -907,7 +923,7 @@ def delete_import_history_batch(
 
 
 def clear_import_history_ui():
-    return ([], "", "", "", [], "", [], "", "", [], "", [], False, "")
+    return ([], "", "", "", [], "", [], "", "", [], "", [], False, {}, "")
 
 
 def refresh_documents(session_token):
@@ -1497,6 +1513,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             import_history_current_cursor = gr.State("")
             import_history_previous_cursors = gr.State([])
             import_history_next_cursor = gr.State("")
+            import_history_rendered_page = gr.State({})
             selected_import_history_batch_id = gr.State("")
             selected_import_history_task_id = gr.State("")
             with gr.Row():
@@ -1513,7 +1530,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
                 interactive=False,
             )
             import_history_delete_confirmation = gr.Checkbox(
-                label="我确认删除所选终态批次的导入历史",
+                label="我确认删除所选终态批次的导入历史，保留已导入的文档",
                 value=False,
             )
             delete_import_history_btn = gr.Button("删除所选历史批次")
@@ -1991,6 +2008,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             selected_import_history_task_id,
             import_history_timeline,
             import_history_delete_confirmation,
+            import_history_rendered_page,
             import_history_action_status,
         ]
         login_btn.click(
@@ -2254,6 +2272,7 @@ with gr.Blocks(title="文档 智能学习助手") as demo:
             inputs=[
                 *import_history_filter_inputs,
                 import_history_current_cursor,
+                import_history_rendered_page,
             ],
             outputs=[
                 selected_import_history_batch_id,

@@ -179,7 +179,7 @@ class _TwoPartyProbeLock:
         ("delete_current_document", "_delete_document_coordinated"),
     ],
 )
-def test_task_control_shares_destructive_operation_runtime_lock(
+def test_task_control_shares_destructive_guard_request_gate(
     monkeypatch, destructive_method, coordinated_method
 ):
     destructive_started = threading.Event()
@@ -204,7 +204,7 @@ def test_task_control_shares_destructive_operation_runtime_lock(
             assert (user_id, batch_id) == ("user-a", "batch-a")
             return summary
 
-    runtime = SimpleNamespace(lock=probe_lock)
+    runtime = SimpleNamespace(lock=threading.RLock(), import_control_lock=probe_lock)
     sessions = SimpleNamespace(
         get_session=lambda token: SimpleNamespace(user_id="user-a", runtime=runtime)
     )

@@ -195,7 +195,7 @@ class ImportTaskService:
     ) -> ImportBatchSummary:
         session = self._session(session_token)
         user_id = str(session.user_id)
-        with self._runtime_lock(session):
+        with self._control_lock(session):
             task = self.repository.request_pause(user_id, task_id)
             summary = self.repository.get_batch(user_id, task.batch_id)
         if summary is None:  # pragma: no cover - guarded by the task foreign key
@@ -221,7 +221,7 @@ class ImportTaskService:
     ) -> ImportBatchSummary:
         session = self._session(session_token)
         user_id = str(session.user_id)
-        with self._runtime_lock(session):
+        with self._control_lock(session):
             task = self.repository.request_cancel(user_id, task_id)
             summary = self.repository.get_batch(user_id, task.batch_id)
         if summary is None:  # pragma: no cover - guarded by the task foreign key
@@ -234,7 +234,7 @@ class ImportTaskService:
     ) -> ImportBatchSummary:
         session = self._session(session_token)
         user_id = str(session.user_id)
-        with self._runtime_lock(session):
+        with self._control_lock(session):
             before = self.repository.get_batch(user_id, batch_id)
             summary = self.repository.request_pause_batch(user_id, batch_id)
             changed = summary != before
@@ -260,7 +260,7 @@ class ImportTaskService:
     ) -> ImportBatchSummary:
         session = self._session(session_token)
         user_id = str(session.user_id)
-        with self._runtime_lock(session):
+        with self._control_lock(session):
             before = self.repository.get_batch(user_id, batch_id)
             summary = self.repository.request_cancel_batch(user_id, batch_id)
             changed = summary != before
@@ -364,6 +364,14 @@ class ImportTaskService:
 
     def _session(self, session_token: str) -> Any:
         return self.session_registry.get_session(session_token)
+
+    @staticmethod
+    def _control_lock(session: Any):
+        # Durable requests must reach checkpoints while runtime.lock is held
+        # by parsing/embedding. Destructive guards use this same short gate.
+        runtime = getattr(session, "runtime", None)
+        lock = getattr(runtime, "import_control_lock", None)
+        return lock if lock is not None else nullcontext()
 
     @staticmethod
     def _runtime_lock(session: Any):

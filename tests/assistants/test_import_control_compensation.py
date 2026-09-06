@@ -161,7 +161,7 @@ def test_remove_import_event_deletes_exact_event_and_saves_snapshot(tmp_path, mo
         assert set(episodic._episodes) == {task_b_id}
         assert episodic.doc_store.get_document(task_a_id) is None
         assert episodic.doc_store.get_document(task_b_id) is not None
-        assert saved == [True]
+        assert saved == [True, True]
     finally:
         tool.close()
 

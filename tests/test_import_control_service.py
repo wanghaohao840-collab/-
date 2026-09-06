@@ -339,13 +339,16 @@ def test_batch_control_delegates_once_without_a_service_task_loop(
         ("cancel_batch", "queued"),
     ],
 )
-def test_every_control_derives_user_before_and_transitions_under_runtime_lock(
+def test_controls_use_request_gate_but_resume_retains_runtime_lock(
     harness, method_name, source_status
 ):
     task, staged = _create_task(harness, source_status)
     before = _snapshot(harness, task, staged)
     gate = GateLock(on_enter=lambda: setattr(harness.session, "user_id", harness.other_user_id))
-    harness.session.runtime.lock = gate
+    if method_name.startswith("resume"):
+        harness.session.runtime.lock = gate
+    else:
+        harness.session.runtime.import_control_lock = gate
     def notify_after_unlock():
         assert gate.owned is False
         harness.workers.notify_count += 1

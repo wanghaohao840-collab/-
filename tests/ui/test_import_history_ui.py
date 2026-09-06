@@ -124,7 +124,9 @@ def test_history_filter_parser_and_first_next_previous_cursor_state(monkeypatch)
         "token", ["failed", "cancelled"], "notes", "2026-08-01", "2026-08-31"
     )
     assert first[1:4] == ("", [], "cursor-2")
-    assert first[4:] == ("", [], "", [], False, "")
+    assert first[4:9] == ("", [], "", [], False)
+    assert first[-1] == ""
+    assert first[-2]["rows"] == [(batch.batch_id, batch.updated_at)]
     assert service.calls[-1][1] == {
         "statuses": ["failed", "cancelled"],
         "filename_query": "notes",
@@ -137,11 +139,14 @@ def test_history_filter_parser_and_first_next_previous_cursor_state(monkeypatch)
     )
     assert second[0] == []
     assert second[1:4] == ("cursor-2", [None], "")
+    assert second[-2]["rows"] == []
+    assert second[4:9] == ("", [], "", [], False)
 
     previous = module.previous_import_history_page(
         "token", ["failed"], "notes", "", "", "cursor-2", [None]
     )
     assert previous[1:4] == ("", [], "cursor-2")
+    assert previous[-2]["rows"] == [(batch.batch_id, batch.updated_at)]
     assert service.calls[-1][2] is None
 
 
@@ -154,10 +159,11 @@ def test_history_selection_lazily_loads_safe_task_timeline(monkeypatch):
     )
     monkeypatch.setattr(module, "_require_session", lambda token: object())
     monkeypatch.setattr(module, "import_service", service)
+    rendered = module.refresh_import_history("token", [], "", "", "")
 
     selected_batch, task_rows, selected_task, timeline, confirmed = (
         module.select_import_history_batch(
-            "token", [], "", "", "", "", SimpleNamespace(index=(0, 0))
+            "token", [], "", "", "", "", rendered[-2], SimpleNamespace(index=(0, 0))
         )
     )
     assert selected_batch == "batch-private"
@@ -179,6 +185,45 @@ def test_history_selection_lazily_loads_safe_task_timeline(monkeypatch):
     assert "document-private" not in rendered
     assert "imports/private/task-private.md" not in rendered
     assert "Users" not in rendered
+
+
+@pytest.mark.parametrize("change", ["insert", "delete", "status", "same_filename", "filter", "page", "auth"])
+def test_history_click_never_retargets_a_rendered_row(monkeypatch, change):
+    import ui.gradio_app as module
+
+    original = _batch()
+    service = _HistoryService({None: ImportHistoryPage(batches=(original,), next_cursor=None)})
+    monkeypatch.setattr(module, "_require_session", lambda token: object())
+    monkeypatch.setattr(module, "import_service", service)
+    rendered = module.refresh_import_history("token", ["failed"], "", "", "")
+    replacement = _batch(task=_task(batch_id="new-batch", task_id="new-task",
+                                     original_name="notes.md" if change == "same_filename" else "new.md"))
+    if change == "status":
+        original = _batch(task=_task(status="succeeded", updated_at="2026-08-21T00:00:00Z"))
+    service.pages[None] = ImportHistoryPage(
+        batches=(replacement,) if change == "delete" else (replacement, original), next_cursor=None,
+    )
+    selected = module.select_import_history_batch(
+        "other-token" if change == "auth" else "token",
+        ["succeeded"] if change == "filter" else ["failed"], "", "", "",
+        "next-page" if change == "page" else "", rendered[-2], SimpleNamespace(index=(0, 0)),
+    )
+    assert selected[-1] is False
+    if change in {"delete", "status", "filter", "page", "auth"}:
+        assert selected == ("", [], "", [], False)
+        assert service.deleted == []
+    else:
+        assert selected[0] == "batch-private"
+        assert selected[1][0][0] == "notes.md"
+        module.delete_import_history_batch("token", ["failed"], "", "", "", selected[0], True)
+        assert service.deleted == [("token", "batch-private")]
+
+
+def test_history_delete_confirmation_explicitly_preserves_documents():
+    import ui.gradio_app as module
+
+    config = module.import_history_delete_confirmation.get_config()
+    assert "保留已导入的文档" in config["label"]
 
 
 def test_history_delete_authenticates_before_confirmation_and_refreshes(monkeypatch):
@@ -242,7 +287,7 @@ def test_history_bindings_are_manual_or_filter_driven_and_logout_clears_all_stat
     clear = _bindings(module, module.clear_import_history_ui)
     assert len(clear) == 1
     cleared = module.clear_import_history_ui()
-    assert cleared == ([], "", "", "", [], "", [], "", "", [], "", [], False, "")
+    assert cleared == ([], "", "", "", [], "", [], "", "", [], "", [], False, {}, "")
     assert len(clear[0].outputs) == len(cleared)
 
 
@@ -253,7 +298,7 @@ def test_history_bindings_accept_only_session_filters_cursors_and_opaque_ids():
         module.refresh_import_history: 5,
         module.next_import_history_page: 8,
         module.previous_import_history_page: 7,
-        module.select_import_history_batch: 6,
+        module.select_import_history_batch: 7,
         module.select_import_history_task: 2,
         module.delete_import_history_batch: 7,
     }

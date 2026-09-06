@@ -153,6 +153,12 @@ def _ensure_import_control_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "import_batches", "delete_requested_at", "text")
     _ensure_column(conn, "import_batches", "cleanup_error_code", "text")
     _ensure_column(conn, "import_batches", "cleanup_error_summary", "text")
+    _ensure_column(conn, "import_batches", "cleanup_attempt_count", "integer not null default 0")
+    conn.execute(
+        """create index if not exists ix_import_batches_deletion_recovery
+           on import_batches(cleanup_attempt_count, delete_requested_at, created_at, id)
+           where lifecycle_state = 'deleting'"""
+    )
     conn.executescript(IMPORT_TASK_INDEXES)
 
 

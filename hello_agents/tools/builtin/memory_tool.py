@@ -193,8 +193,9 @@ class MemoryTool(Tool):
         if episodic is None:
             return False
         removed = episodic.delete_ids([self._import_event_id(import_task_id)])
-        if removed:
-            self.memory_manager._save_snapshot()
+        # Reconcile the snapshot even if an earlier attempt removed the live
+        # event but failed to persist the snapshot. Failure remains retryable.
+        self.memory_manager._save_snapshot()
         return bool(removed)
 
     def _import_event_id(self, import_task_id: str) -> str:

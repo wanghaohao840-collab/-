@@ -477,7 +477,7 @@ class SimpleRAGPipeline:
             "cache_path": str(self.cache_path),
         }
 
-    def delete_document(self, document_id: str) -> Dict[str, Any]:
+    def delete_document(self, document_id: str, *, strict_durable: bool = False) -> Dict[str, Any]:
         """删除指定 document_id 的所有 chunks，并同步保存缓存"""
 
         if not document_id:
@@ -489,7 +489,8 @@ class SimpleRAGPipeline:
 
         removed = self._remove_document_chunks(document_id)
 
-        self._save_cache()
+        # Always rewrite, including cleanup-only retries after live removal.
+        self._save_cache(strict=strict_durable)
 
         return {
             "success": True,
@@ -640,7 +641,7 @@ class SimpleRAGPipeline:
         except Exception as e:
             print(f"[WARNING] RAG 缓存加载失败: {self.cache_path}, error={e}")
 
-    def _save_cache(self) -> None:
+    def _save_cache(self, *, strict: bool = False) -> None:
         """保存 chunks 到 JSON"""
 
         try:
@@ -666,6 +667,8 @@ class SimpleRAGPipeline:
             temp_path.replace(self.cache_path)
 
         except Exception as e:
+            if strict:
+                raise
             print(f"[WARNING] RAG 缓存保存失败: {self.cache_path}, error={e}")
 
     def _serializable_chunks(self) -> List[Dict[str, Any]]:

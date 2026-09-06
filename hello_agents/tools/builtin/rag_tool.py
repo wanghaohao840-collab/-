@@ -30,7 +30,7 @@ from hello_agents.memory.rag.errors import (
     sanitize_error_message,
     sanitize_qdrant_url,
 )
-from hello_agents.memory.rag.pipeline import create_rag_pipeline
+from hello_agents.memory.rag.pipeline import SimpleRAGPipeline, create_rag_pipeline
 from hello_agents.memory.rag.prepare import report_progress, run_control_checkpoint
 from hello_agents.memory.rag.result_utils import (
     normalize_document_scope,
@@ -1272,7 +1272,10 @@ class RAGTool(Tool):
         if not hasattr(pipeline, "delete_document"):
             return "❌ 当前 RAG pipeline 不支持 delete_document"
 
-        result = pipeline.delete_document(document_id)
+        if kwargs.get("strict_durable") and isinstance(pipeline, SimpleRAGPipeline):
+            result = pipeline.delete_document(document_id, strict_durable=True)
+        else:
+            result = pipeline.delete_document(document_id)
 
         if result.get("success"):
             graph_result = self._delete_graph_after_rag(

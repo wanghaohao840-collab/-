@@ -31,7 +31,7 @@ class ImportHistoryMaintenance:
         self._finish_marked_batch(user_id, summary)
 
     def recover_deleting(self, limit: int = 20) -> int:
-        batches = self.repository.list_deleting_batches(limit=limit)
+        batches = self.repository.claim_deleting_batches(limit=limit)
         recovered = 0
         for summary in batches:
             try:

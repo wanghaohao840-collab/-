@@ -119,6 +119,9 @@ class ImportTaskRepository:
                     for task in task_list
                 ],
             )
+            for task in task_list:
+                row = self._required_task_row(conn, user_id, task.task_id)
+                self._insert_event(conn, row, "submitted", None, timestamp)
             return self._get_batch(conn, user_id, batch_id)
 
     def list_batches(self, user_id: str, limit: int = 50) -> list[ImportBatchSummary]:
@@ -422,6 +425,7 @@ class ImportTaskRepository:
                         "select * from import_tasks where id = ? and user_id = ?",
                         (control["id"], control["user_id"]),
                     ).fetchone()
+                    self._insert_event(conn, row, "claimed", None, timestamp)
                     conn.commit()
                     return _task_from_row(row)
             rows = conn.execute(
@@ -478,6 +482,7 @@ class ImportTaskRepository:
                         "select * from import_tasks where id = ? and user_id = ?",
                         (candidate["id"], candidate["user_id"]),
                     ).fetchone()
+                    self._insert_event(conn, row, "claimed", None, timestamp)
                     conn.commit()
                     return _task_from_row(row)
             conn.commit()
@@ -504,6 +509,7 @@ class ImportTaskRepository:
             "status = 'running'",
             "stage = ?, progress = ?, updated_at = ?",
             (stage, progress, now or _utc_now()),
+            event_type="progress",
         )
 
     def release_claim(
@@ -548,6 +554,7 @@ class ImportTaskRepository:
                next_attempt_at = null, error_code = null, error_summary = null,
                finished_at = ?, updated_at = ?""",
             (timestamp, timestamp),
+            event_type="succeeded",
         )
 
     def mark_retry_wait(
@@ -569,6 +576,7 @@ class ImportTaskRepository:
                auto_retry_count = auto_retry_count + 1, next_attempt_at = ?,
                error_code = ?, error_summary = ?, updated_at = ?""",
             (next_attempt_at, error_code, error_summary, timestamp),
+            event_type="auto_retry",
         )
 
     def mark_failed(
@@ -588,6 +596,7 @@ class ImportTaskRepository:
             """status = 'failed', stage = 'failed', error_code = ?,
                error_summary = ?, finished_at = ?, updated_at = ?""",
             (error_code, error_summary, timestamp, timestamp),
+            event_type="failed",
         )
 
     def mark_paused(
@@ -753,6 +762,30 @@ class ImportTaskRepository:
                 self._get_batch(conn, row["user_id"], row["id"]) for row in rows
             ]
 
+    def claim_deleting_batches(self, limit: int = 20) -> list[ImportBatchSummary]:
+        """Rotate bounded recovery work durably, including failed attempts.
+
+        Least-attempted batches are selected using a durable counter, without
+        depending on the wall clock. Selection is committed before filesystem
+        work so restart or a failed failure-record write cannot strand all
+        rows behind one bad page.
+        """
+        _validate_maintenance_limit(limit)
+        with transaction(self.db_path) as conn:
+            conn.execute("begin immediate")
+            rows = conn.execute(
+                """select id, user_id from import_batches
+                   where lifecycle_state = 'deleting'
+                   order by cleanup_attempt_count, delete_requested_at, created_at, id
+                   limit ?""", (limit,),
+            ).fetchall()
+            conn.executemany(
+                """update import_batches set cleanup_attempt_count = cleanup_attempt_count + 1
+                   where id = ? and user_id = ? and lifecycle_state = 'deleting'""",
+                [(row["id"], row["user_id"]) for row in rows],
+            )
+            return [self._get_batch(conn, row["user_id"], row["id"]) for row in rows]
+
     def list_retention_candidates(
         self, cutoff: str, limit: int = 10
     ) -> list[ImportBatchSummary]:
@@ -815,6 +848,7 @@ class ImportTaskRepository:
                next_attempt_at = null, error_code = null, error_summary = null,
                started_at = null, finished_at = null, updated_at = ?""",
             (timestamp,),
+            event_type="manual_retry",
         )
 
     def retry_failed_in_batch(
@@ -822,6 +856,13 @@ class ImportTaskRepository:
     ) -> int:
         timestamp = now or _utc_now()
         with transaction(self.db_path) as conn:
+            conn.execute("begin immediate")
+            retry_rows = conn.execute(
+                """select t.id from import_tasks t join import_batches b
+                   on b.id = t.batch_id and b.user_id = t.user_id
+                   where t.user_id = ? and t.batch_id = ? and t.status = 'failed'
+                     and b.lifecycle_state = 'active'""", (user_id, batch_id),
+            ).fetchall()
             updated = conn.execute(
                 """
                 update import_tasks
@@ -840,6 +881,9 @@ class ImportTaskRepository:
                 (timestamp, user_id, batch_id),
             )
             if updated.rowcount:
+                for retry_row in retry_rows:
+                    row = self._required_task_row(conn, user_id, retry_row["id"])
+                    self._insert_event(conn, row, "manual_retry", None, timestamp)
                 conn.execute(
                     "update import_batches set updated_at = ? where id = ? and user_id = ?",
                     (timestamp, batch_id, user_id),
@@ -886,6 +930,8 @@ class ImportTaskRepository:
                         """,
                         (timestamp, timestamp, row["id"]),
                     )
+                    failed = self._required_task_row(conn, row["user_id"], row["id"])
+                    self._insert_event(conn, failed, "failed", failed["error_summary"], timestamp)
                 conn.execute(
                     """
                     update import_batches set updated_at = ?
@@ -976,8 +1022,12 @@ class ImportTaskRepository:
         expected_condition: str,
         set_clause: str,
         values: tuple[object, ...],
+        *,
+        event_type: str | None = None,
     ) -> ImportTaskRecord:
         with transaction(self.db_path) as conn:
+            conn.execute("begin immediate")
+            previous = self._required_task_row(conn, user_id, task_id)
             updated = conn.execute(
                 f"""
                 update import_tasks set {set_clause}
@@ -1006,6 +1056,9 @@ class ImportTaskRepository:
             row = conn.execute(
                 "select * from import_tasks where id = ? and user_id = ?", (task_id, user_id)
             ).fetchone()
+            if event_type and (event_type != "progress" or previous["stage"] != row["stage"]):
+                message = row["error_summary"] if event_type in {"failed", "auto_retry"} else None
+                self._insert_event(conn, row, event_type, message, row["updated_at"])
             return _task_from_row(row)
 
     def _set_control_state(

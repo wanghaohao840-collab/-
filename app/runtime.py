@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 
@@ -29,6 +29,8 @@ class UserRuntime:
     active_session_count: int = 0
     active_background_count: int = 0
     import_task_service: object | None = None
+    # Short request/guard gate; never held across ordinary import writes.
+    import_control_lock: RLock = field(default_factory=RLock)
 
     def close(self) -> None:
         close = getattr(self.rag_tool, "close", None)

@@ -516,16 +516,16 @@ git commit -m "feat: execute import pause and cancellation safely"
 - Consumes: Task 2 repository controls and Task 4 worker notification.
 - Produces six task/batch control methods: `pause_task`, `resume_task`, `cancel_task`, `pause_batch`, `resume_batch`, and `cancel_batch`. History/deletion methods arrive in Task 6.
 
-- [ ] **Step 1: Write authorization and runtime-lock tests**
+- [ ] **Step 1: Write authorization and synchronization tests**
 
-For every new method, cover missing/expired tokens, cross-user IDs, stale state, duplicate commands, and zero repository/file mutation on rejection. Use events to prove controls and `clear_all_documents()` share the same runtime lock:
+For every new method, cover missing/expired tokens, cross-user IDs, stale state, duplicate commands, and zero repository/file mutation on rejection. **Approved correction (2026-09-05):** pause/cancel must durably commit during real Assistant RAG work. Use a short per-runtime `import_control_lock`, separate from the data-write lock, for task/batch requests. Clear/delete hold the data-write lock then the request gate across active guards and mutation, including cleanup-failed cancellation races. No request path acquires the data-write lock while holding the gate. Resume, retry, staging submission, import writes, and compensation retain their existing data-write synchronization. SQLite ownership/lifecycle predicates and conditional transitions remain authoritative.
 
 ```python
 with runtime.lock:
     thread = Thread(target=service.cancel_task, args=(token, task_id))
     thread.start()
-    assert repository.get_task(user_id, task_id).status == "queued"
-thread.join()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
 assert repository.get_task(user_id, task_id).status == "cancel_requested"
 ```
 
@@ -537,13 +537,13 @@ D:\python_self_agent\venv\Scripts\python.exe -m pytest tests/test_import_control
 
 - [ ] **Step 3: Implement the authenticated control facade**
 
-Each method resolves one session, derives user ID, takes `_runtime_lock(session)`, delegates to the matching repository method, releases the lock, calls `worker_pool.notify()` only after a change, and returns the current batch summary. Example:
+Each method resolves one session and derives user ID. Pause/cancel take `_control_lock(session)`; resume retains `_runtime_lock(session)`. Delegate to the matching repository method, release the gate/lock, notify only after a change, and return the current batch summary. Example:
 
 ```python
 def cancel_task(self, session_token: str, task_id: str) -> ImportBatchSummary:
     session = self._session(session_token)
     user_id = str(session.user_id)
-    with self._runtime_lock(session):
+    with self._control_lock(session):
         task = self.repository.request_cancel(user_id, task_id)
         summary = self.repository.get_batch(user_id, task.batch_id)
     self.worker_pool.notify()

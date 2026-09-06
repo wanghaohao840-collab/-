@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -365,7 +366,7 @@ class PDFLearningAssistant:
                 raise ValueError("document is owned by another import task")
 
             rag_result = self.rag_tool.execute(
-                "delete_document", document_id=document_id
+                "delete_document", document_id=document_id, strict_durable=True
             )
             if isinstance(rag_result, str) and rag_result.lstrip().startswith("❌"):
                 raise RuntimeError("RAG import compensation failed")
@@ -900,7 +901,13 @@ class PDFLearningAssistant:
         document_id = self.current_document_id
         runtime = getattr(self, "runtime", None)
         runtime_lock = getattr(runtime, "lock", None)
-        with runtime_lock or self._write_lock:
+        # Lock order is always data-write lock -> short control-request gate.
+        # This also excludes failed-cleanup -> cancel requests between the
+        # active-import check and the destructive operation.
+        with (
+            runtime_lock or self._write_lock,
+            getattr(runtime, "import_control_lock", None) or nullcontext(),
+        ):
             import_task_service = getattr(runtime, "import_task_service", None)
             active_for_document = getattr(
                 import_task_service, "has_active_task_for_document", None
@@ -922,7 +929,10 @@ class PDFLearningAssistant:
 
         runtime = getattr(self, "runtime", None)
         runtime_lock = getattr(runtime, "lock", None)
-        with runtime_lock or self._write_lock:
+        with (
+            runtime_lock or self._write_lock,
+            getattr(runtime, "import_control_lock", None) or nullcontext(),
+        ):
             import_task_service = getattr(runtime, "import_task_service", None)
             if import_task_service is not None and import_task_service.has_active_tasks(
                 self.user_id

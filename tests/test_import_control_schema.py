@@ -172,5 +172,6 @@ def test_initialize_database_creates_control_schema_for_new_databases(tmp_path):
         "delete_requested_at",
         "cleanup_error_code",
         "cleanup_error_summary",
+        "cleanup_attempt_count",
     } <= batch_columns
     assert {"ix_import_task_events_user_task_created", "ix_import_task_events_user_batch_created"} <= event_indexes
