@@ -9,6 +9,9 @@ import "./styles/tokens.css";
 import "./styles/global.css";
 import "./styles/documents.css";
 import "./styles/qa.css";
+import "./styles/insights.css";
+import "./styles/search.css";
+import "./styles/learning.css";
 
 const queryClient = new QueryClient({
   defaultOptions: {

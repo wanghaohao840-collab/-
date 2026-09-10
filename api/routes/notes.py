@@ -11,6 +11,7 @@ from api.dependencies import (
     get_note_service,
 )
 from api.errors import error_response
+from app.document_search import SearchChunkLocator, DocumentSearchValidationError
 from api.schemas.notes import (
     NoteCapabilitiesResponse,
     NoteClearRequest,
@@ -35,10 +36,12 @@ from app.note_models import (
     NoteValidationError,
     NoteVersionConflict,
     NoteSourceSelector,
+    DocumentChunkSourceSelector,
+    NoteSourceUnavailableError,
     validate_note_input,
 )
 from app.note_service import NoteService, _service_request_digest
-from app.session import UserSession
+from app.session import UserSession, InvalidSessionError
 
 
 router = APIRouter(prefix="/api/v1/notes", tags=["notes"])
@@ -55,6 +58,12 @@ def _disabled(request: Request) -> JSONResponse | None:
 
 
 def _domain_error(error: Exception) -> JSONResponse:
+    if isinstance(error, InvalidSessionError):
+        return error_response(401, "invalid_session", "会话无效或已过期，请重新登录")
+    if isinstance(error, NoteSourceUnavailableError):
+        return error_response(503, error.code, "笔记来源暂时无法验证，请稍后重试", retryable=True)
+    if isinstance(error, DocumentSearchValidationError):
+        return error_response(422, "NOTE_VALIDATION_ERROR", "笔记来源参数无效")
     if isinstance(error, NoteNotFoundError):
         code = "NOTE_SOURCE_NOT_FOUND" if isinstance(error, NoteSourceNotFoundError) else "NOTE_NOT_FOUND"
         return error_response(status.HTTP_404_NOT_FOUND, code, "笔记资源不存在")
@@ -117,10 +126,15 @@ def create_note(
     if disabled := _disabled(request):
         return disabled
     try:
-        source = NoteSourceSelector(
-            kind=body.source.kind, qa_message_id=body.source.qa_message_id,
-            citation_id=body.source.citation_id,
-        ) if body.source is not None else None
+        if body.source is not None and body.source.kind == "document_chunk":
+            source = DocumentChunkSourceSelector(
+                kind="document_chunk", locator=SearchChunkLocator(**body.source.locator.model_dump()),
+            )
+        else:
+            source = NoteSourceSelector(
+                kind=body.source.kind, qa_message_id=body.source.qa_message_id,
+                citation_id=body.source.citation_id,
+            ) if body.source is not None else None
         replay = False
         repository = getattr(service, "repository", None)
         if repository is not None:

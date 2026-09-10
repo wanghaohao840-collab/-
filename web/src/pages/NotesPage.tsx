@@ -7,7 +7,7 @@ import { useNoteMutations, useNoteQuery, useNotesCapabilities, useNotesQuery } f
 import type { NoteFilters, NoteListItem, NotePrefillSource, NoteSourceKind } from "../features/notes/types";
 
 const allowed = new Set(["note", "query", "tags", "source_kind", "qa_message_id", "citation_id"]);
-const listSourceKinds = new Set(["qa_message", "qa_citation"]);
+const listSourceKinds = new Set(["qa_message", "qa_citation", "document_chunk"]);
 const safeError = (reason: unknown, fallback: string) => reason instanceof ApiError ? reason.message : fallback;
 
 export function notesListFilters(params: URLSearchParams): NoteFilters {

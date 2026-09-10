@@ -8,7 +8,10 @@ from pathlib import Path
 from threading import RLock
 
 from app.database import initialize_database
+from app.learning_repository import LearningRepository
+from app.learning_service import LearningService
 from app.document_library import DocumentLibraryService
+from app.document_search import DocumentSearchService
 from app.import_repository import ImportTaskRepository
 from app.import_service import ImportTaskService
 from app.import_worker import ImportWorkerPool
@@ -69,6 +72,9 @@ class ApplicationServices:
     note_projection_repository: NoteProjectionRepository
     note_projection_worker: NoteProjectionWorker
     note_service: NoteService
+    document_search: DocumentSearchService
+    learning_repository: LearningRepository
+    learning_service: LearningService
     _started: bool = field(default=False, init=False, repr=False)
     _lifecycle_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
@@ -115,12 +121,9 @@ class ApplicationServices:
             session_registry.runtime_registry,
             DefaultNoteMemoryProjection(),
         )
-        note_service = NoteService(
-            note_repository, note_migration, qa_repository, note_projection_worker
-        )
-        session_registry.runtime_registry.set_note_service(note_service)
         qa_job_repository = QaJobRepository(db_path)
-        qa_deletion_repository = QaDeletionRepository(db_path, note_repository)
+        learning_repository = LearningRepository(db_path)
+        qa_deletion_repository = QaDeletionRepository(db_path, note_repository, learning_repository=learning_repository)
         qa_legacy_migration = QaLegacyMigrationService(db_path, storage)
         qa_telemetry = InProcessQaTelemetry()
         answer_engine = qa_answer_engine or RagQaAnswerEngine()
@@ -131,6 +134,13 @@ class ApplicationServices:
             import_service,
             deletion_repository=qa_deletion_repository,
         )
+        document_search = DocumentSearchService(session_registry, document_library)
+        learning_service = LearningService(learning_repository, session_registry, document_library, storage)
+        note_service = NoteService(
+            note_repository, note_migration, qa_repository, note_projection_worker,
+            document_search=document_search,
+        )
+        session_registry.runtime_registry.set_note_service(note_service)
         qa_worker_pool = QaWorkerPool(
             qa_job_repository,
             qa_repository,
@@ -177,7 +187,10 @@ class ApplicationServices:
             import_worker_pool=import_worker_pool,
             import_service=import_service,
             document_library=document_library,
+            document_search=document_search,
             qa_repository=qa_repository,
+            learning_repository=learning_repository,
+            learning_service=learning_service,
             qa_job_repository=qa_job_repository,
             qa_deletion_repository=qa_deletion_repository,
             qa_legacy_migration=qa_legacy_migration,

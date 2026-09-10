@@ -84,9 +84,12 @@ export function resolveRequiredPythonExecutable(
 export function withoutPythonOverrides(
   environment: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(environment).filter(
-      ([key]) => !["E2E_PYTHON", "PYTHONPATH"].includes(key.toUpperCase()),
-    ),
-  );
+  // Keep browser fixtures independent of workstation credentials, including
+  // dotenv's upward directory search from an isolated Git worktree.
+  const isolated = Object.fromEntries(Object.entries(environment).filter(([key]) => {
+    const upper = key.toUpperCase();
+    return !["E2E_PYTHON", "PYTHONPATH", "PYTHON_DOTENV_DISABLED"].includes(upper)
+      && !/^(LLM_|OPENAI_|DEEPSEEK_|NEO4J_|QDRANT_|RAG_)/.test(upper);
+  }));
+  return { ...isolated, PYTHON_DOTENV_DISABLED: "1" };
 }

@@ -151,7 +151,7 @@ describe("DocumentsPage", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "文档库" })).toBeVisible();
     expect(screen.queryByText("该能力正在迁移到新版界面")).not.toBeInTheDocument();
     unmount();
-    for (const item of navigationItems.filter(({ path }) => path !== "/documents" && path !== "/qa" && path !== "/notes")) {
+    for (const item of navigationItems.filter(({ path }) => !["/overview", "/documents", "/qa", "/notes", "/insights", "/search", "/learning"].includes(path))) {
       const migration = renderApp(item.path);
       expect(
         await screen.findByRole("heading", { level: 1, name: item.heading }),
@@ -165,6 +165,10 @@ describe("DocumentsPage", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "学习笔记" })).toBeVisible();
     expect(screen.queryByText("该能力正在迁移到新版界面，可暂时前往旧版使用。")).not.toBeInTheDocument();
     notes.unmount();
+    const learning = renderApp("/learning");
+    expect(await screen.findByRole("heading", { level: 1, name: "学习中心" })).toBeVisible();
+    expect(screen.queryByText("该能力正在迁移到新版界面，可暂时前往旧版使用。")).not.toBeInTheDocument();
+    learning.unmount();
   });
 
   it("keeps loading distinct from empty and renders the exact empty copy", async () => {

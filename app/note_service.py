@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import asdict
 import hashlib
 import json
 from typing import Any
 
 from app.database import connect
+from app.document_search import (
+    DocumentSearchService, DocumentSearchError, DocumentSearchScopeError,
+    DocumentSearchScopeChangedError, DocumentSearchSourceStaleError,
+)
 from app.note_migration import NoteMigrationService
 from app.note_models import (
     NewNoteSource,
@@ -16,6 +21,8 @@ from app.note_models import (
     NoteSourceDeletingError,
     NoteSourceNotFoundError,
     NoteSourceSelector,
+    DocumentChunkSourceSelector,
+    NoteSourceUnavailableError,
     NoteValidationError,
     validate_note_input,
 )
@@ -32,11 +39,13 @@ class NoteService:
         migration: NoteMigrationService,
         qa_repository: QaRepository,
         projection_worker: NoteProjectionWorker,
+        document_search: DocumentSearchService | None = None,
     ) -> None:
         self.repository = repository
         self.migration = migration
         self.qa_repository = qa_repository
         self.projection_worker = projection_worker
+        self.document_search = document_search
 
     def list_notes(self, session: UserSession, filters: NoteFilters) -> NotePage:
         self.migration.ensure_user_migrated(session.user_id)
@@ -59,7 +68,7 @@ class NoteService:
         concept: str | None,
         tags: tuple[str, ...],
         client_request_id: str,
-        source: NoteSourceSelector | None = None,
+        source: NoteSourceSelector | DocumentChunkSourceSelector | None = None,
     ) -> Note:
         self.migration.ensure_user_migrated(session.user_id)
         body, normalized_concept, normalized_tags = validate_note_input(
@@ -69,6 +78,22 @@ class NoteService:
             body, normalized_concept, normalized_tags, source
         )
         lock = getattr(getattr(session, "runtime", None), "lock", None)
+        if isinstance(source, DocumentChunkSourceSelector):
+            # Replay is independent of whether the source still exists. Network
+            # resolution must never hold the user mutation lock or SQLite writer.
+            note = self.repository.get_by_client_request_id(
+                session.user_id, client_request_id, request_digest,
+            )
+            if note is None:
+                resolved_source = self._resolve_document_source(session, source)
+                with lock if lock is not None else nullcontext():
+                    note = self.repository.create(
+                        session.user_id, body, normalized_concept, normalized_tags,
+                        client_request_id, sources=(resolved_source,),
+                        request_digest=request_digest, guard_sources=True,
+                    )
+            self._notify_best_effort()
+            return note
         with lock if lock is not None else nullcontext():
             note = self.repository.get_by_client_request_id(
                 session.user_id, client_request_id, request_digest
@@ -166,6 +191,10 @@ class NoteService:
 
     def recent(self, session: UserSession, *, limit: int = 10) -> tuple[Note, ...]:
         return self.list_notes(session, NoteFilters(limit=limit)).items
+
+    def activity_dates(self, session: UserSession, *, since: str) -> tuple[str, ...]:
+        self.migration.ensure_user_migrated(session.user_id)
+        return self.repository.list_activity_dates(session.user_id, since=since)
 
     def retry_projection(self, session: UserSession) -> int:
         self.migration.ensure_user_migrated(session.user_id)
@@ -270,6 +299,26 @@ class NoteService:
         if count:
             self._notify_best_effort()
         return count
+
+    def _resolve_document_source(
+        self, session: UserSession, selector: DocumentChunkSourceSelector,
+    ) -> NewNoteSource:
+        if self.document_search is None:
+            raise NoteSourceUnavailableError("document source resolver unavailable")
+        try:
+            chunk = self.document_search.resolve_chunk(session.token, selector.locator)
+        except (DocumentSearchScopeError, DocumentSearchScopeChangedError, DocumentSearchSourceStaleError) as exc:
+            raise NoteSourceNotFoundError("document source is unavailable or changed") from exc
+        except DocumentSearchError as exc:
+            raise NoteSourceUnavailableError("document source backend unavailable") from exc
+        locator = asdict(chunk.locator)
+        locator.pop("document_id")
+        locator.update(page_number=chunk.page_number, section=chunk.section)
+        return NewNoteSource(
+            kind="document_chunk", qa_thread_id=None, qa_message_id=None, citation_id=None,
+            document_id=chunk.document_id, locator=locator,
+            title_snapshot=chunk.document_name, excerpt_snapshot=chunk.content,
+        )
 
     def _resolve_source(
         self, user_id: str, selector: NoteSourceSelector
@@ -378,7 +427,7 @@ def _service_request_digest(
     body: str,
     concept: str | None,
     tags: tuple[str, ...],
-    source: NoteSourceSelector | None,
+    source: NoteSourceSelector | DocumentChunkSourceSelector | None,
 ) -> str:
     """Fingerprint the client payload without dereferencing a QA source."""
 
@@ -387,7 +436,8 @@ def _service_request_digest(
         "concept": concept,
         "tags": list(tags),
         "source": (
-            {
+            {"kind": source.kind, "locator": asdict(source.locator)}
+            if isinstance(source, DocumentChunkSourceSelector) else {
                 "kind": source.kind,
                 "qa_message_id": source.qa_message_id,
                 "citation_id": source.citation_id,

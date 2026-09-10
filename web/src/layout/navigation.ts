@@ -42,4 +42,5 @@ export const navigationItems = [
     mobileLabel: "洞察",
     heading: "学习洞察",
   },
+  { path: "/learning", label: "学习中心", mobileLabel: "学习", heading: "学习中心" },
 ] as const satisfies readonly NavigationItem[];

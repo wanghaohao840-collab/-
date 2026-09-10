@@ -273,7 +273,7 @@ try {
 
     $stage = 'build'
     Invoke-UpdateCommand -FilePath 'docker' -ArgumentList (
-        Get-ComposeArguments -Config $config -Command @('build', 'app', 'qdrant')
+        Get-ComposeArguments -Config $config -Command @('build', '--pull', '--no-cache', 'app', 'qdrant')
     ) | Out-Null
 
     $stage = 'scan-app'

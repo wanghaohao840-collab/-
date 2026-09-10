@@ -22,6 +22,9 @@ from api.routes.documents import router as documents_router
 from api.routes.imports import router as imports_router
 from api.routes.qa import router as qa_router
 from api.routes.notes import router as notes_router
+from api.routes.insights import router as insights_router
+from api.routes.search import SearchNoStoreMiddleware, router as search_router
+from api.routes.learning import LearningNoStoreMiddleware, router as learning_router
 from app.bootstrap import ApplicationServices, get_application_services
 
 
@@ -75,6 +78,8 @@ def create_api_app(
     if services is not None:
         api_app.state.services = services
     api_app.add_middleware(UnexpectedExceptionBoundary)
+    api_app.add_middleware(SearchNoStoreMiddleware)
+    api_app.add_middleware(LearningNoStoreMiddleware)
 
     @api_app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -86,6 +91,9 @@ def create_api_app(
     api_app.include_router(documents_router)
     api_app.include_router(imports_router)
     api_app.include_router(notes_router)
+    api_app.include_router(insights_router)
+    api_app.include_router(search_router)
+    api_app.include_router(learning_router)
     return api_app
 
 

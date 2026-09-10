@@ -1,5 +1,5 @@
 export type NoteProjectionState = "pending" | "ready" | "failed";
-export type NoteSourceKind = "qa_message" | "qa_citation";
+export type NoteSourceKind = "qa_message" | "qa_citation" | "document_chunk";
 export type NoteSourceSelectorKind = "qa_answer" | "qa_citation";
 
 export type NotePrefillSource = {
@@ -61,7 +61,7 @@ export type NoteCreateInput = {
   concept?: string | null;
   tags?: string[];
   client_request_id: string;
-  source?: NotePrefillSource | null;
+  source?: NotePrefillSource | { kind: "document_chunk"; locator: import("../search/types").ChunkLocator } | null;
 };
 
 export type NoteUpdateInput = {

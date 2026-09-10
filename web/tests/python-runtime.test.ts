@@ -97,6 +97,21 @@ describe("Playwright Python runtime selection", () => {
     ).toEqual({
       Path: "C:/Windows/System32",
       SAFE_VALUE: "kept",
+      PYTHON_DOTENV_DISABLED: "1",
     });
+  });
+
+  it("isolates service credentials case-insensitively without mutating the parent", () => {
+    const parent = Object.freeze({
+      Path: "C:/Windows/System32", TEMP: "C:/test-temp",
+      LLM_API_KEY: "test-only", OpenAI_API_KEY: "test-only",
+      DEEPSEEK_API_KEY: "test-only", NEO4J_URI: "test-only",
+      NEO4J_TEST_PASSWORD: "test-only", QDRANT_API_KEY: "test-only",
+      rag_backend: "qdrant", RAG_EMBEDDING_PROVIDER: "siliconflow",
+      python_dotenv_disabled: "0", PYTHON_DOTENV_DISABLED: "0",
+    });
+    expect(withoutPythonOverrides(parent)).toEqual({ Path: parent.Path, TEMP: parent.TEMP, PYTHON_DOTENV_DISABLED: "1" });
+    expect(parent.LLM_API_KEY).toBe("test-only");
+    expect(parent.PYTHON_DOTENV_DISABLED).toBe("0");
   });
 });

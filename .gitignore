@@ -40,3 +40,10 @@ backups/
 deploy-state/
 .operations-test/
 .operations-test-*/
+
+# Local deployment recovery copies and generated task output
+/deploy-data-backups/
+/deploy-data.rollback-*/
+/output/
+/tmp/
+/tmp????????/

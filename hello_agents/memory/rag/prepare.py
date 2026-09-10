@@ -9,10 +9,40 @@ from typing import Any
 
 from app.import_models import ProgressCallback
 from hello_agents.memory.rag.contracts import DocumentSegment, PreparedChunk
+from hello_agents.memory.rag.embedding_profile import EmbeddingFailure
+from hello_agents.memory.rag.embedding_runtime import RAGEmbeddingRuntime, validate_texts
 
 
 PROJECT_POINT_NAMESPACE_UUID = uuid.UUID("c273c00a-40ac-47a9-b475-164f135ada18")
 logger = logging.getLogger(__name__)
+_SECRET_METADATA_KEYS = {
+    "apikey", "authorization", "accesstoken", "refreshtoken", "secret",
+    "password", "token",
+}
+
+
+def is_secret_metadata_key(key: object) -> bool:
+    normalized = "".join(
+        character for character in str(key).strip().lower()
+        if character.isalnum()
+    )
+    return (
+        normalized in _SECRET_METADATA_KEYS
+        or normalized.endswith("apikey")
+        or normalized.endswith("password")
+        or normalized.endswith("secret")
+    )
+
+
+def contains_secret_metadata(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(
+            is_secret_metadata_key(key) or contains_secret_metadata(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(contains_secret_metadata(item) for item in value)
+    return False
 
 
 def utc_now_iso() -> str:
@@ -38,12 +68,16 @@ def json_safe_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [json_safe_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): json_safe_value(item) for key, item in value.items()}
+        return json_safe_dict(value)
     return str(value)
 
 
 def json_safe_dict(data: dict[str, Any]) -> dict[str, Any]:
-    return {str(key): json_safe_value(value) for key, value in data.items()}
+    return {
+        str(key): json_safe_value(value)
+        for key, value in data.items()
+        if not is_secret_metadata_key(key)
+    }
 
 
 def normalize_vector(vector: Any) -> list[float]:
@@ -100,63 +134,72 @@ def prepare_document_chunks(
     segments: Sequence[DocumentSegment],
     rag_namespace: str,
     split_text: Callable[[str], list[str]],
-    embed_text: Callable[[str], list[float]],
+    embed_text: Callable[[str], list[float]] | None,
     id_for_chunk: Callable[[str, str, int], str] | None = None,
     progress_callback: ProgressCallback | None = None,
+    *,
+    embedding_runtime: RAGEmbeddingRuntime | None = None,
 ) -> list[PreparedChunk]:
     if not document_id:
         raise ValueError("document_id is required")
+    if not isinstance(rag_namespace, str) or not rag_namespace.strip():
+        raise ValueError("rag_namespace is required")
+    if ((embedding_runtime is None and not callable(embed_text))
+            or (embedding_runtime is not None and embed_text is not None)):
+        raise EmbeddingFailure("configuration")
 
     id_for_chunk = id_for_chunk or qdrant_point_id
     pending: list[tuple[dict[str, Any], str]] = []
-
     for segment in segments:
         if not segment.content or not segment.content.strip():
             continue
-
         segment_metadata = json_safe_dict(segment.metadata or {})
         for chunk_text in split_text(segment.content):
             chunk_text = str(chunk_text).strip()
-            if not chunk_text:
-                continue
+            if chunk_text:
+                pending.append((segment_metadata, chunk_text))
 
-            pending.append((segment_metadata, chunk_text))
+    total_chunks = len(pending)
+    vectors: list[list[float]] = []
+    if embedding_runtime is not None:
+        texts = [text for _, text in pending]
+        validate_texts(texts)
+        for start in range(0, total_chunks, embedding_runtime.batch_size):
+            batch = texts[start:start + embedding_runtime.batch_size]
+            vectors.extend(embedding_runtime.embed_documents(batch))
+            report_progress(progress_callback, "embedding", len(vectors),
+                            total_chunks, "embedding")
 
     prepared: list[PreparedChunk] = []
-    total_chunks = len(pending)
     for chunk_index, (segment_metadata, chunk_text) in enumerate(pending):
         chunk_id = id_for_chunk(rag_namespace, document_id, chunk_index)
         now = utc_now_iso()
         metadata = {
-                "memory_id": chunk_id,
-                "document_id": document_id,
-                "chunk_index": chunk_index,
-                "content": chunk_text,
-                "memory_type": "rag_chunk",
-                "is_rag_data": True,
-                "data_source": "rag_pipeline",
-                "rag_namespace": rag_namespace,
-                "created_at": now,
-                "updated_at": now,
-                "document_version": 1,
-                **segment_metadata,
-            }
-
-        prepared.append(
-            PreparedChunk(
-                id=chunk_id,
-                document_id=document_id,
-                content=chunk_text,
-                vector=normalize_vector(embed_text(chunk_text)),
-                metadata=json_safe_dict(metadata),
-            )
-        )
-        report_progress(
-            progress_callback,
-            "embedding",
-            chunk_index + 1,
-            total_chunks,
-            "embedding",
-        )
-
+            **segment_metadata,
+            "memory_id": chunk_id,
+            "document_id": document_id,
+            "chunk_index": chunk_index,
+            "content": chunk_text,
+            "memory_type": "rag_chunk",
+            "is_rag_data": True,
+            "data_source": "rag_pipeline",
+            "rag_namespace": rag_namespace,
+            "created_at": now,
+            "updated_at": now,
+            "document_version": 1,
+        }
+        metadata.pop("_vector_store_id", None)
+        metadata.pop("embedding_fingerprint", None)
+        if embedding_runtime is not None:
+            metadata["embedding_fingerprint"] = embedding_runtime.profile.fingerprint
+            vector = vectors[chunk_index]
+        else:
+            vector = normalize_vector(embed_text(chunk_text))
+        prepared.append(PreparedChunk(
+            id=chunk_id, document_id=document_id, content=chunk_text,
+            vector=vector, metadata=json_safe_dict(metadata),
+        ))
+        if embedding_runtime is None:
+            report_progress(progress_callback, "embedding", chunk_index + 1,
+                            total_chunks, "embedding")
     return prepared

@@ -227,6 +227,13 @@ def run_deep_inside() -> int:
     from app.database import initialize_database
     from app.session import SessionRegistry
     from app.storage import UserStorage
+    from hello_agents.memory.rag.embedding_runtime import build_rag_embedding
+    from hello_agents.memory.rag.index_identity import IndexIdentity
+    from hello_agents.memory.rag.index_registry import (
+        IndexRecord,
+        IndexRegistry,
+        IndexValidation,
+    )
 
     temp_root = Path(tempfile.mkdtemp(prefix="deployment-smoke-"))
     registry = None
@@ -238,6 +245,25 @@ def run_deep_inside() -> int:
         data_root = temp_root / "data"
         initialize_database(db_path)
         storage = UserStorage(data_root)
+        embedding = build_rag_embedding(os.environ, backend="qdrant")
+        if embedding.profile.provider != "simple":
+            base_collection = os.getenv("QDRANT_COLLECTION", "doc_learning_vectors")
+            identity = IndexIdentity("qdrant", base_collection, embedding.profile)
+            IndexRegistry(data_root).save([
+                IndexRecord(
+                    identity=identity,
+                    source_index=base_collection,
+                    migration_id=f"smoke-{uuid.uuid4().hex}",
+                    validation=IndexValidation(
+                        passed=True,
+                        checked_at="2026-09-03T00:00:00Z",
+                        chunk_count=0,
+                        content_digest="0" * 64,
+                        scope_leaks=0,
+                    ),
+                    state="active",
+                )
+            ])
         registry = SessionRegistry(db_path=db_path, storage=storage)
         username = f"smoke-{uuid.uuid4().hex[:12]}"
         token = registry.register(username, "Smoke password 123")

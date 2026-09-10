@@ -182,6 +182,25 @@ class QaService:
             str(session.user_id)
         )
 
+    def recent_completed_turns(self, session_token: str, *, limit: int = 5):
+        session = self.session_registry.get_session(session_token)
+        self._ensure_migrated(session)
+        return self.repository.list_recent_completed_turns(
+            str(session.user_id), limit=limit
+        )
+
+    def completed_turn_count(self, session_token: str) -> int:
+        session = self.session_registry.get_session(session_token)
+        self._ensure_migrated(session)
+        return self.repository.count_completed_turns(str(session.user_id))
+
+    def completed_activity_dates(self, session_token: str, *, since: str):
+        session = self.session_registry.get_session(session_token)
+        self._ensure_migrated(session)
+        return self.repository.list_completed_activity_dates(
+            str(session.user_id), since=since
+        )
+
     def ask(
         self,
         session_token: str,

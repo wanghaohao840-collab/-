@@ -125,6 +125,8 @@ async def handle_validation_error(
     request: Request,
     exc: RequestValidationError,
 ) -> JSONResponse:
+    if request.url.path == '/api/v1/learning' or request.url.path.startswith('/api/v1/learning/'):
+        return error_response(422, 'LEARNING_VALIDATION_ERROR', '学习请求参数无效，请检查后重试')
     if request.url.path.startswith("/api/v1/notes"):
         return error_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

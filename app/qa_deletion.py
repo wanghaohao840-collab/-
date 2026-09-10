@@ -39,9 +39,10 @@ class _DeletionPayload:
 class QaDeletionRepository:
     """Durable, user-scoped deletion fences with opaque cleanup payloads."""
 
-    def __init__(self, db_path: Path | str, note_repository: NoteRepository | None = None) -> None:
+    def __init__(self, db_path: Path | str, note_repository: NoteRepository | None = None, *, learning_repository=None) -> None:
         self.db_path = Path(db_path)
         self.note_repository = note_repository
+        self.learning_repository = learning_repository
 
     def create_conversation_deletion(
         self, user_id: str, conversation_id: str, *, now: str | None = None
@@ -511,6 +512,10 @@ class QaDeletionRepository:
                 conn.commit()
                 return False
             conversation_ids = tuple(json.loads(row["conversation_ids_json"]))
+            if row["target_type"] == "document" and self.learning_repository is not None:
+                self.learning_repository.delete_document_in_transaction(
+                    conn, user_id=row["user_id"], document_id=row["target_id"]
+                )
             if self.note_repository is not None:
                 if row["target_type"] == "document":
                     self.note_repository.scrub_sources_in_transaction(

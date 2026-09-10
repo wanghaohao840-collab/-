@@ -8,9 +8,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping
 
+from app.document_search import SearchChunkLocator, DocumentSearchValidationError
+
 
 ProjectionState = Literal["pending", "ready", "failed"]
-SourceKind = Literal["qa_message", "qa_citation"]
+SourceKind = Literal["qa_message", "qa_citation", "document_chunk"]
 ProjectionOperation = Literal["upsert", "delete"]
 ProjectionTaskStatus = Literal["queued", "running", "failed", "completed"]
 
@@ -33,6 +35,10 @@ class NoteSourceNotFoundError(NoteNotFoundError):
 
 class NoteSourceDeletingError(NoteError):
     code = "NOTE_SOURCE_DELETING"
+
+
+class NoteSourceUnavailableError(NoteError):
+    code = "NOTE_SOURCE_UNAVAILABLE"
 
 
 class NoteVersionConflict(NoteError):
@@ -64,8 +70,22 @@ class NewNoteSource:
     excerpt_snapshot: str | None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"qa_message", "qa_citation"}:
+        if self.kind not in {"qa_message", "qa_citation", "document_chunk"}:
             raise NoteValidationError("source kind is invalid")
+        if self.kind == "document_chunk":
+            if any(value is not None for value in (self.qa_thread_id, self.qa_message_id, self.citation_id)):
+                raise NoteValidationError("QA fields are not allowed for document sources")
+            if not isinstance(self.locator, dict):
+                raise NoteValidationError("document source locator is invalid")
+            locator = self.locator
+            if type(locator.get("chunk_index")) is not int:
+                raise NoteValidationError("document source chunk index is invalid")
+            try:
+                SearchChunkLocator(self.document_id, locator.get("chunk_id"), locator.get("chunk_index"), locator.get("content_sha256"))
+            except (DocumentSearchValidationError, TypeError) as exc:
+                raise NoteValidationError("document source locator is invalid") from exc
+            if self.excerpt_snapshot is None or len(self.excerpt_snapshot) > 1200:
+                raise NoteValidationError("document source excerpt is invalid")
         object.__setattr__(self, "locator", freeze_locator(self.locator))
 
 
@@ -166,6 +186,16 @@ class NoteSourceSelector:
             raise NoteValidationError("citation_id is required")
         if self.kind == "qa_answer" and self.citation_id is not None:
             raise NoteValidationError("citation_id is not allowed for an answer")
+
+
+@dataclass(frozen=True)
+class DocumentChunkSourceSelector:
+    kind: Literal["document_chunk"]
+    locator: SearchChunkLocator
+
+    def __post_init__(self) -> None:
+        if self.kind != "document_chunk" or not isinstance(self.locator, SearchChunkLocator):
+            raise NoteValidationError("document source selector is invalid")
 
 
 def normalize_tag(tag: str) -> tuple[str, str]:

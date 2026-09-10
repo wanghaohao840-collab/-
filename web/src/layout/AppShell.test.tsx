@@ -168,7 +168,7 @@ describe("AppShell", () => {
     fetchMock.mockReset();
   });
 
-  it("uses one exact six-item source for desktop and mobile navigation", async () => {
+  it("uses one exact seven-item source for desktop and mobile navigation", async () => {
     mockAuthenticatedSession();
     renderShell();
 
@@ -179,11 +179,12 @@ describe("AppShell", () => {
       ["/search", "文献检索"],
       ["/notes", "学习笔记"],
       ["/insights", "学习洞察"],
+      ["/learning", "学习中心"],
     ]);
 
     const desktopNav = await screen.findByLabelText("主导航");
     expect(desktopNav).toHaveRole("navigation");
-    expect(within(desktopNav).getAllByRole("link", { hidden: true })).toHaveLength(6);
+    expect(within(desktopNav).getAllByRole("link", { hidden: true })).toHaveLength(7);
     const mobileNav = screen.getByRole("navigation", { name: "移动导航" });
     expect(within(mobileNav).getAllByRole("link")).toHaveLength(4);
     expect(within(mobileNav).getByRole("button", { name: "更多" })).toBeVisible();
@@ -230,6 +231,7 @@ describe("AppShell", () => {
       "/insights",
     );
     expect(within(drawer).getByRole("button", { name: "账户" })).toBeVisible();
+    expect(within(drawer).getByRole("link", { name: "学习中心" })).toHaveAttribute("href", "/learning");
     expect(within(drawer).getByRole("button", { name: "退出登录" })).toBeVisible();
   });
 
@@ -269,6 +271,8 @@ describe("AppShell", () => {
     expect(drawerStyles.overscrollBehavior).toBe("contain");
 
     await user.tab();
+    await user.tab();
+    expect(within(drawer).getByRole("link", { name: "学习中心" })).toHaveFocus();
     await user.tab();
     await user.tab();
 

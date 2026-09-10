@@ -14,7 +14,7 @@ services:
       APP_HOST: "0.0.0.0"
       APP_PORT: "${APP_PORT:-7860}"
     ports:
-      - "${APP_BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-7860}:${APP_PORT:-7860}"
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-7860}:${APP_PORT:-7860}"
     volumes:
       - "${DEPLOY_DATA_ROOT:-./deploy-data}/app:/app/data"
     depends_on:
@@ -23,6 +23,9 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    cpus: "${APP_CPU_LIMIT:-2.0}"
+    mem_limit: "${APP_MEMORY_LIMIT:-2g}"
+    pids_limit: ${APP_PIDS_LIMIT:-256}
     logging:
       driver: local
       options:
@@ -51,6 +54,9 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    cpus: "${QDRANT_CPU_LIMIT:-2.0}"
+    mem_limit: "${QDRANT_MEMORY_LIMIT:-2g}"
+    pids_limit: ${QDRANT_PIDS_LIMIT:-256}
     logging:
       driver: local
       options:
@@ -81,6 +87,9 @@ services:
     networks:
       - app_net
     restart: unless-stopped
+    cpus: "${NEO4J_CPU_LIMIT:-2.0}"
+    mem_limit: "${NEO4J_MEMORY_LIMIT:-2g}"
+    pids_limit: ${NEO4J_PIDS_LIMIT:-256}
     logging:
       driver: local
       options:

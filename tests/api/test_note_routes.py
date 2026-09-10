@@ -12,6 +12,99 @@ from app.session import InvalidCsrfTokenError, InvalidSessionError
 from app.bootstrap import ApplicationServices
 from app.qa_models import QaDocumentCandidate
 from api.schemas.notes import source_response
+from app.database import connect as connect_for_test
+
+
+def test_document_chunk_note_api_uses_verified_source_and_rejects_tampering(tmp_path, monkeypatch):
+    from uuid import uuid4
+    from app.note_repository import scrub_sources_in_transaction
+    services = ApplicationServices.create(tmp_path / "data")
+    doc = str(uuid4())
+    with TestClient(create_api_app(services), raise_server_exceptions=False) as client:
+        registered = client.post("/api/v1/auth/register", json={"username": "alice", "password": "correct horse battery"})
+        headers = {"X-CSRF-Token": registered.json()["csrf_token"]}
+        session = services.session_registry.get_session(client.cookies.get("zhiyan_session"))
+        monkeypatch.setattr(services.document_library, "list_documents", lambda token: (
+            [SimpleNamespace(document_id=doc, name="authoritative.pdf")]
+            if services.session_registry.get_session(token).user_id == session.user_id else []
+        ))
+        calls = []
+        def execute(action, **kwargs):
+            calls.append(action)
+            assert action == "get_document_chunk"
+            return SimpleNamespace(success=True, data={"chunk": {
+                "document_id": doc, "chunk_id": "chunk-0", "chunk_index": 0,
+                "content_sha256": "a" * 64, "content": "verified source text",
+                "page_number": 2, "section": "Methods",
+            }})
+        monkeypatch.setattr(session.runtime.rag_tool, "execute_result", execute)
+        source = {"kind": "document_chunk", "locator": {
+            "document_id": doc, "chunk_id": "chunk-0", "chunk_index": 0, "content_sha256": "a" * 64,
+        }}
+        body = {"body_markdown": "my own edited note", "client_request_id": "doc-note", "source": source}
+        assert client.post("/api/v1/notes", json=body).status_code == 403
+        for bad in (source | {"title_snapshot": "fake"}, source | {"qa_message_id": "fake"}, source | {"locator": source["locator"] | {"content": "fake"}}):
+            assert client.post("/api/v1/notes", headers=headers, json=body | {"source": bad}).status_code == 422
+        assert calls == []
+        response = client.post("/api/v1/notes", headers=headers, json=body)
+        assert response.status_code == 201, response.text
+        note = response.json()
+        assert note["body_markdown"] == "my own edited note"
+        assert note["sources"][0]["kind"] == "document_chunk"
+        assert note["sources"][0]["title_snapshot"] == "authoritative.pdf"
+        assert note["sources"][0]["excerpt_snapshot"] == "verified source text"
+        assert client.get("/api/v1/notes?source_kind=document_chunk").json()["items"][0]["id"] == note["id"]
+        stale = body | {"client_request_id": "stale", "source": source | {"locator": source["locator"] | {"content_sha256": "b" * 64}}}
+        assert client.post("/api/v1/notes", headers=headers, json=stale).status_code == 404
+        with connect_for_test(services.db_path) as conn:
+            scrub_sources_in_transaction(conn, user_id=session.user_id, document_id=doc, deleted_at="2026-09-04T12:00:00Z")
+        before_replay = len(calls)
+        replay = client.post("/api/v1/notes", headers=headers, json=body)
+        assert replay.status_code == 200
+        assert replay.json()["sources"][0]["deleted"]
+        assert replay.json()["sources"][0]["locator"] is None
+        assert len(calls) == before_replay
+        other = client.post("/api/v1/auth/register", json={"username": "bob", "password": "correct horse battery"})
+        assert client.get(f"/api/v1/notes/{note['id']}").status_code == 404
+        foreign = client.post("/api/v1/notes", headers={"X-CSRF-Token": other.json()["csrf_token"]}, json=body)
+        assert foreign.status_code == 404
+        assert len(calls) == before_replay
+
+
+def test_document_source_backend_error_is_safe_503(tmp_path, monkeypatch):
+    from uuid import uuid4
+    from app.document_search import DocumentSearchUnavailableError
+    services = ApplicationServices.create(tmp_path / "data")
+    with TestClient(create_api_app(services), raise_server_exceptions=False) as client:
+        registered = client.post("/api/v1/auth/register", json={"username": "alice", "password": "correct horse battery"})
+        def fail(*args):
+            raise DocumentSearchUnavailableError("sk-private-key endpoint")
+        monkeypatch.setattr(services.document_search, "resolve_chunk", fail)
+        response = client.post("/api/v1/notes", headers={"X-CSRF-Token": registered.json()["csrf_token"]}, json={
+            "body_markdown": "body", "client_request_id": "unavailable", "source": {"kind": "document_chunk", "locator": {
+                "document_id": str(uuid4()), "chunk_id": "chunk", "chunk_index": 0, "content_sha256": "a" * 64,
+            }},
+        })
+        assert response.status_code == 503
+        assert response.json()["error"]["retryable"]
+        assert "sk-private-key" not in response.text
+
+
+def test_session_expiry_during_document_resolution_remains_401(tmp_path, monkeypatch):
+    from uuid import uuid4
+    services = ApplicationServices.create(tmp_path / "data")
+    with TestClient(create_api_app(services), raise_server_exceptions=False) as client:
+        registered = client.post("/api/v1/auth/register", json={"username": "alice", "password": "correct horse battery"})
+        def expire(*args):
+            raise InvalidSessionError("expired")
+        monkeypatch.setattr(services.document_search, "resolve_chunk", expire)
+        response = client.post("/api/v1/notes", headers={"X-CSRF-Token": registered.json()["csrf_token"]}, json={
+            "body_markdown": "body", "client_request_id": "expired", "source": {"kind": "document_chunk", "locator": {
+                "document_id": str(uuid4()), "chunk_id": "chunk", "chunk_index": 0, "content_sha256": "a" * 64,
+            }},
+        })
+        assert response.status_code == 401
+        assert response.json()["error"]["code"] == "invalid_session"
 
 
 @dataclass

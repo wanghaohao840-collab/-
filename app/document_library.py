@@ -54,12 +54,10 @@ class DocumentLibraryService:
         user_id = str(session.user_id)
         with session.runtime.lock:
             history = session.runtime.history.load()
-            latest = self._latest_records(history.get("documents", []))
             items = [
                 item
-                for record in latest.values()
-                if (item := self._project_record(user_id, record)) is not None
-                and (
+                for item in self.project_history_documents(user_id, history.get("documents", []))
+                if (
                     self.deletion_repository is None
                     or not self.deletion_repository.has_active_fence(
                         user_id, "document", item.document_id
@@ -80,6 +78,17 @@ class DocumentLibraryService:
             key=lambda item: item.document_id,
         )
         return tuple((*dated, *undated))
+
+    def project_history_documents(self, user_id: str, records: object) -> tuple[DocumentLibraryItem, ...]:
+        """Shared stored-record projection, not an authorization boundary.
+
+        Callers own authentication, deletion fences and stable source reads.
+        This method does not create directories or load runtime/history state.
+        """
+        return tuple(
+            item for record in self._latest_records(records).values()
+            if (item := self._project_record(user_id, record)) is not None
+        )
 
     def delete_document(self, session_token: str, document_id: str):
         if self.deletion_service is not None:

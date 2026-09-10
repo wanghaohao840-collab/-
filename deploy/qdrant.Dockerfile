@@ -7,5 +7,6 @@ RUN test -d /qdrant/static \
     && install -d -o 0 -g 0 -m 0755 /qdrant/static
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends wget \
+    && apt-get install --yes --no-install-recommends wget openssl libssl3t64 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge '3.5.7-1~deb13u2' \
     && rm -rf /var/lib/apt/lists/*

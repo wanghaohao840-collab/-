@@ -5,6 +5,7 @@ python-dotenv>=1.0.0
 openai>=1.0.0
 httpx==0.28.1
 qdrant-client==1.18.0
+ijson==3.4.0.post0
 neo4j>=5.20,<6
 pytest==8.4.1
 fastapi>=0.115,<1

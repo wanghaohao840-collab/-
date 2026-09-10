@@ -1,0 +1,185 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "zh-1",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-1",
+      "content": "叶绿体利用光能把二氧化碳和水转化为有机物并释放氧气。",
+      "question": "什么是光合作用？"
+    },
+    {
+      "id": "zh-2",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-2",
+      "content": "物体加速度与合外力成正比，与质量成反比。",
+      "question": "什么是牛顿第二定律？"
+    },
+    {
+      "id": "zh-3",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-3",
+      "content": "相同金额的货币在今天通常比未来更有价值。",
+      "question": "什么是货币时间价值？"
+    },
+    {
+      "id": "zh-4",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-4",
+      "content": "递归函数通过调用自身把问题分解为更小的同类问题。",
+      "question": "什么是递归？"
+    },
+    {
+      "id": "zh-5",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-5",
+      "content": "细胞膜控制物质进出并维持细胞内部环境稳定。",
+      "question": "什么是细胞膜？"
+    },
+    {
+      "id": "zh-6",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-6",
+      "content": "条件概率表示在事件B已经发生时事件A发生的概率。",
+      "question": "什么是概率条件？"
+    },
+    {
+      "id": "zh-7",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-7",
+      "content": "文艺复兴推动欧洲艺术科学与人文思想的发展。",
+      "question": "什么是文艺复兴？"
+    },
+    {
+      "id": "zh-8",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-8",
+      "content": "价格通常在需求增加或供给减少时上升。",
+      "question": "什么是供需关系？"
+    },
+    {
+      "id": "zh-9",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-9",
+      "content": "数据库索引用额外存储换取更快的查询定位。",
+      "question": "什么是数据库索引？"
+    },
+    {
+      "id": "zh-10",
+      "language": "zh",
+      "namespace": "eval-zh",
+      "document_id": "zh-learning-handbook",
+      "chunk_id": "zh-chunk-10",
+      "content": "温室气体增加会增强地球系统的辐射强迫。",
+      "question": "什么是气候变化？"
+    },
+    {
+      "id": "en-1",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-1",
+      "content": "Binary search halves a sorted search interval after every comparison.",
+      "question": "What is binary search?"
+    },
+    {
+      "id": "en-2",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-2",
+      "content": "Plate tectonics explains movement of Earth's lithospheric plates.",
+      "question": "What is plate tectonics?"
+    },
+    {
+      "id": "en-3",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-3",
+      "content": "Compound interest earns returns on principal and accumulated interest.",
+      "question": "What is compound interest?"
+    },
+    {
+      "id": "en-4",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-4",
+      "content": "Memory cells enable a faster response after later exposure to an antigen.",
+      "question": "What is immune memory?"
+    },
+    {
+      "id": "en-5",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-5",
+      "content": "Database normalization reduces redundant data and update anomalies.",
+      "question": "What is normalization?"
+    },
+    {
+      "id": "en-6",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-6",
+      "content": "Opportunity cost is the value of the best alternative forgone.",
+      "question": "What is opportunity cost?"
+    },
+    {
+      "id": "en-7",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-7",
+      "content": "Mitosis produces two genetically similar daughter cells.",
+      "question": "What is mitosis?"
+    },
+    {
+      "id": "en-8",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-8",
+      "content": "Cache locality improves performance by reusing nearby memory locations.",
+      "question": "What is cache locality?"
+    },
+    {
+      "id": "en-9",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-9",
+      "content": "Natural selection changes populations through differential reproductive success.",
+      "question": "What is natural selection?"
+    },
+    {
+      "id": "en-10",
+      "language": "en",
+      "namespace": "eval-en",
+      "document_id": "en-learning-handbook",
+      "chunk_id": "en-chunk-10",
+      "content": "Encryption transforms plaintext into ciphertext using a cryptographic key.",
+      "question": "What is encryption?"
+    }
+  ]
+}

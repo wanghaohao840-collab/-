@@ -10,6 +10,15 @@ const note: Note = { id: "n1", body_markdown: "# 服务端内容", concept: "RAG
 describe("NotesWorkspace", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("labels and filters document sources without calling them QA answers", () => {
+    const sourced: Note = { ...note, sources: [{ id: "s1", kind: "document_chunk", deleted: false, qa_thread_id: null, qa_message_id: null, citation_id: null, document_id: "doc1", locator: { chunk_index: 0 }, title_snapshot: "资料.md", excerpt_snapshot: "文档摘录", created_at: "2026-01-01", source_deleted_at: null }] };
+    render(<NotesWorkspace items={[sourced]} selectedNote={sourced} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
+    const panel = screen.getByRole("complementary", { name: "笔记来源" });
+    expect(within(panel).getByText("文档片段")).toBeVisible();
+    expect(within(panel).queryByText("问答回答")).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "文档片段" })).toHaveValue("document_chunk");
+  });
+
   it("keeps a draft local until the explicit save action", async () => {
     const user = userEvent.setup();
     const save = vi.fn();

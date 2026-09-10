@@ -5,10 +5,13 @@ import { AppShell } from "./layout/AppShell";
 import { navigationItems } from "./layout/navigation";
 import { LoginPage } from "./pages/LoginPage";
 import { DocumentsPage } from "./pages/DocumentsPage";
-import { MigrationPage } from "./pages/MigrationPage";
 import { NotesPage } from "./pages/NotesPage";
 import { QaPage } from "./pages/QaPage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { OverviewPage } from "./pages/OverviewPage";
+import { InsightsPage } from "./pages/InsightsPage";
+import { SearchPage } from "./pages/SearchPage";
+import { LearningPage } from "./pages/LearningPage";
 
 export function App() {
   return (
@@ -22,10 +25,13 @@ export function App() {
               key={item.path}
               path={item.path}
               element={
+                item.path === "/overview" ? <OverviewPage /> :
                 item.path === "/documents" ? <DocumentsPage /> :
+                item.path === "/search" ? <SearchPage /> :
+                item.path === "/learning" ? <LearningPage /> :
                 item.path === "/qa" ? <QaPage /> : (
                   item.path === "/notes" ? <NotesPage /> :
-                  <MigrationPage heading={item.heading} />
+                  <InsightsPage />
                 )
               }
             />

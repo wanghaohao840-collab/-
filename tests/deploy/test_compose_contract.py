@@ -43,6 +43,15 @@ def test_only_app_publishes_a_host_port():
     assert "http://127.0.0.1:6333/readyz" in qdrant_block
 
 
+def test_qdrant_installs_fixed_openssl_and_update_does_not_reuse_security_cache():
+    dockerfile = (ROOT / "deploy" / "qdrant.Dockerfile").read_text(encoding="utf-8")
+    updater = (ROOT / "deploy" / "windows" / "Update-Deployment.ps1").read_text(encoding="utf-8")
+    assert "wget openssl libssl3t64" in dockerfile
+    assert "dpkg --compare-versions" in dockerfile
+    assert "3.5.7-1~deb13u2" in dockerfile
+    assert "@('build', '--pull', '--no-cache', 'app', 'qdrant')" in updater
+
+
 def test_services_use_stable_local_images_and_bounded_logs():
     source = COMPOSE.read_text(encoding="utf-8")
 
@@ -51,6 +60,9 @@ def test_services_use_stable_local_images_and_bounded_logs():
     assert source.count("driver: local") == 3
     assert source.count('max-size: "10m"') == 3
     assert source.count('max-file: "5"') == 3
+    assert source.count("mem_limit:") == 3
+    assert source.count("pids_limit:") == 3
+    assert source.count("cpus:") == 3
 
 
 def test_app_runs_as_the_deployment_account():
@@ -71,13 +83,14 @@ def test_app_uses_unified_runtime_port_and_persistent_data_directory():
     assert 'APP_HOST: "0.0.0.0"' in app_block
     assert 'APP_PORT: "${APP_PORT:-7860}"' in app_block
     assert (
-        '"${APP_BIND_ADDRESS:-0.0.0.0}:${APP_PORT:-7860}:'
+        '"${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-7860}:'
         '${APP_PORT:-7860}"'
     ) in app_block
     assert '"${DEPLOY_DATA_ROOT:-./deploy-data}/app:/app/data"' in app_block
     assert "GRADIO_SERVER_NAME" not in app_block
     assert "GRADIO_SERVER_PORT" not in app_block
-    assert "APP_HOST=0.0.0.0" in env_source
+    assert "APP_HOST=127.0.0.1" in env_source
+    assert "APP_BIND_ADDRESS=127.0.0.1" in env_source
 
 
 def test_environment_template_contains_no_real_secret():

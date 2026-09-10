@@ -80,6 +80,7 @@ class RAGTool(Tool):
         graph_service: Any = None,
         enable_graph: Optional[bool] = None,
         graph_state_path: Optional[str] = None,
+        data_root: Path | str | None = None,
     ):
         super().__init__(
             name="rag",
@@ -92,6 +93,7 @@ class RAGTool(Tool):
         self.collection_name = collection_name
         self.rag_namespace = rag_namespace
         self.cache_path = cache_path
+        self.data_root = Path(data_root) if data_root is not None else None
         self.graph_service = graph_service
         self.graph_configuration_error: Optional[str] = None
 
@@ -113,6 +115,7 @@ class RAGTool(Tool):
             collection_name=self.collection_name,
             rag_namespace=self.rag_namespace,
             cache_path=self.cache_path,
+            data_root=self.data_root,
         )
 
         self._pipelines[self.rag_namespace] = default_pipeline
@@ -407,6 +410,9 @@ class RAGTool(Tool):
             if action == "search":
                 return self._search(**kwargs)
 
+            if action == "get_document_chunk":
+                return self._get_document_chunk(**kwargs)
+
             if action in ["citation", "cite", "format_citations"]:
                 return self._citation(**kwargs)
 
@@ -452,6 +458,13 @@ class RAGTool(Tool):
             dict(getattr(self, "_last_action_data", {}) or {}),
             file_path=file_path,
         )
+        # Only these internally constructed, allowlisted source DTOs carry document
+        # data, not exception text. Preserve URLs/Unicode and the bounded excerpt.
+        raw_data = self._last_action_data
+        if normalized_action == "search" and "results" in raw_data:
+            data["results"] = raw_data["results"]
+        elif normalized_action == "get_document_chunk" and "chunk" in raw_data:
+            data["chunk"] = raw_data["chunk"]
         success = data.get("success")
         if success is None:
             success = not self._looks_like_failure(message)
@@ -595,6 +608,7 @@ class RAGTool(Tool):
                 collection_name=self.collection_name,
                 rag_namespace=namespace,
                 cache_path=self.cache_path,
+                data_root=self.data_root,
             )
 
         return self._pipelines[namespace]
@@ -1382,9 +1396,17 @@ class RAGTool(Tool):
         )
 
         if not results:
+            self._last_action_data = {"success": True, "results": [], "result_count": 0}
             if scope:
                 return f"🔍 未在所选文档 {', '.join(scope)} 中找到与 '{query}' 相关的知识"
             return f"🔍 未找到与 '{query}' 相关的知识"
+
+        structured_results = [self._structured_search_hit(item) for item in results]
+        self._last_action_data = {
+            "success": True,
+            "results": structured_results,
+            "result_count": len(structured_results),
+        }
 
         lines = [f"🔍 找到 {len(results)} 条相关知识:"]
 
@@ -1404,6 +1426,50 @@ class RAGTool(Tool):
                 lines.append(f"{title}\n内容摘要:\n{content}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _structured_search_hit(item: Dict[str, Any]) -> Dict[str, Any]:
+        metadata = item.get("metadata", {}) or {}
+        content = str(item.get("content") or "")
+        try:
+            chunk_index = int(metadata.get("chunk_index"))
+        except (TypeError, ValueError):
+            chunk_index = None
+        return {
+            "document_id": str(metadata.get("document_id") or ""),
+            "chunk_id": str(item.get("id") or ""),
+            "chunk_index": chunk_index,
+            "content": content[:1200],
+            "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "score": float(item.get("score", 0.0)),
+            "page_number": metadata.get("page_number"),
+            "section": str(metadata.get("section") or "")[:200] or None,
+        }
+
+    def _get_document_chunk(
+        self,
+        document_id: str,
+        chunk_id: str,
+        chunk_index: int,
+        rag_namespace: Optional[str] = None,
+        **_kwargs,
+    ) -> str:
+        document_id = str(document_id or "").strip()
+        chunk_id = str(chunk_id or "").strip()
+        if not document_id or not chunk_id or int(chunk_index) < 0:
+            self._last_action_data = {"success": False, "chunk": None}
+            return "❌ 文档片段标识无效"
+
+        pipeline = self._get_pipeline(rag_namespace)
+        item = pipeline.get_document_chunk(document_id, chunk_id, int(chunk_index))
+        if item is None:
+            self._last_action_data = {"success": False, "chunk": None}
+            return "❌ 文档片段不存在或已变化"
+
+        self._last_action_data = {
+            "success": True, "chunk": self._structured_search_hit({**item, "score": 1.0})
+        }
+        return "文档片段已解析"
 
     def _ask(
         self,

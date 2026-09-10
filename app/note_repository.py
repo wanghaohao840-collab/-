@@ -76,6 +76,18 @@ class NoteRepository:
         finally:
             conn.close()
 
+    def list_activity_dates(self, user_id: str, *, since: str) -> tuple[str, ...]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                select created_at from notes
+                where user_id = ? and deleted_at is null and created_at >= ?
+                order by created_at
+                """,
+                (user_id, since),
+            ).fetchall()
+        return tuple(row["created_at"] for row in rows)
+
     def create_in_transaction(
         self,
         conn: sqlite3.Connection,
@@ -204,7 +216,7 @@ class NoteRepository:
             raise NoteValidationError("limit must be between 1 and 50")
         if sort != "updated_desc":
             raise NoteValidationError("sort is invalid")
-        if source_kind is not None and source_kind not in {"qa_message", "qa_citation"}:
+        if source_kind is not None and source_kind not in {"qa_message", "qa_citation", "document_chunk"}:
             raise NoteValidationError("source_kind is invalid")
         normalized_tags = tuple(normalize_tag(tag)[0] for tag in tags if normalize_tag(tag)[0])
         params: list[object] = [user_id]
@@ -223,7 +235,9 @@ class NoteRepository:
                 "exists (select 1 from note_tags t where t.user_id=n.user_id and t.note_id=n.id and t.normalized_tag=?)"
             )
             params.append(normalized_tag)
-        if source_kind is not None:
+        if source_kind == "document_chunk":
+            clauses.append("exists (select 1 from note_document_sources s where s.user_id=n.user_id and s.note_id=n.id)")
+        elif source_kind is not None:
             clauses.append(
                 "exists (select 1 from note_sources s where s.user_id=n.user_id and s.note_id=n.id and s.source_kind=?)"
             )
@@ -440,6 +454,14 @@ class NoteRepository:
             "select * from note_sources where user_id=? and note_id=? order by created_at,id",
             (user_id, note_id),
         ).fetchall()
+        source_rows.extend(conn.execute(
+            """select id,user_id,note_id,'document_chunk' as source_kind,
+               null as qa_thread_id,null as qa_message_id,null as citation_id,
+               document_id,locator_json,title_snapshot,excerpt_snapshot,source_deleted_at,created_at
+               from note_document_sources where user_id=? and note_id=?""",
+            (user_id, note_id),
+        ).fetchall())
+        source_rows.sort(key=lambda item: (item["created_at"], item["id"]))
         return Note(
             id=row["id"],
             user_id=row["user_id"],
@@ -477,6 +499,18 @@ class NoteRepository:
             if source.locator is not None
             else None
         )
+        if source.kind == "document_chunk":
+            locator = source.locator
+            conn.execute(
+                """insert into note_document_sources (
+                    id,user_id,note_id,document_id,chunk_id,chunk_index,content_sha256,
+                    locator_json,title_snapshot,excerpt_snapshot,created_at
+                ) values (?,?,?,?,?,?,?,?,?,?,?)""",
+                (str(uuid4()), user_id, note_id, source.document_id, locator["chunk_id"],
+                 locator["chunk_index"], locator["content_sha256"], locator_json,
+                 source.title_snapshot, source.excerpt_snapshot, timestamp),
+            )
+            return
         conn.execute(
             """
             insert into note_sources (
@@ -504,6 +538,20 @@ class NoteRepository:
         commits and the deletion transaction scrubs it, or the fence is observed
         and the association is rejected.
         """
+
+        if source.kind == "document_chunk":
+            # Completed fences also close the gap between resolution and insertion.
+            # Document UUIDs are not reused for a new import.
+            fence = conn.execute(
+                """select status from qa_deletion_fences
+                   where user_id=? and target_type='document' and target_id=? limit 1""",
+                (user_id, source.document_id),
+            ).fetchone()
+            if fence is not None:
+                if fence["status"] == "completed":
+                    raise NoteSourceNotFoundError(source.document_id)
+                raise NoteSourceDeletingError(source.document_id)
+            return
 
         message = conn.execute(
             """
@@ -624,8 +672,19 @@ def scrub_sources_in_transaction(
         """,
         (user_id, value),
     ).fetchall()
-    for row in rows:
-        note_id = row["note_id"]
+    note_ids = {row["note_id"] for row in rows}
+    if document_id is not None:
+        note_ids.update(row["note_id"] for row in conn.execute(
+            "select distinct note_id from note_document_sources where user_id=? and document_id=? and source_deleted_at is null",
+            (user_id, document_id),
+        ))
+        conn.execute(
+            """update note_document_sources set document_id=null,chunk_id=null,chunk_index=null,
+               content_sha256=null,locator_json=null,title_snapshot=null,excerpt_snapshot=null,
+               source_deleted_at=? where user_id=? and document_id=? and source_deleted_at is null""",
+            (deleted_at, user_id, document_id),
+        )
+    for note_id in sorted(note_ids):
         conn.execute(
             f"""
             update note_sources set qa_thread_id=null,qa_message_id=null,citation_id=null,
@@ -647,7 +706,7 @@ def scrub_sources_in_transaction(
             (version, deleted_at, note_id, user_id),
         )
         NoteRepository._enqueue(conn, user_id, note_id, version, "upsert", deleted_at)
-    return len(rows)
+    return len(note_ids)
 
 
 def _source_from_row(row: sqlite3.Row) -> NoteSource:

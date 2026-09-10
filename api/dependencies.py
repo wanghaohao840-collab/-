@@ -9,6 +9,7 @@ from app.document_library import DocumentLibraryService
 from app.import_service import ImportTaskService
 from app.qa_service import QaService
 from app.note_service import NoteService
+from app.learning_service import LearningService
 from app.session import SessionRegistry, UserSession
 
 
@@ -16,8 +17,16 @@ def get_session_registry(request: Request) -> SessionRegistry:
     return request.app.state.services.session_registry
 
 
+def get_learning_service(request: Request) -> LearningService:
+    return request.app.state.services.learning_service
+
+
 def get_document_library_service(request: Request) -> DocumentLibraryService:
     return request.app.state.services.document_library
+
+
+def get_document_search_service(request: Request):
+    return request.app.state.services.document_search
 
 
 def get_import_service(request: Request) -> ImportTaskService:

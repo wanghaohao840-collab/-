@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import re
 import time
@@ -7,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from threading import RLock
-from typing import Any, Iterable, Mapping, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Iterator, Mapping, Optional, Protocol, runtime_checkable
 
 from hello_agents.memory.rag.errors import (
     RAGAuthenticationError,
@@ -16,6 +17,12 @@ from hello_agents.memory.rag.errors import (
     RAGConnectionError,
     RAGOperationError,
     sanitize_error_message,
+)
+from hello_agents.memory.storage.vector_scan import (
+    NativePointId,
+    VectorScanPage,
+    iter_qdrant_pages,
+    read_qdrant_page,
 )
 
 
@@ -72,6 +79,13 @@ class VectorStore(Protocol):
         distance: str = "Cosine",
     ) -> None: ...
 
+    def require_collection(
+        self,
+        collection_name: str,
+        dimension: int,
+        distance: str = "Cosine",
+    ) -> None: ...
+
     def ensure_payload_indexes(
         self,
         collection_name: str,
@@ -122,6 +136,7 @@ class InMemoryVectorStore:
         self.collection_name = collection_name
         self._collections: dict[str, dict[str, VectorPoint]] = {}
         self._dimensions: dict[str, int] = {}
+        self._distances: dict[str, str] = {}
         self._lock = RLock()
         if dimension is not None:
             self.ensure_collection(collection_name, dimension)
@@ -134,12 +149,40 @@ class InMemoryVectorStore:
     ) -> None:
         with self._lock:
             existing = self._dimensions.get(collection_name)
-            if existing is not None and existing != dimension:
+            existing_distance = self._distances.get(collection_name)
+            if existing is not None and (
+                existing != dimension
+                or str(existing_distance).lower() != str(distance).lower()
+            ):
                 raise RAGCollectionError(
-                    f"Collection {collection_name} has vector size {existing}, expected {dimension}"
+                    f"Collection {collection_name} has vector size {existing}, "
+                    f"distance {existing_distance}; expected {dimension}/{distance}"
                 )
             self._dimensions[collection_name] = dimension
+            self._distances[collection_name] = distance
             self._collections.setdefault(collection_name, {})
+
+    def require_collection(
+        self,
+        collection_name: str,
+        dimension: int,
+        distance: str = "Cosine",
+    ) -> None:
+        with self._lock:
+            if collection_name not in self._dimensions:
+                raise RAGCollectionError(
+                    f"Collection {collection_name} was not found"
+                )
+            existing = self._dimensions[collection_name]
+            existing_distance = self._distances.get(collection_name)
+            if (
+                existing != dimension
+                or str(existing_distance).lower() != str(distance).lower()
+            ):
+                raise RAGCollectionError(
+                    f"Collection {collection_name} has vector size {existing}, "
+                    f"distance {existing_distance}; expected {dimension}/{distance}"
+                )
 
     def ensure_payload_indexes(
         self,
@@ -383,6 +426,24 @@ class QdrantVectorStore:
         self.models = self._load_models()
         self.client = client or self._create_client()
 
+    def require_collection(
+        self,
+        collection_name: str,
+        dimension: int,
+        distance: str = "Cosine",
+    ) -> None:
+        exists = self._call(
+            "collection_exists", self.client.collection_exists, collection_name
+        )
+        if not exists:
+            raise RAGCollectionError(
+                f"Qdrant collection {collection_name} was not found"
+            )
+        info = self._call(
+            "get_collection", self.client.get_collection, collection_name
+        )
+        self._validate_collection(collection_name, info, dimension, distance)
+
     def ensure_collection(
         self,
         collection_name: str,
@@ -547,6 +608,43 @@ class QdrantVectorStore:
             wait=True,
         )
         return confirmed
+
+    def scroll_page(
+        self,
+        collection_name: str,
+        filters: Optional[VectorFilter] = None,
+        *,
+        offset: NativePointId | None = None,
+        page_size: int = 128,
+    ) -> VectorScanPage:
+        """Read one bounded payload page without creating or mutating a collection."""
+        return read_qdrant_page(
+            lambda **kwargs: self._call("scroll", self.client.scroll, **kwargs),
+            collection_name=collection_name,
+            scroll_filter=self._filter(filters),
+            offset=offset,
+            page_size=page_size,
+        )
+
+    def iter_scroll_pages(
+        self,
+        collection_name: str,
+        filters: Optional[VectorFilter] = None,
+        *,
+        offset: NativePointId | None = None,
+        page_size: int = 128,
+        max_pages: int = 10_000,
+    ) -> Iterator[VectorScanPage]:
+        """Stream pages; no snapshot is implied and partial scans are not valid inventories."""
+        # Freeze predicates when iteration begins; callers cannot change scope mid-scan.
+        filters = copy.deepcopy(filters)
+        yield from iter_qdrant_pages(
+            lambda current: self.scroll_page(
+                collection_name, filters, offset=current, page_size=page_size
+            ),
+            offset=offset,
+            max_pages=max_pages,
+        )
 
     def scroll(
         self,

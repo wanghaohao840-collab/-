@@ -112,6 +112,7 @@ class UserRuntimeRegistry:
                     collection_name="pdf_learning_collection",
                     rag_namespace=f"pdf_{user_id}",
                     cache_path=str(paths.rag_cache),
+                    data_root=self.storage.data_root,
                 ),
                 memory_tool=memory_tool,
                 history=history_repo,

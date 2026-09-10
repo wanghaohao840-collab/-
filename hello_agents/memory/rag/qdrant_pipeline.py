@@ -6,12 +6,18 @@ from typing import Any, Dict, List, Optional
 from app.import_models import ProgressCallback
 from hello_agents.memory.embedding import get_dimension, get_text_embedder
 from hello_agents.memory.rag.contracts import DocumentSegment
+from hello_agents.memory.rag.embedding_runtime import CHUNKING_BY_BACKEND, RAGEmbeddingRuntime
 from hello_agents.memory.rag.errors import (
     RAGConfigError,
     RAGDocumentTooLargeError,
     RAGEmbeddingError,
 )
+from hello_agents.memory.rag.index_identity import (
+    IndexIdentity, IndexIdentityError, require_point_identity,
+)
+from hello_agents.memory.rag.index_registry import IndexRegistry
 from hello_agents.memory.rag.prepare import (
+    contains_secret_metadata,
     prepare_document_chunks,
     progress_with_chunking_boundary,
     qdrant_point_id,
@@ -48,6 +54,8 @@ class RAGPipeline:
         vector_store: Optional[VectorStore] = None,
         retry_delays: Optional[tuple[float, ...]] = None,
         max_summary_chunks: int = MAX_SUMMARY_CHUNKS,
+        embedding_runtime: RAGEmbeddingRuntime | None = None,
+        index_registry: IndexRegistry | None = None,
         **kwargs,
     ):
         collection_name = str(collection_name or "").strip()
@@ -64,33 +72,72 @@ class RAGPipeline:
             )
         if not rag_namespace:
             raise RAGConfigError("rag_namespace cannot be empty")
-        self.collection_name = collection_name
+        if (
+            (embedding_runtime is None) != (index_registry is None)
+            or (
+                embedding_runtime is not None
+                and not isinstance(embedding_runtime, RAGEmbeddingRuntime)
+            )
+            or (
+                index_registry is not None
+                and not isinstance(index_registry, IndexRegistry)
+            )
+        ):
+            raise RAGConfigError(
+                "Managed Qdrant pipeline configuration requires both "
+                "embedding_runtime and index_registry"
+            )
+        if (embedding_runtime is not None
+                and embedding_runtime.profile.chunking != CHUNKING_BY_BACKEND["qdrant"]):
+            raise RAGConfigError("Managed Qdrant embedding backend does not match")
+        self.base_collection_name = collection_name
+        self.embedding_runtime = embedding_runtime
+        self.index_registry = index_registry
+        self._managed = embedding_runtime is not None
+        self._managed_failed = False
+        self.index_identity = (
+            IndexIdentity("qdrant", collection_name, embedding_runtime.profile)
+            if embedding_runtime is not None else None
+        )
+        self.collection_name = (
+            self.index_identity.physical_collection
+            if self.index_identity is not None else collection_name
+        )
         self.rag_namespace = rag_namespace
         self.qdrant_url = qdrant_url
         self.qdrant_api_key = qdrant_api_key
         self.retry_delays = self.DEFAULT_RETRY_DELAYS if retry_delays is None else tuple(retry_delays)
         self.max_summary_chunks = int(max_summary_chunks)
-        self.embedder = get_text_embedder()
-        self.dimension = get_dimension(384)
+        self.embedder = None if self._managed else get_text_embedder()
+        self.dimension = (
+            embedding_runtime.profile.dimension
+            if embedding_runtime is not None else get_dimension(384)
+        )
         self.vector_store = vector_store or QdrantVectorStore(
             url=qdrant_url,
             api_key=qdrant_api_key,
             client=qdrant_client,
             retry_delays=self.retry_delays,
         )
-        self.vector_store.ensure_collection(
-            self.collection_name,
-            self.dimension,
-            "Cosine",
-        )
-        self.vector_store.ensure_payload_indexes(
-            self.collection_name,
-            {
-                "rag_namespace": "keyword",
-                "document_id": "keyword",
-                "chunk_index": "integer",
-            },
-        )
+        if self._managed:
+            self._require_managed_active()
+            self.vector_store.require_collection(
+                self.collection_name, self.dimension, "Cosine"
+            )
+        else:
+            self.vector_store.ensure_collection(
+                self.collection_name,
+                self.dimension,
+                "Cosine",
+            )
+            self.vector_store.ensure_payload_indexes(
+                self.collection_name,
+                {
+                    "rag_namespace": "keyword",
+                    "document_id": "keyword",
+                    "chunk_index": "integer",
+                },
+            )
 
     def add_text(
         self,
@@ -101,6 +148,7 @@ class RAGPipeline:
         save_cache: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
+        self._require_managed_active()
         if not text or not text.strip():
             return {"success": False, "message": "text is empty", "chunks_added": 0, "chunks_removed": 0}
         if not document_id:
@@ -126,9 +174,10 @@ class RAGPipeline:
             segments=[DocumentSegment(text, metadata or {})],
             rag_namespace=self.rag_namespace,
             split_text=self._split_text,
-            embed_text=self._to_vector,
+            embed_text=None if self._managed else self._to_vector,
             id_for_chunk=lambda ns, doc, index: qdrant_point_id(ns, doc, existing_count + index),
             progress_callback=prepare_progress,
+            embedding_runtime=self.embedding_runtime,
         )
         complete_chunking()
         for chunk in prepared:
@@ -150,6 +199,7 @@ class RAGPipeline:
         allow_empty: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
+        self._require_managed_active()
         if not document_id:
             return {"success": False, "message": "document_id cannot be empty", "chunks_added": 0, "chunks_removed": 0}
 
@@ -164,9 +214,10 @@ class RAGPipeline:
             segments=segments,
             rag_namespace=self.rag_namespace,
             split_text=self._split_text,
-            embed_text=self._to_vector,
+            embed_text=None if self._managed else self._to_vector,
             id_for_chunk=qdrant_point_id,
             progress_callback=prepare_progress,
+            embedding_runtime=self.embedding_runtime,
         )
         complete_chunking()
         existing_payloads = self._scroll_payloads(document_id=document_id)
@@ -193,7 +244,11 @@ class RAGPipeline:
             progress_callback, "committing", 0, 1, "committing"
         )
         self._upsert_chunks(prepared, progress_callback=progress_callback)
-        self._delete_orphan_chunks(document_id, len(prepared))
+        try:
+            self._delete_orphan_chunks(document_id, len(prepared))
+        except Exception:
+            self._mark_managed_failed()
+            raise
         return {
             "success": True,
             "document_id": document_id,
@@ -211,6 +266,7 @@ class RAGPipeline:
         document_ids: Optional[List[str]] = None,
         **kwargs,
     ) -> List[Dict[str, Any]]:
+        self._require_managed_active()
         if not query:
             return []
 
@@ -240,6 +296,9 @@ class RAGPipeline:
         for hit in hits:
             payload = hit.payload
             metadata = self._result_metadata(payload)
+            self._validate_managed_metadata(
+                metadata, document_id=document_id, document_ids=document_scope
+            )
             vector_results.append(
                 {
                     "id": hit.id,
@@ -258,6 +317,11 @@ class RAGPipeline:
                     document_ids=document_scope,
                 ),
             )
+            for point in lexical_points:
+                self._validate_managed_metadata(
+                    self._result_metadata(point.payload),
+                    document_id=document_id, document_ids=document_scope,
+                )
             lexical_results = [
                 {
                     "id": point.id,
@@ -285,16 +349,21 @@ class RAGPipeline:
         return results[:limit]
 
     def stats(self) -> Dict[str, Any]:
+        self._require_managed_active()
         documents = set()
         offset = None
         while True:
             batch = self.vector_store.scroll(
                 self.collection_name,
                 filters=self._scope_filter(),
-                payload_fields=["document_id"],
+                payload_fields=None if self._managed else ["document_id"],
             )
             for point in batch:
                 payload = point.payload
+                self._validate_managed_metadata(
+                    self._result_metadata(payload),
+                    document_id=payload.get("document_id"),
+                )
                 document_id = payload.get("document_id")
                 if document_id:
                     documents.add(document_id)
@@ -312,12 +381,17 @@ class RAGPipeline:
         }
 
     def delete_document(self, document_id: str) -> Dict[str, Any]:
+        self._require_managed_active()
         if not document_id:
             return {"success": False, "message": "document_id cannot be empty", "chunks_removed": 0}
-        removed = self.vector_store.delete_by_filter(
-            self.collection_name,
-            self._scope_filter(document_id=document_id),
-        )
+        try:
+            removed = self.vector_store.delete_by_filter(
+                self.collection_name,
+                self._scope_filter(document_id=document_id),
+            )
+        except Exception:
+            self._mark_managed_failed()
+            raise
         return {
             "success": True,
             "document_id": document_id,
@@ -326,13 +400,19 @@ class RAGPipeline:
         }
 
     def clear(self) -> Dict[str, Any]:
-        removed = self.vector_store.delete_by_filter(
-            self.collection_name,
-            self._scope_filter(),
-        )
+        self._require_managed_active()
+        try:
+            removed = self.vector_store.delete_by_filter(
+                self.collection_name,
+                self._scope_filter(),
+            )
+        except Exception:
+            self._mark_managed_failed()
+            raise
         return {"success": True, "chunks_removed": removed, "message": f"Cleared {removed} chunks"}
 
     def get_document_summary_context(self, document_id: str, limit: int = 12) -> List[Dict[str, Any]]:
+        self._require_managed_active()
         chunk_count = self._count(document_id=document_id)
         if chunk_count > self.max_summary_chunks:
             raise RAGDocumentTooLargeError(
@@ -352,9 +432,30 @@ class RAGPipeline:
             )
         return results
 
+    def get_document_chunk(self, document_id: str, chunk_id: str, chunk_index: int):
+        """Resolve one source with a bounded, namespace-scoped payload read."""
+        self._require_managed_active()
+        page = self.vector_store.scroll_page(
+            self.collection_name,
+            filters={**self._scope_filter(document_id=document_id), "chunk_index": chunk_index},
+            page_size=2,
+        )
+        if page.next_offset is not None or len(page.records) != 1:
+            return None
+        record = page.records[0]
+        payload = record.payload
+        if (record.logical_id != chunk_id or payload.get("document_id") != document_id
+                or payload.get("rag_namespace") != self.rag_namespace
+                or payload.get("chunk_index") != chunk_index):
+            return None
+        metadata = self._result_metadata(payload)
+        self._validate_managed_metadata(metadata, document_id=document_id)
+        return {"id": record.logical_id, "content": str(payload.get("content") or ""), "metadata": metadata}
+
     def get_document_chunks(self, document_id: str) -> List[Dict[str, Any]]:
         """Return every chunk for exactly one document in stable order."""
 
+        self._require_managed_active()
         document_id = str(document_id or "").strip()
         if not document_id:
             raise ValueError("document_id is required")
@@ -378,6 +479,7 @@ class RAGPipeline:
     def list_document_ids(self) -> List[str]:
         """Return document IDs in this RAG namespace."""
 
+        self._require_managed_active()
         return sorted({
             str(payload.get("document_id"))
             for payload in self._scroll_payloads()
@@ -392,6 +494,9 @@ class RAGPipeline:
         points: list[VectorPoint] = []
         for chunk in chunks:
             metadata = dict(chunk.metadata)
+            self._validate_managed_metadata(
+                metadata, document_id=chunk.document_id
+            )
             payload = {
                 "content": chunk.content,
                 "document_id": chunk.document_id,
@@ -407,7 +512,12 @@ class RAGPipeline:
             points.append(VectorPoint(chunk.id, chunk.vector, payload))
 
         if points:
-            self.vector_store.upsert(self.collection_name, points)
+            self._require_managed_active()
+            try:
+                self.vector_store.upsert(self.collection_name, points)
+            except Exception:
+                self._mark_managed_failed()
+                raise
             report_progress(progress_callback, "persisting", 1, 1, "persisting")
 
     def _split_text(self, text: str, chunk_size: int = 800, chunk_overlap: int = 120) -> List[str]:
@@ -427,6 +537,11 @@ class RAGPipeline:
         return [chunk for chunk in chunks if chunk]
 
     def _to_vector(self, text: str) -> List[float]:
+        if self._managed:
+            self._require_managed_active()
+            vector = self.embedding_runtime.embed_query(text)
+            self._require_managed_active()
+            return vector
         vector = self.embedder.encode(text)
         if hasattr(vector, "tolist"):
             vector = vector.tolist()
@@ -438,6 +553,46 @@ class RAGPipeline:
                 f"Embedding dimension {len(vector)} does not match expected {self.dimension}"
             )
         return vector
+
+    def _require_managed_active(self) -> None:
+        if not self._managed:
+            return
+        if self._managed_failed:
+            raise RAGConfigError("Managed Qdrant index has failed closed")
+        if self.index_registry is None or self.index_identity is None:
+            raise RAGConfigError("Managed Qdrant pipeline configuration is incomplete")
+        self.index_registry.require_active(self.index_identity)
+
+    def _validate_managed_metadata(
+        self, metadata: Dict[str, Any], *, document_id: object = None,
+        document_ids: Optional[List[str]] = None,
+    ) -> None:
+        if not self._managed:
+            return
+        if contains_secret_metadata(metadata):
+            raise IndexIdentityError("point")
+        if document_ids is not None and metadata.get("document_id") not in document_ids:
+            raise IndexIdentityError("point")
+        require_point_identity(
+            metadata,
+            identity=self.index_identity,
+            rag_namespace=self.rag_namespace,
+            document_id=(None if document_ids is not None or document_id is None
+                         else str(document_id)),
+        )
+
+    def _mark_managed_failed(self) -> None:
+        if not self._managed:
+            return
+        self._managed_failed = True
+        if (
+            self.index_registry is None
+            or self.index_identity is None
+        ):
+            raise RAGConfigError(
+                "Managed Qdrant mutation failed and registry invalidation was unavailable"
+            )
+        self.index_registry.mark_failed_if_active(self.index_identity)
 
     def _scope_filter(
         self,
@@ -484,6 +639,10 @@ class RAGPipeline:
         ):
             payload = dict(point.payload)
             payload.setdefault("id", point.id)
+            self._validate_managed_metadata(
+                self._result_metadata(payload),
+                document_id=document_id,
+            )
             payloads.append(payload)
         return payloads
 
@@ -495,6 +654,7 @@ class RAGPipeline:
         return max(indexes, default=-1)
 
     def _delete_orphan_chunks(self, document_id: str, new_chunk_count: int) -> None:
+        self._require_managed_active()
         orphan_ids = []
         for payload in self._scroll_payloads(document_id=document_id):
             if int(payload.get("chunk_index", -1)) >= new_chunk_count:
@@ -504,7 +664,7 @@ class RAGPipeline:
         if orphan_ids:
             self.vector_store.delete_by_filter(
                 self.collection_name,
-                {"_id": orphan_ids},
+                {**self._scope_filter(document_id=document_id), "_id": orphan_ids},
             )
 
     def _result_metadata(self, payload: Dict[str, Any]) -> Dict[str, Any]:

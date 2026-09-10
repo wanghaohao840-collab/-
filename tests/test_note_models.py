@@ -7,6 +7,21 @@ import pytest
 from app.note_models import NoteFilters, NoteSourceSelector, validate_note_input
 
 
+@pytest.mark.parametrize("changes", [
+    {"qa_message_id": "fake"}, {"document_id": "bad"}, {"locator": []},
+    {"locator": {"chunk_id": "c", "chunk_index": False, "content_sha256": "a" * 64}},
+    {"excerpt_snapshot": "x" * 1201},
+])
+def test_document_source_rejects_incompatible_fields(changes):
+    from app.note_models import NewNoteSource, NoteValidationError
+    values = dict(kind="document_chunk", qa_thread_id=None, qa_message_id=None, citation_id=None,
+                  document_id="00000000-0000-0000-0000-000000000001",
+                  locator={"chunk_id": "c", "chunk_index": 0, "content_sha256": "a" * 64},
+                  title_snapshot="title", excerpt_snapshot="excerpt")
+    with pytest.raises(NoteValidationError):
+        NewNoteSource(**(values | changes))
+
+
 def test_note_input_is_normalized_and_deduplicates_tags() -> None:
     body, concept, tags = validate_note_input(
         "  useful markdown  ", "  Concept  ", (" Topic ", "Ｔopic", "topic")

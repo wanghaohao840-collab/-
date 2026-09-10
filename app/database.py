@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+from app.learning_schema import LEARNING_SCHEMA
+
 
 SCHEMA = """
 create table if not exists users (
@@ -314,6 +316,34 @@ on note_sources(user_id, document_id) where source_deleted_at is null;
 create index if not exists ix_note_sources_thread
 on note_sources(user_id, qa_thread_id) where source_deleted_at is null;
 
+create table if not exists note_document_sources (
+    id text primary key,
+    user_id text not null,
+    note_id text not null,
+    document_id text,
+    chunk_id text,
+    chunk_index integer check(chunk_index >= 0),
+    content_sha256 text,
+    locator_json text,
+    title_snapshot text,
+    excerpt_snapshot text,
+    source_deleted_at text,
+    created_at text not null,
+    check (
+        (source_deleted_at is null and document_id is not null and chunk_id is not null
+         and chunk_index is not null and content_sha256 is not null
+         and length(content_sha256)=64 and locator_json is not null and excerpt_snapshot is not null)
+        or (source_deleted_at is not null and document_id is null and chunk_id is null
+            and chunk_index is null and content_sha256 is null and locator_json is null
+            and title_snapshot is null and excerpt_snapshot is null)
+    ),
+    foreign key(note_id, user_id) references notes(id, user_id) on delete cascade
+);
+create index if not exists ix_note_document_sources_note
+on note_document_sources(user_id, note_id, created_at, id);
+create index if not exists ix_note_document_sources_document
+on note_document_sources(user_id, document_id) where source_deleted_at is null;
+
 create table if not exists note_projection_tasks (
     id text primary key,
     user_id text not null,
@@ -382,6 +412,7 @@ def initialize_database(db_path: Path | str) -> None:
         # F1: idempotent upgrade for existing databases missing
         # the conflict_summary column.
         _ensure_column(conn, "data_migrations", "conflict_summary", "text")
+        conn.executescript(LEARNING_SCHEMA)
 
 
 def _verify_fts5(conn: sqlite3.Connection) -> None:

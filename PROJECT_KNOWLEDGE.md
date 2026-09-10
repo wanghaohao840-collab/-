@@ -179,3 +179,40 @@ QDRANT_COLLECTION=doc_learning_vectors
 - `.\venv\Scripts\python.exe -m pytest -q --basetemp=.pytest-tmp-roadmap-full`：493 passed, 4 skipped。
 - 直接执行 `.\venv\Scripts\python.exe -m pytest -q` 时，Windows 系统临时目录无访问权限；使用仓库内 `--basetemp` 后完整套件通过。
 - `.\venv\Scripts\python.exe .\ui\gradio_app.py` 可启动并保持服务运行；验证后已停止本次启动的进程。
+
+## 11. 当前产品与部署边界（2026-09）
+
+- 产品 UI 为 React + TypeScript，通过同源 FastAPI `/api/v1` 访问共享
+  `ApplicationServices`；Gradio 保留在 `/legacy/`，不是第二个独立数据服务。
+- `/documents`、`/qa`、`/notes`、`/overview`、`/insights` 已有真实业务实现。
+  概览与学习洞察通过独立 `InsightsService` 聚合领域公开接口；只统计当前保留的
+  文档、已完成问答、笔记、报告与 UTC 每日活动，不推断学习时长或掌握度。
+  报告支持生成、历史、查看、Markdown/Word 下载，用户身份始终来自会话。
+- 洞察接口 DTO 可由未来事件表/物化视图替代实现；当前不引入分析库或新的持久化权威。
+  成功响应禁止 HTTP 缓存，前端查询与延迟生成结果按发起用户隔离。
+- `/search` 已实现并集成，发布状态以本轮检索发布记录为准；当前仅检索已导入的本地
+  文档，不含在线论文数据库。显式选择 1–10 篇、返回 5/10/20 条结构化片段；查询不持久化。
+  检索可转入问答范围确认，或编辑后保存来源笔记；服务端按片段身份和原文校验和重新验证。
+  新增 `note_document_sources` 与旧 QA 来源共存，删除原文会清理来源但保留用户笔记正文。
+  旧表可读不等于旧程序可继续安全写入；回滚必须配对旧镜像和一致性冷备份恢复。
+- Windows 稳定部署路径是 `D:\python_self_agent`。计划任务不能长期指向 worktree；
+  四项任务隐藏运行，后台通知位于 `deploy-state/notifications`。
+- Qdrant 使用 `zhiyan_qdrant_data` POSIX 命名卷。产品嵌入迁移使用身份注册表、候选
+  向量重建、质量验证、冷备份和 journaled cutover；不能直接替换模型后沿用旧向量。
+- 默认 App 宿主机端口仅绑定 `127.0.0.1`；容器内部绑定 `0.0.0.0` 供端口转发。
+  LAN 必须显式配置并保留 Private/LocalSubnet 防火墙，公网必须加 HTTPS 反向代理。
+  仅启用 App + Qdrant；Neo4j 仍等待 GraphRAG 正式产品验收。
+- 最新具体验证与残余风险以
+  `docs/agent-workflow/task-packets/2026-09-04-document-search/FINAL_INTEGRATION_REVIEW.md`
+  为准；历史测试数字不代表后续任意工作区状态。
+
+### 2026-09-09 工作树整合边界
+
+- `/learning` 已接入当前 React/FastAPI 共享服务：学习计划、今日任务、完成与撤销，
+  以 SQLite `learning_*` 表为权威；不是旧 `codex/learning-mvp` 的 JSON 运行时。
+- 学习计划与来源笔记复用文档可见性和删除 fence。删除原文时，计划/任务删除与
+  来源摘录清理处于同一事务，保留笔记正文；检索继续使用同一受管理的 RAG 运行时。
+- 旧 `learning.json` 不在启动时自动导入；存在未迁移旧数据时学习接口保持迁移门禁。
+  卡片生成、练习生成及生产迁移发布不属于本次整合。
+- 当前整合证据与可提交文件清单见 `docs/agent-work/search-learning-integration/`。
+  Windows 发布恢复脚本及现场记录仍是独立未暂存工作，不代表已完成生产恢复。

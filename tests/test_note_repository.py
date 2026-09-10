@@ -53,6 +53,108 @@ def test_note_schema_supports_fts_and_composite_ownership(tmp_path: Path) -> Non
     assert len(foreign_keys) == 2
 
 
+def document_source():
+    return NewNoteSource(
+        kind="document_chunk", qa_thread_id=None, qa_message_id=None, citation_id=None,
+        document_id="00000000-0000-0000-0000-000000000001",
+        locator={"chunk_id": "chunk-0", "chunk_index": 0, "content_sha256": "a" * 64, "page_number": 2},
+        title_snapshot="paper.pdf", excerpt_snapshot="verified excerpt",
+    )
+
+
+def test_document_source_roundtrip_and_source_filter(repository):
+    note = repository.create("alice", "edited note", None, (), "document-source", sources=(document_source(),))
+    assert note.sources[0].kind == "document_chunk"
+    assert note.sources[0].locator["content_sha256"] == "a" * 64
+    assert repository.list_page("alice", source_kind="document_chunk").items == (note,)
+    assert repository.list_page("bob", source_kind="document_chunk").items == ()
+    with connect(repository.db_path) as conn:
+        assert conn.execute("select count(*) from note_sources").fetchone()[0] == 0
+
+
+def test_document_source_schema_is_additive_and_retry_safe(repository):
+    old = NewNoteSource("qa_message", "thread", "message", None, None, None, None, "old excerpt")
+    note = repository.create("alice", "old note", None, (), "legacy", sources=(old,))
+    with connect(repository.db_path) as conn:
+        before = tuple(conn.execute("select * from note_sources").fetchone())
+        ddl = conn.execute("select sql from sqlite_master where name='note_sources'").fetchone()[0]
+        # Simulate an existing database created before this additive table.
+        conn.execute("drop table if exists note_document_sources")
+    initialize_database(repository.db_path)
+    with connect(repository.db_path) as conn:
+        conn.execute("drop index ix_note_document_sources_document")
+    initialize_database(repository.db_path)
+    initialize_database(repository.db_path)
+    with connect(repository.db_path) as conn:
+        assert tuple(conn.execute("select * from note_sources").fetchone()) == before
+        assert conn.execute("select sql from sqlite_master where name='note_sources'").fetchone()[0] == ddl
+        assert conn.execute("select id from notes where id=?", (note.id,)).fetchone()[0] == note.id
+        assert conn.execute("pragma foreign_key_check").fetchall() == []
+        assert len(conn.execute("pragma foreign_key_list('note_document_sources')").fetchall()) == 2
+
+
+def test_mixed_sources_scrub_once_and_preserve_other_users(repository):
+    from app.note_repository import scrub_sources_in_transaction
+    doc = document_source()
+    qa = NewNoteSource("qa_citation", "thread", "message", "citation", doc.document_id, None, "title", "QA excerpt")
+    note = repository.create("alice", "keep my text", None, (), "mixed", sources=(doc, qa))
+    bob = repository.create("bob", "bob text", None, (), "bob", sources=(doc,))
+    with connect(repository.db_path) as conn:
+        assert scrub_sources_in_transaction(conn, user_id="alice", document_id=doc.document_id, deleted_at="later") == 1
+        assert scrub_sources_in_transaction(conn, user_id="alice", document_id=doc.document_id, deleted_at="later") == 0
+    current = repository.get("alice", note.id)
+    assert current.version == 2 and current.body_markdown == "keep my text"
+    assert all(s.deleted and s.locator is None and s.excerpt_snapshot is None for s in current.sources)
+    assert not repository.get("bob", bob.id).sources[0].deleted
+    with connect(repository.db_path) as conn:
+        versions = conn.execute("select note_version from note_projection_tasks where user_id='alice' and note_id=? order by note_version", (note.id,)).fetchall()
+        row = conn.execute("select * from note_document_sources where user_id='alice'").fetchone()
+        assert all(row[key] is None for key in ("document_id", "chunk_id", "chunk_index", "content_sha256", "locator_json", "title_snapshot", "excerpt_snapshot"))
+    assert [r[0] for r in versions] == [1, 2]
+
+
+def test_document_source_composite_fk_and_live_deleted_constraints(repository):
+    note = repository.create("alice", "body", None, (), "ownership", sources=(document_source(),))
+    with connect(repository.db_path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("update note_document_sources set user_id='bob' where note_id=?", (note.id,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("update note_document_sources set excerpt_snapshot=null where note_id=?", (note.id,))
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("update note_document_sources set source_deleted_at='later' where note_id=?", (note.id,))
+
+
+def test_document_source_does_not_copy_snapshot_into_memory_projection(repository):
+    from types import SimpleNamespace
+    from app.note_projection import DefaultNoteMemoryProjection
+    note = repository.create("alice", "user authored text", None, (), "project", sources=(document_source(),))
+    calls = []
+    manager = SimpleNamespace(add_memory=lambda **kwargs: calls.append(kwargs))
+    runtime = SimpleNamespace(memory_tool=SimpleNamespace(memory_manager=manager))
+    DefaultNoteMemoryProjection().upsert(runtime, note)
+    assert calls[0]["content"] == "user authored text"
+    assert "verified excerpt" not in str(calls[0])
+    assert calls[0]["metadata"]["version"] == 1
+
+
+def test_document_sources_keep_ten_source_limit(repository):
+    with pytest.raises(NoteValidationError):
+        repository.create("alice", "body", None, (), "too-many", sources=(document_source(),) * 11)
+    assert repository.list_page("alice").items == ()
+
+
+def test_conversation_scrub_leaves_document_sources_intact(repository):
+    from app.note_repository import scrub_sources_in_transaction
+    qa = NewNoteSource("qa_message", "thread", "message", None, None, None, None, "answer")
+    note = repository.create("alice", "body", None, (), "thread-only", sources=(document_source(), qa))
+    with connect(repository.db_path) as conn:
+        assert scrub_sources_in_transaction(conn, user_id="alice", thread_id="thread", deleted_at="later") == 1
+    sources = {source.kind: source for source in repository.get("alice", note.id).sources}
+    assert sources["qa_message"].deleted
+    assert not sources["document_chunk"].deleted
+    assert sources["document_chunk"].excerpt_snapshot == "verified excerpt"
+
+
 def test_create_get_idempotency_and_payload_conflict(repository: NoteRepository) -> None:
     created = repository.create("alice", "body", "Concept", ("Tag",), "request-1")
     duplicate = repository.create("alice", " body ", "Concept", ("Tag",), "request-1")

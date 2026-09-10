@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from threading import RLock
 from types import SimpleNamespace
 
@@ -8,6 +9,8 @@ import pytest
 
 from app.database import connect, initialize_database
 from app.note_models import (
+    DocumentChunkSourceSelector,
+    NoteSourceUnavailableError,
     NoteFilters,
     NoteIdempotencyConflict,
     NoteNotFoundError,
@@ -16,6 +19,7 @@ from app.note_models import (
 from app.note_repository import NoteRepository
 from app.note_service import NoteService
 from app.qa_repository import QaRepository
+from app.document_search import SearchChunkLocator, ResolvedDocumentChunk, DocumentSearchSourceStaleError, DocumentSearchUnavailableError
 
 
 class Migration:
@@ -60,6 +64,88 @@ def service(tmp_path: Path):
 
 def session(user_id="alice"):
     return SimpleNamespace(user_id=user_id)
+
+
+def document_selector():
+    return DocumentChunkSourceSelector("document_chunk", SearchChunkLocator(
+        "00000000-0000-0000-0000-000000000001", "chunk-0", 0, "a" * 64,
+    ))
+
+
+def test_document_source_resolves_outside_lock_and_replays_after_deletion(service):
+    facade, _, _ = service
+    active = SimpleNamespace(user_id="alice", token="token", runtime=SimpleNamespace(lock=RLock()))
+    selector = document_selector()
+    calls = []
+    def resolve(token, locator):
+        assert token == "token"
+        calls.append(locator)
+        def probe():
+            acquired = active.runtime.lock.acquire(blocking=False)
+            if acquired:
+                active.runtime.lock.release()
+            return acquired
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            assert pool.submit(probe).result(timeout=3)
+        return ResolvedDocumentChunk(locator.document_id, "server.pdf", "server excerpt", 2, None, locator)
+    facade.document_search = SimpleNamespace(resolve_chunk=resolve)
+    args = dict(body_markdown="my edited text", concept=None, tags=(), client_request_id="document", source=selector)
+    note = facade.create(active, **args)
+    assert note.body_markdown == "my edited text"
+    assert note.sources[0].title_snapshot == "server.pdf"
+    assert note.sources[0].excerpt_snapshot == "server excerpt"
+    with connect(facade.repository.db_path) as conn:
+        from app.note_repository import scrub_sources_in_transaction
+        scrub_sources_in_transaction(conn, user_id="alice", document_id=selector.locator.document_id, deleted_at="later")
+    replay = facade.create(active, **args)
+    assert replay.id == note.id and replay.sources[0].deleted
+    assert len(calls) == 1
+    with pytest.raises(NoteIdempotencyConflict):
+        facade.create(active, **(args | {"body_markdown": "changed"}))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("failure,expected", [
+    (DocumentSearchSourceStaleError, NoteNotFoundError),
+    (DocumentSearchUnavailableError, NoteSourceUnavailableError),
+])
+def test_document_resolution_error_is_safe_and_does_not_write(service, failure, expected):
+    facade, _, _ = service
+    def resolve(*args):
+        raise failure("private backend details")
+    facade.document_search = SimpleNamespace(resolve_chunk=resolve)
+    with pytest.raises(expected):
+        facade.create(SimpleNamespace(user_id="alice", token="token"), body_markdown="body", concept=None, tags=(), client_request_id="failure", source=document_selector())
+    assert facade.repository.list_page("alice").items == ()
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "failed", "completed"])
+def test_document_deletion_between_resolution_and_insert_rejects_source(service, status):
+    facade, _, _ = service
+    selector = document_selector()
+    def resolve(token, locator):
+        with connect(facade.repository.db_path) as conn:
+            conn.execute("""insert into qa_deletion_fences
+                (id,user_id,target_type,target_id,status,stage,created_at,updated_at)
+                values ('fence','alice','document',?,?,'fenced','t','t')""", (locator.document_id, status))
+        return ResolvedDocumentChunk(locator.document_id, "server.pdf", "source", None, None, locator)
+    facade.document_search = SimpleNamespace(resolve_chunk=resolve)
+    from app.note_models import NoteSourceDeletingError
+    with pytest.raises((NoteSourceDeletingError, NoteNotFoundError)):
+        facade.create(SimpleNamespace(user_id="alice", token="token"), body_markdown="body", concept=None, tags=(), client_request_id="race", source=selector)
+    assert facade.repository.list_page("alice").items == ()
+
+
+def test_qa_request_digest_remains_byte_compatible():
+    import hashlib
+    import json
+    from app.note_service import _service_request_digest
+    source = NoteSourceSelector("qa_citation", "message", "citation")
+    payload = {"body_markdown": "body", "concept": None, "tags": ["tag"], "source": {
+        "kind": "qa_citation", "qa_message_id": "message", "citation_id": "citation",
+    }}
+    expected = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    assert _service_request_digest("body", None, ("tag",), source) == expected
 
 
 def test_create_from_citation_uses_server_owned_snapshot(service) -> None:

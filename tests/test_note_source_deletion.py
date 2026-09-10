@@ -123,6 +123,44 @@ def _source_service(db):
     return NoteService(NoteRepository(db), _Migration(), QaRepository(db), _Worker())
 
 
+def test_document_deletion_worker_scrubs_direct_chunk_source_without_qa_thread(tmp_path):
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from app.learning_models import CreateLearningPlan
+    from app.learning_repository import LearningRepository
+
+    db = tmp_path / "direct-document.db"
+    initialize_database(db)
+    _user(db)
+    document_id = "00000000-0000-0000-0000-000000000001"
+    notes = NoteRepository(db)
+    source = NewNoteSource(
+        "document_chunk", None, None, None, document_id,
+        {"chunk_id": "chunk-0", "chunk_index": 0, "content_sha256": "a" * 64},
+        "document title", "private source excerpt",
+    )
+    note = notes.create("alice", "user text survives", None, (), "direct", sources=(source,), guard_sources=True)
+    learning = LearningRepository(db)
+    plan = learning.create_plan(
+        "alice", CreateLearningPlan(str(uuid4()), document_id, "source study", 2, 30, "Asia/Shanghai"),
+        document_name="document title", now=datetime.now(timezone.utc),
+    ).plan
+    deletions = QaDeletionRepository(db, notes, learning_repository=learning)
+    deletion = deletions.create_document_deletion("alice", document_id)
+    worker = QaDeletionWorker(deletions, _DeletionRuntimeRegistry(), _DeletionDocuments(), _DeletionSessions())
+    assert worker.run_once("worker")
+    assert deletions.get_deletion("alice", deletion.id).status == "completed"
+    current = notes.get("alice", note.id)
+    assert current.version == 2
+    assert current.body_markdown == "user text survives"
+    assert current.sources[0].deleted
+    assert current.sources[0].excerpt_snapshot is None
+    with connect(db) as conn:
+        assert conn.execute("select count(*) from learning_plans where id=?", (plan.id,)).fetchone()[0] == 0
+        assert conn.execute("select count(*) from learning_tasks where plan_id=?", (plan.id,)).fetchone()[0] == 0
+    assert not worker.run_once("worker")
+
+
 @pytest.mark.parametrize("scope", ["conversation", "document"])
 def test_source_create_after_fence_is_distinguished_from_absent_source(tmp_path, scope):
     db = tmp_path / f"{scope}.db"

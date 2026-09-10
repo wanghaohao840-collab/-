@@ -29,7 +29,8 @@ COPY app/ /app/app/
 COPY assistants/ /app/assistants/
 COPY hello_agents/ /app/hello_agents/
 COPY ui/ /app/ui/
-COPY deploy/entrypoint.sh deploy/healthcheck.py deploy/backup.sh deploy/restore.sh deploy/smoke_test.py deploy/embedding_probe.py /app/deploy/
+COPY evals/ /app/evals/
+COPY deploy/entrypoint.sh deploy/healthcheck.py deploy/backup.sh deploy/restore.sh deploy/smoke_test.py deploy/embedding_probe.py deploy/embedding_migrate.py deploy/embedding_cutover.py /app/deploy/
 COPY server.py /app/server.py
 COPY --from=web-build /web/dist /app/web/dist
 RUN mkdir -p /app/data \

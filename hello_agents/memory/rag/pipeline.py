@@ -8,12 +8,20 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from threading import RLock
+from typing import Any, Dict, List, Mapping, Optional
 
 from app.import_models import ProgressCallback
 from hello_agents.memory.embedding import get_text_embedder, get_dimension
 from hello_agents.memory.rag.contracts import DocumentSegment
+from hello_agents.memory.rag.embedding_runtime import (
+    CHUNKING_BY_BACKEND, RAGEmbeddingRuntime, build_rag_embedding,
+)
 from hello_agents.memory.rag.errors import RAGConfigError
+from hello_agents.memory.rag.index_identity import IndexIdentity
+from hello_agents.memory.rag.index_registry import IndexRegistry
+from hello_agents.memory.rag.index_cutover import require_no_incomplete_cutover
+from hello_agents.memory.rag.json_index_cache import JsonIndexCache
 from hello_agents.memory.rag.prepare import (
     default_chunk_id,
     prepare_document_chunks,
@@ -55,6 +63,9 @@ class SimpleRAGPipeline:
         qdrant_url: Optional[str] = None,
         qdrant_api_key: Optional[str] = None,
         cache_path: Optional[str] = None,
+        *,
+        embedding_runtime: RAGEmbeddingRuntime | None = None,
+        index_registry: IndexRegistry | None = None,
     ):
         rag_namespace = _validate_rag_namespace(rag_namespace)
         self.collection_name = collection_name
@@ -62,8 +73,35 @@ class SimpleRAGPipeline:
         self.qdrant_url = qdrant_url
         self.qdrant_api_key = qdrant_api_key
 
-        self.embedder = get_text_embedder()
-        self.dimension = get_dimension(384)
+        if (
+            (embedding_runtime is None) != (index_registry is None)
+            or (
+                embedding_runtime is not None
+                and not isinstance(embedding_runtime, RAGEmbeddingRuntime)
+            )
+            or (
+                index_registry is not None
+                and not isinstance(index_registry, IndexRegistry)
+            )
+        ):
+            raise RAGConfigError(
+                "Managed JSON pipeline configuration requires both "
+                "embedding_runtime and index_registry"
+            )
+        if (embedding_runtime is not None
+                and embedding_runtime.profile.chunking != CHUNKING_BY_BACKEND["json"]):
+            raise RAGConfigError("Managed JSON embedding backend does not match")
+        self.embedding_runtime = embedding_runtime
+        self.index_registry = index_registry
+        self._managed = embedding_runtime is not None
+        self._managed_lock = RLock()
+
+        self.embedder = None if self._managed else get_text_embedder()
+        self.dimension = (
+            embedding_runtime.profile.dimension
+            if embedding_runtime is not None
+            else get_dimension(384)
+        )
 
         # Internal vector store key scoped to collection + namespace.
         self._collection = f"{collection_name}__{rag_namespace}"
@@ -73,24 +111,52 @@ class SimpleRAGPipeline:
         self._store_ready = False
 
         # 每一个 collection + namespace 使用一个独立 JSON 缓存文件
-        self.cache_path = Path(cache_path) if cache_path else self._default_cache_path()
-        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_cache_path = (
+            Path(cache_path) if cache_path else self._default_cache_path()
+        )
+        self.legacy_cache_path = legacy_cache_path
+        self._managed_cache: JsonIndexCache | None = None
+        self.index_identity: IndexIdentity | None = None
+        if self._managed:
+            self.index_identity = IndexIdentity(
+                "json", collection_name, embedding_runtime.profile
+            )
+            self._managed_cache = JsonIndexCache(
+                legacy_cache_path, self.index_identity, rag_namespace
+            )
+            self.cache_path = self._managed_cache.path
+        else:
+            self.cache_path = legacy_cache_path
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
 
         # 启动时自动加载历史 chunks
-        self._load_cache()
+        if self._managed:
+            self._require_managed_active()
+            self._vector_store = self._build_managed_store(
+                self._managed_cache.load()
+            )
+            self._store_ready = True
+        else:
+            self._load_cache()
 
     # ── backward-compatible chunks property ────────────────────────────
 
     @property
     def chunks(self) -> List[Dict[str, Any]]:
         """Return all chunks as dicts (backward-compatible with tests)."""
-        points = self._vector_store.scroll(
+        self._require_managed_active()
+        store = self._vector_store
+        points = store.scroll(
             self._collection, with_vectors=True)
         return [self._point_to_chunk(p) for p in points]
 
     @chunks.setter
     def chunks(self, value: List[Dict[str, Any]]) -> None:
         """Replace all chunks (used by replace_document for bulk replace)."""
+        if self._managed:
+            raise RAGConfigError(
+                "Managed JSON pipeline rejects direct chunks assignment"
+            )
         self._vector_store.delete_by_filter(self._collection)
         if value:
             points = [self._chunk_to_vector_point(c) for c in value]
@@ -143,6 +209,16 @@ class SimpleRAGPipeline:
             progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         """添加文本到 RAG 知识库，并可选择是否立即持久化"""
+
+        if self._managed:
+            return self._add_text_managed(
+                text=text,
+                document_id=document_id,
+                metadata=metadata,
+                replace_existing=replace_existing,
+                save_cache=save_cache,
+                progress_callback=progress_callback,
+            )
 
         if not text or not text.strip():
             return {
@@ -246,6 +322,15 @@ class SimpleRAGPipeline:
         progress_callback: ProgressCallback | None = None,
     ) -> Dict[str, Any]:
         """Replace all chunks for one document using shared preparation logic."""
+
+        if self._managed:
+            return self._replace_document_managed(
+                document_id=document_id,
+                segments=segments,
+                save_cache=save_cache,
+                allow_empty=allow_empty,
+                progress_callback=progress_callback,
+            )
 
         if not document_id:
             return {
@@ -355,6 +440,9 @@ class SimpleRAGPipeline:
     ) -> List[Dict[str, Any]]:
         """检索 RAG 知识库，可按 document_id 过滤"""
 
+        self._require_managed_active()
+        store = self._vector_store
+
         if not query:
             return []
 
@@ -378,7 +466,7 @@ class SimpleRAGPipeline:
         if scope is not None:
             filters["document_id"] = list(scope)
 
-        hits = self._vector_store.search(
+        hits = store.search(
             self._collection,
             query_vector,
             filters=filters if filters else None,
@@ -398,7 +486,7 @@ class SimpleRAGPipeline:
         ]
 
         if retrieval_mode == "hybrid":
-            lexical_points = self._vector_store.scroll(
+            lexical_points = store.scroll(
                 self._collection,
                 filters=filters if filters else None,
                 with_vectors=False,
@@ -432,12 +520,14 @@ class SimpleRAGPipeline:
     def stats(self) -> Dict[str, Any]:
         """知识库统计"""
 
-        points = self._vector_store.scroll(
+        self._require_managed_active()
+        store = self._vector_store
+        points = store.scroll(
             self._collection, with_vectors=False,
             payload_fields=["document_id"],
         )
         document_ids = {p.payload.get("document_id", "") for p in points}
-        chunk_count = self._vector_store.count(self._collection)
+        chunk_count = store.count(self._collection)
 
         return {
             "collection_name": self.collection_name,
@@ -451,6 +541,17 @@ class SimpleRAGPipeline:
 
     def clear(self) -> Dict[str, Any]:
         """清空知识库，并同步清空 JSON 缓存"""
+
+        if self._managed:
+            with self._managed_lock:
+                self._require_managed_active()
+                count = self._vector_store.count(self._collection)
+                self._commit_managed([])
+                return {
+                    "success": True,
+                    "message": f"已清空知识库，共删除 {count} 个 chunk",
+                    "cache_path": str(self.cache_path),
+                }
 
         count = self._vector_store.count(self._collection)
         self._vector_store.delete_by_filter(self._collection)
@@ -473,6 +574,26 @@ class SimpleRAGPipeline:
                 "chunks_removed": 0,
             }
 
+        if self._managed:
+            with self._managed_lock:
+                self._require_managed_active()
+                current = self._managed_points()
+                remaining = [
+                    point for point in current
+                    if point.payload.get("document_id") != document_id
+                ]
+                removed = len(current) - len(remaining)
+                self._commit_managed(remaining)
+                return {
+                    "success": True,
+                    "document_id": document_id,
+                    "chunks_removed": removed,
+                    "message": (
+                        f"已删除文档 {document_id}，共删除 {removed} 个 chunk"
+                    ),
+                    "cache_path": str(self.cache_path),
+                }
+
         removed = self._remove_document_chunks(document_id)
 
         self._save_cache()
@@ -484,6 +605,214 @@ class SimpleRAGPipeline:
             "message": f"已删除文档 {document_id}，共删除 {removed} 个 chunk",
             "cache_path": str(self.cache_path),
         }
+
+    def _require_managed_active(self) -> None:
+        """Fail closed when a managed runtime is no longer the active identity."""
+
+        if not self._managed:
+            return
+        if self.index_registry is None or self.index_identity is None:
+            raise RAGConfigError("Managed JSON pipeline configuration is incomplete")
+        self.index_registry.require_active(self.index_identity)
+
+    def _build_managed_store(
+        self, points: List[VectorPoint]
+    ) -> InMemoryVectorStore:
+        store = InMemoryVectorStore()
+        store.ensure_collection(self._collection, self.dimension, "Cosine")
+        if points:
+            store.upsert(self._collection, points)
+        return store
+
+    def _managed_points(self) -> List[VectorPoint]:
+        return self._vector_store.scroll(
+            self._collection, with_vectors=True
+        )
+
+    def _commit_managed(self, points: List[VectorPoint]) -> None:
+        if not self._managed or self._managed_cache is None:
+            raise RAGConfigError("Managed JSON commit is unavailable")
+        candidate = self._build_managed_store(points)
+        self._require_managed_active()
+        self._managed_cache.write(points)
+        self._vector_store = candidate
+        self._store_ready = True
+
+    def _replace_document_managed(
+        self,
+        *,
+        document_id: str,
+        segments: List[DocumentSegment],
+        save_cache: bool,
+        allow_empty: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> Dict[str, Any]:
+        if not save_cache:
+            raise RAGConfigError(
+                "Managed JSON writes require save_cache=True"
+            )
+        if not document_id:
+            return {
+                "success": False,
+                "message": "document_id cannot be empty",
+                "chunks_added": 0,
+                "chunks_removed": 0,
+            }
+        with self._managed_lock:
+            self._require_managed_active()
+            report_progress(
+                progress_callback, "chunking", 0, len(segments), "chunking"
+            )
+            prepare_progress, complete_chunking = progress_with_chunking_boundary(
+                progress_callback, len(segments), len(segments)
+            )
+            prepared = prepare_document_chunks(
+                document_id=document_id,
+                segments=segments,
+                rag_namespace=self.rag_namespace,
+                split_text=self._split_text,
+                embed_text=None,
+                id_for_chunk=default_chunk_id,
+                progress_callback=prepare_progress,
+                embedding_runtime=self.embedding_runtime,
+            )
+            complete_chunking()
+            if not prepared and not allow_empty:
+                return {
+                    "success": False,
+                    "document_id": document_id,
+                    "message": (
+                        "document contains no non-empty chunks; existing data was preserved"
+                    ),
+                    "chunks_added": 0,
+                    "chunks_removed": 0,
+                }
+
+            current = self._managed_points()
+            existing = [
+                point for point in current
+                if point.payload.get("document_id") == document_id
+            ]
+            existing_metadata = existing[0].payload if existing else {}
+            created_at = existing_metadata.get("created_at") or utc_now_iso()
+            version = (
+                int(existing_metadata.get("document_version", 0)) + 1
+                if existing else 1
+            )
+            updated_at = utc_now_iso()
+            replacement = []
+            for chunk in prepared:
+                payload = dict(chunk.metadata)
+                payload.update(
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    document_version=version,
+                )
+                replacement.append(VectorPoint(
+                    id=chunk.id, vector=chunk.vector, payload=payload
+                ))
+            candidate = [
+                point for point in current
+                if point.payload.get("document_id") != document_id
+            ] + replacement
+            report_progress(
+                progress_callback, "committing", 0, 1, "committing"
+            )
+            self._commit_managed(candidate)
+            report_progress(
+                progress_callback, "persisting", 1, 1, "persisting"
+            )
+            return {
+                "success": True,
+                "document_id": document_id,
+                "chunks_added": len(replacement),
+                "chunks_removed": len(existing),
+                "cache_path": str(self.cache_path),
+                "message": (
+                    f"Replaced document {document_id} with {len(replacement)} chunks"
+                ),
+            }
+
+    def _add_text_managed(
+        self,
+        *,
+        text: str,
+        document_id: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        replace_existing: bool,
+        save_cache: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> Dict[str, Any]:
+        if not save_cache:
+            raise RAGConfigError(
+                "Managed JSON writes require save_cache=True"
+            )
+        if not text or not text.strip():
+            return {"success": False, "message": "文本为空，无法添加"}
+        document_id = document_id or str(uuid.uuid4())
+        if replace_existing:
+            return self._replace_document_managed(
+                document_id=document_id,
+                segments=[DocumentSegment(text, metadata or {})],
+                save_cache=True,
+                allow_empty=False,
+                progress_callback=progress_callback,
+            )
+
+        with self._managed_lock:
+            self._require_managed_active()
+            current = self._managed_points()
+            existing = [
+                point for point in current
+                if point.payload.get("document_id") == document_id
+            ]
+            start_index = max(
+                (int(point.payload.get("chunk_index", -1)) for point in existing),
+                default=-1,
+            ) + 1
+
+            def append_id(namespace: str, doc_id: str, index: int) -> str:
+                return default_chunk_id(namespace, doc_id, start_index + index)
+
+            prepared = prepare_document_chunks(
+                document_id=document_id,
+                segments=[DocumentSegment(text, metadata or {})],
+                rag_namespace=self.rag_namespace,
+                split_text=self._split_text,
+                embed_text=None,
+                id_for_chunk=append_id,
+                progress_callback=progress_callback,
+                embedding_runtime=self.embedding_runtime,
+            )
+            created_at = (
+                existing[0].payload.get("created_at") if existing else None
+            ) or utc_now_iso()
+            version = (
+                int(existing[0].payload.get("document_version", 1))
+                if existing else 1
+            )
+            appended = []
+            for offset, chunk in enumerate(prepared):
+                payload = dict(chunk.metadata)
+                payload.update(
+                    memory_id=chunk.id,
+                    chunk_index=start_index + offset,
+                    created_at=created_at,
+                    updated_at=utc_now_iso(),
+                    document_version=version,
+                )
+                appended.append(VectorPoint(
+                    chunk.id, chunk.vector, payload
+                ))
+            self._commit_managed(current + appended)
+            return {
+                "success": True,
+                "document_id": document_id,
+                "chunks_added": len(appended),
+                "chunks_removed": 0,
+                "cache_path": str(self.cache_path),
+                "message": f"已添加文本知识，生成 {len(appended)} 个 chunk",
+            }
 
     def _split_text(
             self,
@@ -554,6 +883,12 @@ class SimpleRAGPipeline:
     def _to_vector(self, text: str) -> List[float]:
         """文本转向量"""
 
+        if self._managed:
+            self._require_managed_active()
+            vector = self.embedding_runtime.embed_query(text)
+            self._require_managed_active()
+            return vector
+
         vector = self.embedder.encode(text)
 
         if hasattr(vector, "tolist"):
@@ -597,6 +932,9 @@ class SimpleRAGPipeline:
     def _load_cache(self) -> None:
         """从 JSON 加载历史 chunks"""
 
+        if self._managed:
+            raise RAGConfigError("Managed JSON cache must use strict startup loading")
+
         if not self.cache_path.exists():
             return
 
@@ -628,6 +966,11 @@ class SimpleRAGPipeline:
 
     def _save_cache(self) -> None:
         """保存 chunks 到 JSON"""
+
+        if self._managed:
+            raise RAGConfigError(
+                "Managed JSON pipeline rejects private incremental cache saves"
+            )
 
         try:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -753,6 +1096,11 @@ class SimpleRAGPipeline:
     def _remove_document_chunks(self, document_id: str) -> int:
         """删除指定 document_id 的旧 chunks"""
 
+        if self._managed:
+            raise RAGConfigError(
+                "Managed JSON pipeline rejects private incremental deletes"
+            )
+
         return self._vector_store.delete_by_filter(
             self._collection,
             filters={"document_id": document_id},
@@ -801,10 +1149,13 @@ class SimpleRAGPipeline:
         3. 尽量避免同一页重复太多 chunk
         """
 
+        self._require_managed_active()
+        store = self._vector_store
+
         if not document_id:
             return []
 
-        points = self._vector_store.scroll(
+        points = store.scroll(
             self._collection,
             filters={"document_id": document_id},
             with_vectors=False,
@@ -850,17 +1201,32 @@ class SimpleRAGPipeline:
 
         return results
 
+    def get_document_chunk(self, document_id: str, chunk_id: str, chunk_index: int):
+        """Read one exact logical chunk from the namespace's resident store."""
+        self._require_managed_active()
+        points = self._vector_store.scroll(
+            self._collection,
+            filters={"document_id": document_id, "_id": [chunk_id], "chunk_index": chunk_index},
+            with_vectors=False,
+        )
+        if len(points) != 1:
+            return None
+        return self._point_to_chunk(points[0])
+
     def get_document_chunks(
             self,
             document_id: str
     ) -> List[Dict[str, Any]]:
         """Return every chunk for exactly one document in stable order."""
 
+        self._require_managed_active()
+        store = self._vector_store
+
         document_id = str(document_id or "").strip()
         if not document_id:
             raise ValueError("document_id is required")
 
-        points = self._vector_store.scroll(
+        points = store.scroll(
             self._collection,
             filters={"document_id": document_id},
             with_vectors=False,
@@ -877,7 +1243,9 @@ class SimpleRAGPipeline:
     def list_document_ids(self) -> List[str]:
         """Return document IDs in this RAG namespace."""
 
-        points = self._vector_store.scroll(
+        self._require_managed_active()
+        store = self._vector_store
+        points = store.scroll(
             self._collection,
             with_vectors=False,
             payload_fields=["document_id"],
@@ -991,6 +1359,41 @@ def _validate_rag_namespace(rag_namespace: str) -> str:
     return value
 
 
+def resolve_rag_embedding_dependencies(
+    *,
+    backend: str,
+    data_root: Path | str | None,
+    values: Mapping[str, str | None] | None = None,
+    transport: Any = None,
+) -> tuple[RAGEmbeddingRuntime | None, IndexRegistry | None]:
+    runtime = build_rag_embedding(
+        os.environ if values is None else values,
+        backend=backend,
+        transport=transport,
+    )
+    registry = None
+    if data_root is not None:
+        root = Path(data_root)
+        if not root.is_absolute():
+            raise RAGConfigError("RAG registry checks require an absolute data_root")
+        registry = IndexRegistry(root)
+        require_no_incomplete_cutover(registry)
+    if runtime.profile.provider == "simple":
+        if registry is not None:
+            if registry.path.exists():
+                records = registry.load().values()
+                if any(record.identity.profile.provider != "simple"
+                       and record.state in {"active", "failed"} for record in records):
+                    raise RAGConfigError("RAG embedding downgrade requires a validated rollback")
+        return None, None
+    if data_root is None:
+        raise RAGConfigError(
+            "Managed RAG embedding requires an explicit absolute data_root"
+        )
+    assert registry is not None
+    return runtime, registry
+
+
 def create_rag_pipeline(
     qdrant_url: Optional[str] = None,
     qdrant_api_key: Optional[str] = None,
@@ -999,10 +1402,19 @@ def create_rag_pipeline(
     cache_path: Optional[str] = None,
     backend: Optional[str] = None,
     qdrant_client: Any = None,
+    data_root: Path | str | None = None,
+    embedding_values: Mapping[str, str | None] | None = None,
+    embedding_transport: Any = None,
     **kwargs
 ) -> Any:
     selected_backend = resolve_rag_backend(backend)
     rag_namespace = _validate_rag_namespace(rag_namespace)
+    embedding_runtime, index_registry = resolve_rag_embedding_dependencies(
+        backend=selected_backend,
+        data_root=data_root,
+        values=embedding_values,
+        transport=embedding_transport,
+    )
 
     if selected_backend == "qdrant":
         resolved_url = qdrant_url or os.getenv("QDRANT_URL")
@@ -1021,6 +1433,8 @@ def create_rag_pipeline(
             qdrant_url=resolved_url,
             qdrant_api_key=qdrant_api_key or os.getenv("QDRANT_API_KEY") or None,
             qdrant_client=qdrant_client,
+            embedding_runtime=embedding_runtime,
+            index_registry=index_registry,
             **kwargs,
         )
 
@@ -1030,4 +1444,6 @@ def create_rag_pipeline(
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_api_key,
         cache_path=cache_path,
+        embedding_runtime=embedding_runtime,
+        index_registry=index_registry,
     )

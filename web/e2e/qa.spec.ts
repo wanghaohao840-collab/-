@@ -142,7 +142,8 @@ test("QA approved visual states", async ({ appUrl, page }, testInfo) => {
 
   if (testInfo.project.name === "desktop") {
     await page.getByRole("button", { name: "生成摘要" }).click();
-    await expect(page.locator(".qa-summary-status")).toBeVisible();
+    // The real worker may still be queued when the status bar first appears.
+    await expect(page.locator(".qa-summary-status")).toContainText("starting · 0%", { timeout: 15_000 });
     await settleVisuals(page);
     await expect(page).toHaveScreenshot("qa-summary.png");
     await expect(page.locator(".qa-summary-status")).toContainText("已完成", { timeout: 15_000 });

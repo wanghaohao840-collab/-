@@ -1,10 +1,12 @@
 from datetime import datetime
+from types import SimpleNamespace
 
 import pytest
 
 from hello_agents.memory.rag.errors import RAGCollectionError
 from hello_agents.memory.storage.vector_store import (
     InMemoryVectorStore,
+    QdrantVectorStore,
     VectorPoint,
     VectorRange,
     VectorStore,
@@ -98,3 +100,68 @@ def test_in_memory_store_supports_numeric_and_datetime_ranges(store):
     )
 
     assert [hit.id for hit in hits] == ["target"]
+class ProbeClient:
+    def __init__(self, *, exists, dimension=2, distance="Cosine"):
+        self.exists = exists
+        self.dimension = dimension
+        self.distance = distance
+        self.create_calls = []
+
+    def collection_exists(self, name):
+        return self.exists
+
+    def get_collection(self, name):
+        vectors = SimpleNamespace(
+            size=self.dimension,
+            distance=SimpleNamespace(value=self.distance),
+        )
+        return SimpleNamespace(
+            config=SimpleNamespace(params=SimpleNamespace(vectors=vectors))
+        )
+
+    def create_collection(self, **kwargs):
+        self.create_calls.append(kwargs)
+
+
+def test_in_memory_require_collection_never_creates_and_checks_distance(store):
+    with pytest.raises(RAGCollectionError, match="not found"):
+        store.require_collection("documents", 2, "Cosine")
+    assert "documents" not in store._collections
+
+    store.ensure_collection("documents", 2, "Cosine")
+    store.require_collection("documents", 2, "Cosine")
+    with pytest.raises(RAGCollectionError, match="expected 2/Dot"):
+        store.require_collection("documents", 2, "Dot")
+
+
+def test_qdrant_require_collection_never_creates_missing_collection():
+    client = ProbeClient(exists=False)
+    store = QdrantVectorStore(client=client, retry_delays=())
+
+    with pytest.raises(RAGCollectionError, match="not found"):
+        store.require_collection("documents", 2, "Cosine")
+
+    assert client.create_calls == []
+
+
+@pytest.mark.parametrize(("dimension", "distance"), [
+    (3, "Cosine"), (2, "Dot"),
+])
+def test_qdrant_require_collection_rejects_incompatible_existing_collection(
+    dimension, distance
+):
+    client = ProbeClient(exists=True, dimension=dimension, distance=distance)
+    store = QdrantVectorStore(client=client, retry_delays=())
+
+    with pytest.raises(RAGCollectionError, match="incompatible"):
+        store.require_collection("documents", 2, "Cosine")
+    assert client.create_calls == []
+
+
+def test_qdrant_require_collection_accepts_exact_existing_collection():
+    client = ProbeClient(exists=True)
+    store = QdrantVectorStore(client=client, retry_delays=())
+
+    store.require_collection("documents", 2, "Cosine")
+
+    assert client.create_calls == []

@@ -80,8 +80,8 @@ an untrusted manifest.
 
 ## Baseline gate
 
-- [ ] Inspect worktree status and verify its imports resolve to that worktree while using the stable venv.
-- [ ] Run the existing memory baseline before edits:
+- [x] Inspect worktree status and verify its imports resolve to that worktree while using the stable venv.
+- [x] Run the existing memory baseline before edits:
 
 
 ```powershell
@@ -116,7 +116,7 @@ deployment settings to make worktree tests pass.
   Contract failures raise safe `EmbeddingFailure` codes. Whole-list validation
   precedes any request; E1 retains its network budget and process-wide slots.
 
-- [ ] **Step 1: Create the failing runtime tests.**
+- [x] **Step 1: Create the failing runtime tests.**
 
 ```python
 from dataclasses import replace
@@ -234,7 +234,7 @@ def test_runtime_rejects_wrong_document_vector_count(monkeypatch):
         runtime.embed_documents(["public"])
 ```
 
-- [ ] **Step 2: Run the tests and confirm the missing runtime module fails collection.**
+- [x] **Step 2: Run the tests and confirm the missing runtime module fails collection.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory/rag/test_embedding_runtime.py -q --basetemp=.pytest-tmp-bge-e2a-runtime-red
@@ -242,7 +242,7 @@ def test_runtime_rejects_wrong_document_vector_count(monkeypatch):
 
 Expected: `ModuleNotFoundError` for `embedding_runtime`, not a network request.
 
-- [ ] **Step 3: Create the runtime module.**
+- [x] **Step 3: Create the runtime module.**
 
 ```python
 from __future__ import annotations
@@ -343,7 +343,7 @@ def build_rag_embedding(
     return RAGEmbeddingRuntime(profile, engine, settings.batch_size)
 ```
 
-- [ ] **Step 4: Run the new tests together with E1 provider contracts.**
+- [x] **Step 4: Run the new tests together with E1 provider contracts.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory/rag/test_embedding_runtime.py tests/memory/rag/test_embedding_profile.py tests/memory/rag/test_embedding_client.py -q --basetemp=.pytest-tmp-bge-e2a-runtime-green
@@ -352,7 +352,7 @@ def build_rag_embedding(
 Expected: all selected tests pass; key rotation preserves identity, backend chunking
 changes identity, Memory singleton remains unchanged, invalid vectors are rejected.
 
-- [ ] **Step 5: Review, record exact results below, and commit only this task's files and plan.**
+- [x] **Step 5: Review, record exact results below, and commit only this task's files and plan.**
 
 ```powershell
 git diff --check
@@ -383,7 +383,7 @@ git commit -m "feat(embedding): isolate RAG runtime and backend profiles"
   Structural deserialization cannot establish provenance; compare against a trusted
   runtime identity and verify the physical store separately in E2-B.
 
-- [ ] **Step 1: Create the failing identity tests.**
+- [x] **Step 1: Create the failing identity tests.**
 
 ```python
 from copy import deepcopy
@@ -470,7 +470,7 @@ def test_point_requires_fingerprint_and_scope(changes):
                                rag_namespace="user-a", document_id="doc-a")
 ```
 
-- [ ] **Step 2: Confirm the new module is missing.**
+- [x] **Step 2: Confirm the new module is missing.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory/rag/test_index_identity.py -q --basetemp=.pytest-tmp-bge-e2a-identity-red
@@ -478,7 +478,7 @@ def test_point_requires_fingerprint_and_scope(changes):
 
 Expected: `ModuleNotFoundError` for `index_identity`.
 
-- [ ] **Step 3: Create the pure identity module.**
+- [x] **Step 3: Create the pure identity module.**
 
 ```python
 from __future__ import annotations
@@ -591,7 +591,7 @@ def require_point_identity(
         raise IndexIdentityError("point")
 ```
 
-- [ ] **Step 4: Run identity and runtime tests.**
+- [x] **Step 4: Run identity and runtime tests.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory/rag/test_index_identity.py tests/memory/rag/test_embedding_runtime.py -q --basetemp=.pytest-tmp-bge-e2a-identity-green
@@ -600,7 +600,7 @@ def require_point_identity(
 Expected: strict round-trip, schema rejection, same-dimension mismatch, shortened-name
 collision protection and scope rejection all pass. No collection is created.
 
-- [ ] **Step 5: Review, record exact results below, and commit this deliverable.**
+- [x] **Step 5: Review, record exact results below, and commit this deliverable.**
 
 ```powershell
 git diff --check
@@ -635,7 +635,7 @@ git commit -m "feat(embedding): define exact RAG index identity contract"
   win, `_vector_store_id` is removed, and only the runtime supplies a fingerprint.
   Document replacement/version assignment remains the caller's responsibility.
 
-- [ ] **Step 1: Create failing preparation tests.**
+- [x] **Step 1: Create failing preparation tests.**
 
 ```python
 import json
@@ -742,7 +742,7 @@ def test_preparation_rejects_ambiguous_embedding_sources():
         )
 ```
 
-- [ ] **Step 2: Run tests against the current function.**
+- [x] **Step 2: Run tests against the current function.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory/rag/test_prepare_embedding_runtime.py -q --basetemp=.pytest-tmp-bge-e2a-prepare-red
@@ -751,14 +751,14 @@ def test_preparation_rejects_ambiguous_embedding_sources():
 Expected: legacy metadata protection fails and the new `embedding_runtime` keyword
 is unsupported. These failures demonstrate missing behavior, not provider downtime.
 
-- [ ] **Step 3: Add these imports to prepare.py after its existing contracts import.**
+- [x] **Step 3: Add these imports to prepare.py after its existing contracts import.**
 
 ```python
 from hello_agents.memory.rag.embedding_profile import EmbeddingFailure
 from hello_agents.memory.rag.embedding_runtime import RAGEmbeddingRuntime, validate_texts
 ```
 
-- [ ] **Step 4: Replace only prepare_document_chunks with this complete function.**
+- [x] **Step 4: Replace only prepare_document_chunks with this complete function.**
 
 ```python
 def prepare_document_chunks(
@@ -837,7 +837,7 @@ def prepare_document_chunks(
     return prepared
 ```
 
-- [ ] **Step 5: Verify the new behavior plus existing import progress and pipeline contracts.**
+- [x] **Step 5: Verify the new behavior plus existing import progress and pipeline contracts.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory/rag/test_prepare_embedding_runtime.py tests/memory/rag/test_import_progress.py tests/memory/rag/test_qdrant_pipeline.py tests/memory/rag/test_pipeline_multi_document.py tests/assistants/test_import_idempotency.py -q --basetemp=.pytest-tmp-bge-e2a-prepare-green
@@ -846,7 +846,7 @@ def prepare_document_chunks(
 Expected: all selected tests pass. Legacy one-at-a-time progress remains unchanged;
 remote 10-chunk preparation sends 8 then 2, and system metadata cannot be forged.
 
-- [ ] **Step 6: Run the full in-scope regression gate and dependency consistency check.**
+- [x] **Step 6: Run the full in-scope regression gate and dependency consistency check.**
 
 ```powershell
 & 'D:/python_self_agent/venv/Scripts/python.exe' -m pytest tests/memory tests/assistants/test_import_idempotency.py tests/test_import_worker.py tests/test_import_service.py tests/test_runtime_import_leases.py tests/test_import_error_sanitization.py tests/test_document_library_service.py tests/test_qa_answer_engine.py tests/test_note_service.py -q --basetemp=.pytest-tmp-bge-e2a-regression
@@ -857,7 +857,7 @@ git diff --check
 Expected: tests and dependency consistency pass. Investigate failures against baseline;
 do not claim production migration or real indexed retrieval was tested.
 
-- [ ] **Step 7: Record review and regression evidence; commit the reviewed preparation change.**
+- [x] **Step 7: Record review and regression evidence; commit the reviewed preparation change.**
 
 ```powershell
 git add -- hello_agents/memory/rag/prepare.py tests/memory/rag/test_prepare_embedding_runtime.py docs/superpowers/plans/2026-09-03-bge-m3-runtime-identity-foundation.md
@@ -905,14 +905,85 @@ Their implementation is not claimed by any E2-A test.
 
 ## Review and execution evidence
 
+### Operator execution and remaining roadmap (2026-09-03)
+
+- Operator explicitly selected serial execution in an isolated branch.
+- Worktree: `D:/python_self_agent/.worktrees/bge-m3-runtime-identity`;
+  branch `codex/bge-m3-runtime-identity`, starting commit `daeb24f`.
+  Imports resolve inside this worktree; the stable venv is reused and
+  `pip check` reports no broken requirements.
+- Finish embedding E2-A, E2-B and E3 before remaining resource/log/disk/retention
+  and localhost-default network hardening; then proceed to overview and learning
+  insights through its specification, plan, implementation and acceptance.
+- Previously integrated Windows login recovery, five-minute health checks,
+  daily consistent backup, monthly isolated restore drill, safe update/rollback,
+  Qdrant POSIX storage and real LLM configuration require evidence-based rechecks,
+  not blind reinstallation or another data migration.
+- Preserve the explicit decision to leave Neo4j stopped until GraphRAG enters
+  the product roadmap, when it needs a real lifecycle test as a third container.
+- New operator requirement: routine operations must run in the background without
+  repeatedly opening PowerShell windows; alerts must remain available as background
+  records. Diagnose task-launch and notification paths and include a tested quiet
+  launcher/notification policy in the operations hardening stage. Do not disable
+  health checks or conceal failures to suppress the windows.
+- Read-only current checks found two healthy containers (App and Qdrant) and all
+  four expected scheduled tasks in Ready state. App is still bound to
+  `0.0.0.0:7860`; no Neo4j container was listed. No deployment change made.
+
 - [x] Re-read approved spec, E1 progress, repository context and current code.
 - [x] Separate JSON paragraph and Qdrant window chunking identities without changing algorithms.
 - [x] Supply full implementation/test code for all three E2-A deliverables.
 - [x] Preserve named E2-B/E3 ownership for every remaining governing-spec requirement.
 - [x] Parsed all seven Python code blocks with the project venv in UTF-8 mode; syntax passed. Placeholder scan found no unfinished-code markers; source review corrected the Qdrant append ownership to its actual `add_text` method. Runtime tests have not run.
-- [ ] Execute baseline and all three red/green cycles in the isolated worktree.
-- [ ] Complete regression, source review and scoped commits; record exact results here.
+- [x] Execute baseline and all three red/green cycles in the isolated worktree.
+- [x] Complete regression, source review and scoped commits; record exact results here.
 - [ ] Author and review the E2-B implementation plan against the resulting interfaces.
 
 At plan creation: no E2-A unit test has run, no E2 implementation is active, and no
 live data or deployment configuration has changed. Syntax checks are not runtime tests.
+
+### Task 1 execution result (2026-09-03)
+
+- Baseline: `tests/memory -q --basetemp=.pytest-tmp-bge-e2a-baseline`:
+  **270 passed**, 145.36 seconds; project imports confirmed from the isolated worktree.
+- Initial red: missing `embedding_runtime` module. Initial runtime/profile/client
+  green: **105 passed**, 0.89 seconds.
+- Review identified an identity claim gap in the initial plan: direct runtime
+  construction could label SimpleEmbedding as another model or an unimplemented
+  normalization/preprocessing algorithm. Added ten reproducing failure cases,
+  then required actual supported transforms and the exact local profile.
+- Hardened runtime/profile/client green:
+  `--basetemp=.pytest-tmp-bge-e2a-runtime-contract-green`: **115 passed**, 1.05 seconds.
+  `git diff --check` passed. The reviewed implementation supersedes the initial
+  code sketch above where that hardening differs.
+- New remote tests used only HTTPX mocks. No production activation, data writes
+  or container changes. Next gate is Task 2's identity contract.
+
+### Task 2 execution result (2026-09-03)
+
+- Task 1 committed as `9a33272`.
+- Red: missing `index_identity` module. Initial identity/runtime green:
+  **47 passed**, 0.40 seconds.
+- Review added explicit fingerprint/mismatch coverage for provider, endpoint, model,
+  dimension, normalization, document/query preprocessing and chunking changes.
+  Identity/runtime reviewed green: **55 passed**, 0.49 seconds,
+  `--basetemp=.pytest-tmp-bge-e2a-identity-reviewed`.
+- `git diff --check` passed. This module is a pure identity DTO; its docstring
+  explicitly requires comparison with trusted runtime and a separate physical-store
+  verification. It does not write a registry, create collections or activate RAG.
+- Next gate: safe batch preparation plus unchanged legacy import progress.
+
+### Task 3 execution result (2026-09-03)
+
+- Task 2 committed as `a337d00`.
+- Red: five intended failures—external metadata could forge system identity and
+  the runtime batch interface did not exist.
+- Focused green covering preparation, import progress, both pipeline contracts and
+  import idempotency: **96 passed**, 151.32 seconds.
+- Full in-scope regression covering Memory, Assistant import, import workers/leases,
+  document library, QA answer engine and Notes: **466 passed**, 229.73 seconds,
+  `--basetemp=.pytest-tmp-bge-e2a-regression`.
+- `compileall`, `pip check` and `git diff --check` passed. Tests used mock
+  embedding transport only. Existing App/Qdrant and production provider were not
+  changed. E2-A is complete after this commit; E2-B registry/pipeline integration
+  remains required before any production activation.

@@ -55,10 +55,10 @@ docker compose --env-file deploy/.env ps
 python3 deploy/smoke_test.py --env-file deploy/.env
 ```
 
-默认访问地址为 `http://<服务器内网IP>:7860`。可以在 `deploy/.env` 中通过
-`APP_BIND_ADDRESS` 和 `APP_PORT` 调整宿主机监听。直接 HTTP 只适用于可信
-内网；请使用服务器防火墙仅允许可信网段。若要公网访问，必须在 Compose
-之外增加 HTTPS 反向代理或网关。
+默认只监听 `http://127.0.0.1:7860`。需要可信局域网访问时，显式设置
+`APP_BIND_ADDRESS=0.0.0.0`，并用主机防火墙仅允许 Private/LocalSubnet 或
+等价可信网段。公网不得直接暴露应用端口，必须在 Compose 之外增加 HTTPS
+反向代理或网关、证书和访问控制。
 
 ## 启用 Neo4j
 

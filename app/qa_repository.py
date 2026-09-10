@@ -572,6 +572,90 @@ class QaRepository:
                 )
             return tuple(turns)
 
+    def list_recent_completed_turns(
+        self, user_id: str, *, limit: int = 5
+    ) -> tuple[QaReportTurn, ...]:
+        if not 1 <= limit <= 20:
+            raise ValueError("limit must be between 1 and 20")
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                select user_message.content as question,
+                       assistant_message.content as answer,
+                       user_message.mode as mode,
+                       user_message.created_at as asked_at,
+                       user_message.conversation_id as conversation_id
+                from qa_messages user_message
+                join qa_messages assistant_message
+                  on assistant_message.user_id = user_message.user_id
+                 and assistant_message.conversation_id = user_message.conversation_id
+                 and assistant_message.turn_id = user_message.turn_id
+                 and assistant_message.role = 'assistant'
+                 and assistant_message.status = 'completed'
+                join qa_conversations
+                  on qa_conversations.id = user_message.conversation_id
+                 and qa_conversations.user_id = user_message.user_id
+                where user_message.user_id = ? and user_message.role = 'user'
+                  and user_message.status = 'completed'
+                  and {_not_fenced_clause('qa_conversations')}
+                order by user_message.created_at desc, user_message.id desc
+                limit ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+            turns = []
+            for row in rows:
+                documents = conn.execute(
+                    """select document_id, document_name from qa_conversation_documents
+                       where user_id = ? and conversation_id = ? order by position""",
+                    (user_id, row["conversation_id"]),
+                ).fetchall()
+                turns.append(QaReportTurn(
+                    question=row["question"], answer=row["answer"],
+                    document_ids=tuple(item["document_id"] for item in documents),
+                    document_names=tuple(item["document_name"] for item in documents),
+                    mode=row["mode"] or "auto", asked_at=row["asked_at"],
+                ))
+        return tuple(turns)
+
+    def count_completed_turns(self, user_id: str) -> int:
+        with connect(self.db_path) as conn:
+            row = conn.execute(
+                f"""
+                select count(*) as count from qa_messages assistant_message
+                join qa_conversations
+                  on qa_conversations.id = assistant_message.conversation_id
+                 and qa_conversations.user_id = assistant_message.user_id
+                where assistant_message.user_id = ?
+                  and assistant_message.role = 'assistant'
+                  and assistant_message.status = 'completed'
+                  and {_not_fenced_clause('qa_conversations')}
+                """, (user_id,),
+            ).fetchone()
+        return int(row["count"])
+
+    def list_completed_activity_dates(
+        self, user_id: str, *, since: str
+    ) -> tuple[str, ...]:
+        with connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                select assistant_message.completed_at as occurred_at
+                from qa_messages assistant_message
+                join qa_conversations
+                  on qa_conversations.id = assistant_message.conversation_id
+                 and qa_conversations.user_id = assistant_message.user_id
+                where assistant_message.user_id = ?
+                  and assistant_message.role = 'assistant'
+                  and assistant_message.status = 'completed'
+                  and assistant_message.completed_at >= ?
+                  and {_not_fenced_clause('qa_conversations')}
+                order by assistant_message.completed_at
+                """,
+                (user_id, since),
+            ).fetchall()
+        return tuple(row["occurred_at"] for row in rows if row["occurred_at"])
+
     def update_rolling_summary(
         self,
         user_id: str,

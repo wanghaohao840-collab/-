@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.note_models import Note, NotePage, NoteSource
+from api.schemas.search import ChunkLocator
 
 
 class NoteSourceSelectorRequest(BaseModel):
@@ -15,6 +16,12 @@ class NoteSourceSelectorRequest(BaseModel):
     citation_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
+class DocumentChunkSourceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal["document_chunk"]
+    locator: ChunkLocator
+
+
 class NoteCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -22,7 +29,7 @@ class NoteCreateRequest(BaseModel):
     concept: str | None = Field(default=None, max_length=120)
     tags: list[str] = Field(default_factory=list, max_length=10)
     client_request_id: str = Field(min_length=1, max_length=128)
-    source: NoteSourceSelectorRequest | None = None
+    source: NoteSourceSelectorRequest | DocumentChunkSourceRequest | None = Field(default=None, discriminator="kind")
 
 
 class NoteUpdateRequest(BaseModel):
@@ -56,7 +63,7 @@ class NoteSourceResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str | None
-    kind: Literal["qa_message", "qa_citation"]
+    kind: Literal["qa_message", "qa_citation", "document_chunk"]
     deleted: bool
     qa_thread_id: str | None
     qa_message_id: str | None
@@ -88,7 +95,7 @@ class NoteListSourceResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     id: str | None
-    kind: Literal["qa_message", "qa_citation"]
+    kind: Literal["qa_message", "qa_citation", "document_chunk"]
     deleted: bool
     document_id: str | None
     source_deleted_at: str | None
