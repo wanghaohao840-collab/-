@@ -23,7 +23,7 @@ function subscribeToMobileEditor(change: () => void) {
 export function NoteEditor({ draft, dirty, saving, disabled = false, error, onChange, onSave, onDelete, onOpenSources, onBack }: Props) {
   const [mode, setMode] = useState<"edit" | "preview">("edit");
   const mobile = useSyncExternalStore(subscribeToMobileEditor, mobileEditorSnapshot, () => false);
-  const saveButton = <Button className="notes-editor__save" disabled={!dirty || saving || disabled} loading={saving} onClick={onSave}>保存笔记</Button>;
+  const saveButton = <Button className="notes-editor__save" disabled={!dirty || !draft.body_markdown.trim() || saving || disabled} loading={saving} onClick={onSave}>保存笔记</Button>;
   return <section className="notes-editor" aria-label="笔记编辑器">
     <header className="notes-editor__heading">{onBack ? <button type="button" className="notes-editor__back" aria-label="返回笔记列表" onClick={onBack}>←</button> : null}<div className="notes-editor__title"><h2>{draft.concept || "新建笔记"}</h2><p>{dirty ? "有未保存更改" : "已保存"}</p></div>{mobile ? saveButton : null}</header>
     {error ? <p className="notes-error" role="alert" tabIndex={-1}>{error}</p> : null}

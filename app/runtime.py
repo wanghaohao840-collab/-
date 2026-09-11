@@ -113,6 +113,10 @@ class UserRuntimeRegistry:
                     rag_namespace=f"pdf_{user_id}",
                     cache_path=str(paths.rag_cache),
                     data_root=self.storage.data_root,
+                    # Product routes currently use document RAG only. Optional
+                    # Neo4j credentials must not trigger network I/O during
+                    # login or startup's migration of existing users.
+                    enable_graph=False,
                 ),
                 memory_tool=memory_tool,
                 history=history_repo,

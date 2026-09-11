@@ -3,6 +3,22 @@ from app.runtime import UserRuntimeRegistry
 from app.storage import UserStorage
 
 
+def test_product_runtime_does_not_connect_optional_graph(tmp_path, monkeypatch):
+    from hello_agents.tools.builtin.rag_tool import RAGTool
+
+    monkeypatch.setenv("NEO4J_URI", "neo4j://unavailable.invalid:7687")
+    monkeypatch.setenv("NEO4J_USERNAME", "neo4j")
+    monkeypatch.setenv("NEO4J_PASSWORD", "test-only-password")
+    attempts = []
+    monkeypatch.setattr(RAGTool, "_configure_graph_service", lambda *a, **kw: attempts.append(kw))
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    runtime = UserRuntimeRegistry(db_path=db_path, storage=UserStorage(tmp_path / "data")).get_or_create("user-1")
+
+    assert attempts == []
+    assert runtime.rag_tool.graph_service is None
+
+
 def test_user_runtime_registry_reuses_runtime_per_user(tmp_path):
     db_path = tmp_path / "app.db"
     initialize_database(db_path)
