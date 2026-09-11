@@ -44,6 +44,7 @@ deploy-state/
 # Local deployment recovery copies and generated task output
 /deploy-data-backups/
 /deploy-data.rollback-*/
+/compose.release.yaml
 /output/
 /tmp/
 /tmp????????/
