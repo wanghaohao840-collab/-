@@ -26,7 +26,12 @@
 
 ## Penpot 连接与交接
 
-Penpot 是本产品 UI 的唯一视觉设计源。使用已登录的浏览器会话打开规范化文件
+2026-09-10 起，本轮浅色界面的视觉依据为用户确认的左侧参考图及
+[浅色知识感设计](../superpowers/specs/2026-09-09-light-knowledge-ui-design.md)。
+登录、外壳、概览、问答和文档库按此设计调整；旧 Penpot 画板尚未同步，
+其画板导出仅作为历史参考，不能宣称新界面与旧画板一致。
+
+以下为保留的 Penpot 历史交接流程。使用已登录的浏览器会话打开规范化文件
 链接，不把登录 Cookie、`userToken`、API Key 或其他凭据复制到命令、日志、
 截图、提交或文档中。仓库只保存 team/file 标识组成的无密钥链接。发布核验只读
 取回文件、页面、组件和画板；除非另有明确设计任务，不在发布门禁中写入 Penpot。
@@ -46,7 +51,7 @@ PasswordField 的内部输入层按父表单宽度填充，PasswordField 的可�
 [`design/tokens/zhiyan.tokens.json`](../../design/tokens/zhiyan.tokens.json) 是仓库内
 受版本控制的 DTCG Token 契约，
 [`web/src/styles/tokens.css`](../../web/src/styles/tokens.css) 是生成物，不应手工
-维护。视觉值在 Penpot 批准后，同一变更中更新 DTCG 快照并重新生成 CSS：
+维护。视觉值按本轮已批准设计更新 DTCG 快照并重新生成 CSS；旧 Penpot 映射单独保留：
 
 ```powershell
 node scripts/design_tokens.mjs design/tokens/zhiyan.tokens.json web/src/styles/tokens.css

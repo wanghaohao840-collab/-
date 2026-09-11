@@ -4,7 +4,7 @@
 .qa-header h1, .qa-header p, .qa-panel-heading h2, .qa-sources h2 { margin: 0; }
 .qa-header p, .qa-muted, .qa-conversation small, .qa-sources small { color: var(--color-text-primary); }
 .qa-header__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
-.qa-workspace { display: grid; grid-template-columns: 240px minmax(0, 1fr) 320px; min-height: 680px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-surface); }
+.qa-workspace { display: grid; grid-template-columns: 200px minmax(0, 1fr) 260px; min-height: 680px; overflow: hidden; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); box-shadow: var(--shadow-surface); }
 .qa-conversations, .qa-sources { min-width: 0; padding: var(--space-4); }
 .qa-conversations { border-right: 1px solid var(--color-border); background: var(--color-canvas); }
 .qa-sources { border-left: 1px solid var(--color-border); }
@@ -73,8 +73,38 @@
   .qa-workspace { min-height: calc(100dvh - 220px); border-right: 0; border-left: 0; border-radius: 0; }
   .qa-messages { padding: var(--space-3); }
   .qa-message { width: 94%; }
-  .qa-composer { position: sticky; bottom: var(--mobile-nav-height); margin: var(--space-2); }
+  .qa-composer { margin: var(--space-2); }
   .qa-overlay { padding: 0 0 var(--mobile-nav-height); align-items: end; }
   .qa-overlay__panel, .qa-overlay__panel--conversations, .qa-overlay__panel--sources { width: 100%; max-height: calc(100dvh - var(--mobile-nav-height) - var(--space-6)); margin: 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; align-self: end; }
 }
 @media (prefers-reduced-motion: reduce) { .qa-page *, .qa-overlay * { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }
+
+/* Reading-first conversation surfaces. */
+.qa-workspace { box-shadow: 0 4px 24px #20352d04; }
+.qa-header h1 { font-size: 28px; }
+.qa-header p { margin-top: 8px; font-size: 13px; color: var(--color-text-secondary); }
+.qa-thread { background: var(--color-surface); }
+.qa-panel-heading h2, .qa-sources h2 { font-size: 15px; }
+.qa-conversations { background: #fafcfb; }
+.qa-conversation { margin: 4px 0; }
+.qa-conversation strong { font-size: 13px; font-weight: 500; }
+.qa-conversation small { font-size: 11px; color: var(--color-text-secondary); margin-top: 6px; }
+.qa-message { width: min(100%,680px); border: 0; padding: 16px 8px; border-radius: 12px; }
+.qa-message--user { width: fit-content; max-width: 92%; padding: 14px 18px; }
+.qa-message p { font-size: 16px; line-height: 1.8; overflow-wrap: anywhere; }
+.qa-message[data-status="failed"] { border: 1px solid var(--color-danger); }
+.qa-message__role { font-size: 12px; color: var(--color-brand-700); }
+.qa-composer { margin-top: auto; box-shadow: 0 -8px 24px #20352d03; }
+.qa-composer label { font-size: 12px; color: var(--color-text-secondary); font-weight: 400; }
+.qa-composer textarea { font: inherit; min-height: 64px; line-height: 1.6; }
+.qa-composer:focus-within { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+.qa-sources li { background: #f7faf8; padding: 12px; border: 1px solid var(--color-border); border-radius: 10px; grid-template-columns: minmax(0,1fr); }
+.qa-source-index { width: 24px; height: 24px; font-size: 11px; }
+.qa-sources strong { font-size: 13px; overflow-wrap: anywhere; }
+.qa-sources p { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.qa-sources code { display: block; font-size: 10px; overflow-wrap: anywhere; }
+.qa-sources .qa-citation-id { color: var(--color-brand-700); margin-bottom: 6px; overflow-wrap: anywhere; }
+.qa-summary-status { flex-wrap: wrap; }
+.qa-welcome h2 { font-family: "Songti SC",SimSun,serif; font-size: 26px; line-height: 1.6; }
+.qa-welcome p { color: var(--color-text-secondary); font-size: 14px; line-height: 1.9; }
+.qa-conversation[aria-current="page"] small { color: var(--color-brand-700); }

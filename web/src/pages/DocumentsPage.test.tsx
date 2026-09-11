@@ -187,7 +187,7 @@ describe("DocumentsPage", () => {
       name: "还没有文档",
     });
     expect(emptyHeading).toBeVisible();
-    expect.soft(screen.queryByText("管理已导入文档与批量任务")).toBeVisible();
+    expect.soft(screen.queryByText("每一次阅读，都有迹可循")).toBeVisible();
     expect.soft(screen.queryByLabelText("按名称筛选")).not.toBeInTheDocument();
     expect(
       screen.getByText("导入 PDF、TXT、Markdown 或 DOCX，开始构建你的知识库。"),

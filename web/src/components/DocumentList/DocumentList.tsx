@@ -43,9 +43,9 @@ export function DocumentRow({ deleting, document, onDelete, onAsk }: DocumentRow
       data-state={deleting ? "deleting" : "ready"}
       aria-label={document.name}
     >
-      <span className="document-row__icon" aria-hidden="true">文</span>
+      <span className="document-row__icon" aria-hidden="true">{document.file_suffix.replace(/^\./, "").toUpperCase()}</span>
       <span className="document-row__body">
-        <strong>{document.name}</strong>
+        <strong title={document.name}>{document.name}</strong>
         {metadata.length ? <span>{metadata.join(" · ")}</span> : null}
         <span className="document-row__mobile-status">
           {deleting ? "正在删除" : "已导入"}

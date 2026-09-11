@@ -3,7 +3,7 @@
     "brand": {
       "100": {
         "$type": "color",
-        "$value": "#E6F3ED"
+        "$value": "#EAF3EF"
       },
       "600": {
         "$type": "color",
@@ -16,7 +16,7 @@
     },
     "canvas": {
       "$type": "color",
-      "$value": "#F5F8F6"
+      "$value": "#F6F8F7"
     },
     "surface": {
       "$type": "color",
@@ -25,16 +25,16 @@
     "text": {
       "primary": {
         "$type": "color",
-        "$value": "#263B34"
+        "$value": "#20352D"
       },
       "secondary": {
         "$type": "color",
-        "$value": "#71847C"
+        "$value": "#61746B"
       }
     },
     "border": {
       "$type": "color",
-      "$value": "#DCE7E1"
+      "$value": "#E0E8E3"
     },
     "danger": {
       "$type": "color",
@@ -159,7 +159,7 @@
     "width": {
       "$type": "dimension",
       "$value": {
-        "value": 248,
+        "value": 216,
         "unit": "px"
       }
     }
@@ -186,7 +186,7 @@
     "max-width": {
       "$type": "dimension",
       "$value": {
-        "value": 1200,
+        "value": 1280,
         "unit": "px"
       }
     }

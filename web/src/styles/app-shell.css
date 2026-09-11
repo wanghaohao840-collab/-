@@ -53,7 +53,7 @@
 }
 
 .button--primary:hover:not(:disabled) {
-  background: var(--color-brand-600);
+  background: #174D3C;
 }
 
 .button--secondary {
@@ -651,4 +651,23 @@
   .button__spinner {
     animation: none;
   }
+}
+
+/* Paper surfaces and quiet navigation. */
+.sidebar { background: var(--color-surface); }
+.sidebar__brand > svg { flex: 0 0 auto; }
+.sidebar__brand-copy small { margin-top: 6px; font-size: 10px; color: var(--color-text-secondary); }
+.sidebar__link { position: relative; font-size: 14px; }
+.sidebar__link > svg, .sidebar__logout > svg { flex-shrink: 0; }
+.sidebar__link--active { color: var(--color-brand-700); font-weight: 600; }
+.sidebar__link--active::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 3px; background: var(--color-brand-700); }
+.topbar { background: #ffffffd9; border-bottom-color: var(--color-border); }
+.topbar__desktop-title { color: var(--color-text-secondary); font-size: 13px; letter-spacing: 2px; }
+.topbar__avatar { background: var(--color-brand-100); color: var(--color-brand-700); box-shadow: 0 0 0 4px #f5f8f6; }
+.app-shell__content { min-width: 0; }
+@media (min-width: 1200px) {
+  .sidebar { width: var(--sidebar-width); }
+  .app-shell__body { margin-left: var(--sidebar-width); }
+  .sidebar__brand-copy strong { font-size: 24px; letter-spacing: 2px; }
+  .app-shell__content { max-width: var(--content-max-width); }
 }

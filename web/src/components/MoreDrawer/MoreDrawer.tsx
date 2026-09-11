@@ -1,3 +1,4 @@
+import { NavigationIcon } from "../NavigationIcon/NavigationIcon";
 import { type KeyboardEvent, useEffect, useRef } from "react";
 import { NavLink } from "react-router-dom";
 
@@ -110,7 +111,7 @@ export function MoreDrawer({
                 `more-drawer__item${isActive ? " more-drawer__item--active" : ""}`
               }
             >
-              <span className="nav-icon" aria-hidden="true" />
+              <NavigationIcon path={item.path} />
               <span>{item.label}</span>
             </NavLink>
           ))}

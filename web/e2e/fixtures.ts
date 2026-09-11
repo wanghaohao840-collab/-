@@ -337,7 +337,7 @@ export async function registerUser(
   await page.getByLabel("密码", { exact: true }).fill("e2e-only-passphrase");
   await page.getByRole("button", { name: "注册", exact: true }).click();
   await expect(page).toHaveURL(`${appUrl}/overview`, { timeout: 30_000 });
-  await expect(page.getByRole("heading", { level: 1, name: "学习概览" })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: `你好，${username.slice(0, 32)}` })).toBeVisible();
 }
 
 export async function openMore(page: Page, projectName: string) {

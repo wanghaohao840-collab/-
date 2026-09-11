@@ -81,7 +81,7 @@ test("real server preserves answer, isolates users, cancels summary and deletes 
   await page.getByRole("button", { name: "复制引用 1" }).filter({ visible: true }).click();
   await expect(page.getByText("引用 1 已复制").filter({ visible: true })).toBeVisible();
   if (testInfo.project.name !== "desktop") {
-    await page.getByRole("dialog", { name: "引用来源" }).getByRole("button", { name: "关闭引用来源" }).press("Escape");
+    await page.getByRole("dialog", { name: "引用证据" }).getByRole("button", { name: "关闭引用证据" }).press("Escape");
   }
 
   if (testInfo.project.name === "desktop") {
@@ -94,7 +94,7 @@ test("real server preserves answer, isolates users, cancels summary and deletes 
   await expect(deletion).toContainText("消息、引用、摘要和问答记忆");
   await deletion.getByRole("button", { name: "永久删除", exact: true }).click();
   await expect(deletion).toBeHidden({ timeout: 15_000 });
-  await expect(page.getByRole("heading", { name: "建立第一个对话" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "从一个问题，开始理解" })).toBeVisible();
 });
 
 test("failed answer survives reload and retries without duplicating the turn", async ({ appUrl, page }, testInfo) => {
@@ -123,8 +123,8 @@ test("QA workspace has no serious accessibility violations", async ({ appUrl, pa
   const violations = results.violations.filter((item) => item.impact === "serious" || item.impact === "critical");
   expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
   if (testInfo.project.name !== "desktop") {
-    const dialog = page.getByRole("dialog", { name: "引用来源" });
-    await dialog.getByRole("button", { name: "关闭引用来源" }).press("Escape");
+    const dialog = page.getByRole("dialog", { name: "引用证据" });
+    await dialog.getByRole("button", { name: "关闭引用证据" }).press("Escape");
     await expect(page.getByRole("button", { name: "引用 1" })).toBeFocused();
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(await page.evaluate(() => document.documentElement.clientWidth));

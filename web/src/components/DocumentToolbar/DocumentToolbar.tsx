@@ -23,7 +23,7 @@ export function DocumentToolbar({
   return (
     <header className="document-toolbar">
       <h1>文档库</h1>
-      <p>管理已导入文档与批量任务</p>
+      <p>每一次阅读，都有迹可循</p>
       <Button
         className="document-toolbar__import"
         onClick={(event) => onOpenImport(event.currentTarget)}

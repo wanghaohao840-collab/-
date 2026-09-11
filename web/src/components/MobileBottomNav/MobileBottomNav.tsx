@@ -1,3 +1,4 @@
+import { NavigationIcon } from "../NavigationIcon/NavigationIcon";
 import type { MouseEvent } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
@@ -25,7 +26,7 @@ export function MobileBottomNav({ moreOpen, onOpenMore }: MobileBottomNavProps) 
             `mobile-nav__item${isActive ? " mobile-nav__item--active" : ""}`
           }
         >
-          <span className="nav-icon" aria-hidden="true" />
+          <NavigationIcon path={item.path} />
           <span>{item.mobileLabel}</span>
         </NavLink>
       ))}
@@ -37,7 +38,7 @@ export function MobileBottomNav({ moreOpen, onOpenMore }: MobileBottomNavProps) 
         aria-controls="more-drawer"
         onClick={onOpenMore}
       >
-        <span className="nav-icon" aria-hidden="true" />
+        <NavigationIcon path="/more" />
         <span>更多</span>
       </button>
     </nav>
