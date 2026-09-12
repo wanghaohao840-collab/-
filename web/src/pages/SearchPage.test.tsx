@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client";
-import { SearchPage, highlightedExcerpt } from "./SearchPage";
+import { SearchPage } from "./SearchPage";
+import { highlightedExcerpt } from "../components/ResearchWorkspace/presentation";
 
 const mock = vi.hoisted(() => ({ request: vi.fn(), identity: "alice" }));
 vi.mock("../auth/AuthProvider", () => ({ useAuth: () => ({ status: "authenticated", username: mock.identity, csrfToken: mock.identity, request: mock.request }) }));
@@ -19,8 +20,8 @@ function setup() {
 }
 async function submit() {
   fireEvent.click(await screen.findByRole("checkbox", { name: item.name }));
-  fireEvent.change(screen.getByLabelText("想在资料中找到什么？"), { target: { value: "检索" } });
-  fireEvent.click(screen.getByRole("button", { name: "检索文档" }));
+  fireEvent.change(screen.getByLabelText("你想从这些资料中找到什么？"), { target: { value: "检索" } });
+  fireEvent.click(screen.getByRole("button", { name: "检索证据" }));
 }
 async function detail() { await submit(); fireEvent.click(await screen.findByRole("button", { name: `查看来源 1：${item.name}` })); }
 
@@ -39,7 +40,8 @@ describe("SearchPage", () => {
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
   it("requires explicit scope and nonblank query, without auto-submission or persistence", async () => {
     setup();
-    expect(screen.getByRole("button", { name: "检索文档" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "检索证据" })).toBeDisabled();
+    fireEvent.click(screen.getByText("更多操作"));
     expect(screen.getByRole("link", { name: "前往旧版" })).toHaveAttribute("href", "/legacy/");
     await submit();
     expect(await screen.findByText("返回 1 条相关片段")).toBeVisible();
@@ -47,7 +49,7 @@ describe("SearchPage", () => {
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);
     expect(document.querySelector("script")).toBeNull();
-    fireEvent.change(screen.getByLabelText("想在资料中找到什么？"), { target: { value: "changed" } });
+    fireEvent.change(screen.getByLabelText("你想从这些资料中找到什么？"), { target: { value: "changed" } });
     expect(screen.queryByRole("button", { name: /查看来源 1/ })).not.toBeInTheDocument();
     expect(screen.getByText("检索条件已变化，请重新检索。")).toBeVisible();
   });
@@ -56,13 +58,32 @@ describe("SearchPage", () => {
     expect(document.querySelectorAll("mark")).toHaveLength(2);
     expect(document.querySelector("img")).toBeNull();
   });
+  it("fills suggestions without searching and filters the library without losing selections", async () => {
+    setup();
+    fireEvent.click(await screen.findByRole("checkbox", { name: item.name }));
+    fireEvent.click(screen.getByRole("button", { name: /哪些内容提到了 GraphRAG/ }));
+    expect(screen.getByLabelText("你想从这些资料中找到什么？")).toHaveValue("哪些内容提到了 GraphRAG？");
+    expect(mock.request.mock.calls.filter(([url]) => url === "/api/v1/search")).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText("筛选文档"), { target: { value: "不存在的资料" } });
+    expect(screen.getByText("没有匹配的资料，试试其他名称。")).toBeVisible();
+    expect(screen.getByText("已选择 1 份资料")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("筛选文档"), { target: { value: "" } });
+    expect(screen.getByRole("checkbox", { name: item.name })).toBeChecked();
+  });
+  it("opens a source-backed draft directly from the evidence card", async () => {
+    setup(); await submit();
+    fireEvent.click(await screen.findByRole("button", { name: `加入笔记 1：${item.name}` }));
+    expect(screen.getByLabelText("笔记正文（保存前可编辑）")).toHaveValue(resultItem.excerpt);
+    expect(mock.request.mock.calls.filter(([url]) => url === "/api/v1/notes")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "保存并打开笔记" })).toBeEnabled();
+  });
   it("supports a recoverable denied clipboard and native dialog focus return", async () => {
     setup();
     await submit();
     const trigger = await screen.findByRole("button", { name: /查看来源 1/ });
     trigger.focus(); fireEvent.click(trigger);
     expect(screen.getByRole("button", { name: "关闭来源详情" })).toHaveFocus();
-    fireEvent.click(screen.getByRole("button", { name: "复制引用" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "复制引用" }));
     expect(await screen.findByText(/无法访问剪贴板/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "关闭来源详情" }));
     expect(trigger).toHaveFocus();
@@ -104,7 +125,7 @@ describe("SearchPage", () => {
     act(() => client.setQueriesData({ queryKey: ["documents"] }, { items: [] }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /查看来源 1/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "检索文档" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "检索证据" })).toBeDisabled();
   });
   it("distinguishes an empty successful search from idle", async () => {
     const base = mock.request.getMockImplementation()!;
@@ -120,9 +141,9 @@ describe("SearchPage", () => {
     choices.slice(0, 10).forEach((checkbox) => fireEvent.click(checkbox));
     expect(choices[10]).toBeDisabled();
     expect(screen.getAllByRole("option").map((option) => (option as HTMLOptionElement).value)).toEqual(["5", "10", "20"]);
-    expect(screen.getByLabelText("想在资料中找到什么？")).toHaveAttribute("maxlength", "1000");
-    fireEvent.change(screen.getByLabelText("想在资料中找到什么？"), { target: { value: "   " } });
-    expect(screen.getByRole("button", { name: "检索文档" })).toBeDisabled();
+    expect(screen.getByLabelText("你想从这些资料中找到什么？")).toHaveAttribute("maxlength", "1000");
+    fireEvent.change(screen.getByLabelText("你想从这些资料中找到什么？"), { target: { value: "   " } });
+    expect(screen.getByRole("button", { name: "检索证据" })).toBeDisabled();
   });
   it("shows loading, then a retryable error without claiming there are zero results", async () => {
     let reject!: (error: unknown) => void;
@@ -133,7 +154,7 @@ describe("SearchPage", () => {
     await act(async () => reject(new ApiError(429, "SEARCH_BUSY", "检索繁忙", {}, null, true)));
     expect(await screen.findByRole("alert")).toHaveTextContent("检索繁忙");
     expect(screen.queryByText("未找到相关片段")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("想在资料中找到什么？")).toHaveValue("检索");
+    expect(screen.getByLabelText("你想从这些资料中找到什么？")).toHaveValue("检索");
   });
   it("retains edited text when the source is stale and never navigates", async () => {
     const base = mock.request.getMockImplementation()!;
