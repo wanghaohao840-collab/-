@@ -78,7 +78,7 @@ describe("NotesPage", () => {
     await user.click(newButton);
     const newBody = await screen.findByLabelText("笔记正文");
     await user.type(newBody, "draft again");
-    const qaCta = screen.getByRole("button", { name: "从 QA 记录" });
+    const qaCta = screen.getByRole("button", { name: "从 QA 导入" });
     confirm.mockReturnValue(false);
     await user.click(qaCta);
     expect(window.location.pathname).toBe("/notes");

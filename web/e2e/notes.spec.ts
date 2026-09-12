@@ -173,7 +173,7 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
     await page.getByLabel("笔记正文").fill("# 检索目标\n\n服务端版本三");
     await page.getByRole("button", { name: "保存笔记" }).click();
     const editor = page.getByRole("region", { name: "笔记编辑器" });
-    await expect(editor.getByText("上次保存", { exact: true })).toBeVisible();
+    await expect(editor.getByText(/最近保存于/)).toBeVisible();
     await expect(editor.getByRole("button", { name: "保存笔记" })).toBeDisabled();
 
     await stalePage.getByLabel("笔记正文").fill("# 检索目标\n\n必须保留的本地草稿");
@@ -211,7 +211,7 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
     await page.getByLabel("搜索笔记").press("Enter");
   }
   await expect(page.locator(".notes-list__item")).toHaveCount(1);
-  await expect(page.getByText("检索目标概念")).toBeVisible();
+  await expect(page.locator(".notes-list__item")).toContainText("服务端版本三");
 
   await page.goto(`${appUrl}/notes`);
   if (testInfo.project.name === "mobile") {
@@ -235,12 +235,13 @@ test("real Notes lifecycle covers preview, reload, versioning, search, filters, 
     expect(clearResponse.status()).toBe(200);
     await page.reload();
   } else {
+    await page.getByLabel("更多笔记操作").click();
     await page.getByRole("button", { name: "清空笔记" }).click();
     const clearDialog = page.getByRole("dialog", { name: "清空全部笔记" });
     await expect(clearDialog).toContainText("不会删除文档");
     await clearDialog.getByRole("button", { name: "确认清空" }).click();
   }
-  await expect(page.getByRole("heading", { name: "还没有笔记" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "没有符合条件的笔记" })).toBeVisible();
   expect(sqliteNumber(appServer.dbPath, "select count(*) from notes where id=? and deleted_at is not null", created.id)).toBe(1);
 });
 
@@ -345,6 +346,8 @@ test("Notes approved visuals, accessibility, overflow and mobile primary targets
     expect(dimensions.length).toBeGreaterThan(0);
     expect(dimensions.filter(({ width, height }) => width < 44 || height < 44), JSON.stringify(dimensions)).toEqual([]);
     await settleVisuals(page);
+    await page.locator(".notes-list time").evaluateAll((items) => items.forEach((item) => item.textContent = "最近更新 9/12 14:20"));
+    await page.locator(".notes-editor__footer > p").evaluateAll((items) => items.forEach((item) => item.textContent = "最近保存于 9/12 14:20"));
     await expect(page).toHaveScreenshot("notes-list.png");
     await page.locator(".notes-list__item").click();
     await expect(page).toHaveURL(new RegExp(`note=${note.id}`));
@@ -377,11 +380,15 @@ test("Notes approved visuals, accessibility, overflow and mobile primary targets
     expect(sourceBox!.y + sourceBox!.height).toBeLessThanOrEqual(navBox!.y);
     expect(deleteBox!.y + deleteBox!.height).toBeLessThanOrEqual(navBox!.y);
     await settleVisuals(page);
+    await page.locator(".notes-list time").evaluateAll((items) => items.forEach((item) => item.textContent = "最近更新 9/12 14:20"));
+    await page.locator(".notes-editor__footer > p").evaluateAll((items) => items.forEach((item) => item.textContent = "最近保存于 9/12 14:20"));
     await expect(page).toHaveScreenshot("notes-editor.png");
     await editor.getByLabel("笔记正文").fill("# 键盘顺序验证");
     await expect(saveButton).toBeEnabled();
     const backButton = editor.getByRole("button", { name: "返回笔记列表" });
     await backButton.focus();
+    await page.keyboard.press("Tab");
+    await expect(editor.getByLabel("笔记标题")).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(saveButton).toBeFocused();
     await page.keyboard.press("Tab");
@@ -389,6 +396,8 @@ test("Notes approved visuals, accessibility, overflow and mobile primary targets
   } else {
     await page.locator(".notes-list__item").click();
     await settleVisuals(page);
+    await page.locator(".notes-list time").evaluateAll((items) => items.forEach((item) => item.textContent = "最近更新 9/12 14:20"));
+    await page.locator(".notes-editor__footer > p").evaluateAll((items) => items.forEach((item) => item.textContent = "最近保存于 9/12 14:20"));
     await expect(page).toHaveScreenshot("notes-default.png");
   }
 });

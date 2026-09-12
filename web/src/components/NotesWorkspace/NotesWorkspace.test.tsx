@@ -14,7 +14,7 @@ describe("NotesWorkspace", () => {
     const sourced: Note = { ...note, sources: [{ id: "s1", kind: "document_chunk", deleted: false, qa_thread_id: null, qa_message_id: null, citation_id: null, document_id: "doc1", locator: { chunk_index: 0 }, title_snapshot: "资料.md", excerpt_snapshot: "文档摘录", created_at: "2026-01-01", source_deleted_at: null }] };
     render(<NotesWorkspace items={[sourced]} selectedNote={sourced} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
     const panel = screen.getByRole("complementary", { name: "笔记来源" });
-    expect(within(panel).getByText("文档片段")).toBeVisible();
+    expect(within(panel).getByText("文献证据")).toBeVisible();
     expect(within(panel).queryByText("问答回答")).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "文档片段" })).toHaveValue("document_chunk");
   });
@@ -75,8 +75,8 @@ describe("NotesWorkspace", () => {
     );
   });
 
-  it("uses a non-empty concept before the first non-empty Markdown line", () => {
-    expect(noteTitle("\n# Markdown 标题", "概念优先")).toBe("概念优先");
+  it("uses the editable Markdown title before the concept", () => {
+    expect(noteTitle("\n# Markdown 标题", "概念优先")).toBe("Markdown 标题");
     expect(noteTitle("\n## **Markdown** 标题", "")).toBe("Markdown 标题");
   });
 
@@ -105,8 +105,8 @@ describe("NotesWorkspace", () => {
     const onCreate = vi.fn();
     const onOpenQa = vi.fn();
     render(<NotesWorkspace items={[]} onSelect={vi.fn()} onSave={vi.fn()} onCreate={onCreate} onOpenQa={onOpenQa} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
-    expect(screen.getByText("没有符合条件的笔记")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "从 QA 记录" }));
+    expect(screen.getByText("还没有笔记")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "从 QA 导入" }));
     expect(onOpenQa).toHaveBeenCalledOnce();
     expect(onCreate).not.toHaveBeenCalled();
   });
@@ -115,7 +115,7 @@ describe("NotesWorkspace", () => {
     const user = userEvent.setup();
     const trigger = document.createElement("button"); document.body.append(trigger); trigger.focus();
     render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
-    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.textContent === "来源");
+    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.getAttribute("aria-label") === "来源");
     expect(sourceButton).toBeDefined();
     await user.click(sourceButton!);
     expect(screen.getByRole("dialog", { name: "笔记来源" })).toBeVisible();
@@ -129,7 +129,7 @@ describe("NotesWorkspace", () => {
     Object.defineProperty(window.navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockResolvedValue(undefined) } });
     const sourceNote = { ...note, sources: [{ id: "s1", kind: "qa_citation" as const, deleted: false, qa_thread_id: "t1", qa_message_id: "m1", citation_id: "c1", document_id: null, locator: { citation_id: "c1" }, title_snapshot: "来源", excerpt_snapshot: "摘录", created_at: "2026-01-01", source_deleted_at: null }] };
     const { rerender } = render(<NotesWorkspace items={[sourceNote]} selectedNote={sourceNote} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
-    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.textContent === "来源");
+    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.getAttribute("aria-label") === "来源");
     await user.click(sourceButton!);
     const copyButton = within(screen.getByRole("dialog", { name: "笔记来源" })).getByRole("button", { name: "复制来源定位" });
     copyButton.focus();
@@ -146,7 +146,7 @@ describe("NotesWorkspace", () => {
     Object.defineProperty(window.navigator, "clipboard", { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) } });
     const sourceNote = { ...note, sources: [{ id: "s1", kind: "qa_citation" as const, deleted: false, qa_thread_id: "t1", qa_message_id: "m1", citation_id: "c1", document_id: null, locator: { citation_id: "c1" }, title_snapshot: "来源", excerpt_snapshot: "摘录", created_at: "2026-01-01", source_deleted_at: null }] };
     render(<NotesWorkspace items={[sourceNote]} selectedNote={sourceNote} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
-    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.textContent === "来源");
+    const sourceButton = screen.getAllByRole("button", { hidden: true }).find((button) => button.getAttribute("aria-label") === "来源");
     await user.click(sourceButton!);
     await user.click(within(screen.getByRole("dialog", { name: "笔记来源" })).getByRole("button", { name: "复制来源定位" }));
     expect(await screen.findByText("复制失败，请重试")).toBeVisible();
@@ -171,20 +171,21 @@ describe("NotesWorkspace", () => {
     const filterDialog = screen.getByRole("dialog", { name: "筛选笔记" });
     expect(filterDialog).toContainElement(screen.getByLabelText("筛选中的标签"));
     await user.keyboard("{Escape}");
+    await user.click(screen.getByLabelText("更多笔记操作"));
     await user.click(screen.getByRole("button", { name: "清空笔记" }));
     expect(screen.getByRole("dialog", { name: "清空全部笔记" })).toBeVisible();
   });
 
-  it("keeps the live search and compact filters in the Notes header", () => {
+  it("keeps live search and filters in the library", () => {
     const { container } = render(<NotesWorkspace items={[note]} selectedNote={note} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} queryValue="memory" tagsValue="rag" sourceValue="" onFilterChange={vi.fn()} />);
     const header = container.querySelector<HTMLElement>(".notes-toolbar");
     expect(header).not.toBeNull();
-    expect(within(header!).getByLabelText("搜索笔记")).toHaveValue("memory");
-    expect(within(header!).getByLabelText("按标签筛选")).toHaveValue("rag");
-    expect(within(header!).getByLabelText("按来源筛选")).toBeVisible();
+    expect(within(container.querySelector<HTMLElement>(".notes-list")!).getByLabelText("搜索笔记")).toHaveValue("memory");
+    expect(within(container.querySelector<HTMLElement>(".notes-list")!).getByLabelText("按标签筛选")).toHaveValue("rag");
+    expect(within(container.querySelector<HTMLElement>(".notes-list")!).getByLabelText("按来源筛选")).toBeVisible();
     expect(within(header!).getByRole("button", { name: "新建笔记" })).toBeVisible();
     expect(container.querySelector(".notes-grid")).not.toBeNull();
-    expect(container.querySelector(".notes-toolbar__filters")).not.toBeNull();
+    expect(container.querySelector(".notes-library-filters")).not.toBeNull();
     expect(container.querySelector(".notes-grid > .notes-list")).not.toBeNull();
     expect(container.querySelector(".notes-grid > .notes-editor")).not.toBeNull();
     expect(container.querySelector(".notes-grid > .notes-source")).not.toBeNull();
