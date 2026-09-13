@@ -1,0 +1,6 @@
+# Build context: an isolated directory containing only the verified dist/ tree.
+ARG BACKEND_IMAGE
+FROM ${BACKEND_IMAGE}
+COPY --chown=10001:10001 dist/ /app/web/dist/
+ARG WEB_REVISION
+LABEL com.zhiyan.web-revision=${WEB_REVISION}

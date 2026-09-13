@@ -221,6 +221,9 @@ $operationLock = $null
 
 try {
     $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+    if ([IO.Path]::GetFileName($config.ComposeFile) -eq 'compose.release.yaml') {
+        throw 'Fixed-image deployment requires the learning_release entry point; legacy rebuild is disabled'
+    }
     $operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
     Assert-BackupDriveCapacity -Path $config.BackupRoot
     if (-not (Test-UpdateHealth -Config $config)) {

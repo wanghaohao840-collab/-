@@ -13,6 +13,10 @@ supported interface，并且只保留在 Compose 私有网络内。派生镜像�
 正式安装前应确认活动网络为 `Private`；入站规则仅允许 `Private` / `LocalSubnet` 的
 TCP 7860。公网访问必须另行部署 HTTPS 反向代理与访问控制。
 
+本地开发默认 `APP_BIND_ADDRESS=127.0.0.1`；只有确认需要局域网访问时才改为
+`0.0.0.0` 并保留上述 Private/LocalSubnet 规则。容器内部 `APP_HOST=0.0.0.0`
+是 Docker 端口转发所需，不代表宿主机对公网开放。
+
 ```powershell
 Get-NetConnectionProfile | Format-Table InterfaceAlias, InterfaceIndex, NetworkCategory, IPv4Connectivity, IPv6Connectivity
 Get-NetFirewallRule -DisplayName 'Python Self Agent - Private Intranet 7860' |
@@ -116,6 +120,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File deploy\windows\Install-O
 - `PythonSelfAgent-DailyBackup`：每天 03:00 一致性冷备份，保留 7 daily 与 4 weekly 备份集；
 - `PythonSelfAgent-MonthlyRestoreDrill`：first Sunday 04:00 隔离恢复演练。
 
+任务以 `-WindowStyle Hidden -NonInteractive` 运行；成功、恢复和失败提醒写入
+`deploy-state/notifications/*.latest.json`，不再弹出 Toast。计划任务定义更新后
+应确认四项 Action 都包含 `-WindowStyle Hidden`。
+
 若旧版本在 `Register-ScheduledTask` 报 `0x80070057`，请先检查实际已注册的
 任务，不要把“前三项已成功、第四项失败”误认为全部失败。月度任务现通过
 Windows Task Scheduler 原生接口生成 XML，并关闭该任务不支持的统一调度
@@ -167,3 +175,23 @@ D:\python_self_agent\venv\Scripts\python.exe deploy\smoke_test.py `
 ```
 
 深度检查会实际调用 LLM；凭据未配置前不要运行。
+
+## 安全更新与资源边界
+
+`Update-Deployment.ps1` 依次执行部署测试、配置校验、可验证冷备份、旧镜像留存、
+`build --pull --no-cache`、App/Qdrant 的可修复 Critical 漏洞扫描、健康和深度冒烟。
+扫描失败不得跳过门禁；候选部署失败按报告中的旧镜像与备份恢复。
+无缓存构建会重新下载依赖，首次运行可能需要数分钟。
+
+Qdrant 保持固定版本，额外安装发行版修复的 OpenSSL 包，并验证最低版本。
+版本依据为 [Debian CVE-2026-75803 修复记录](https://security-tracker.debian.org/tracker/CVE-2026-75803)。
+这里的扫描是发布门槛，不表示镜像不存在其他严重性、无修复版本或尚未披露的漏洞。
+
+App/Qdrant 默认各限制 2 CPU、2 GiB、256 进程；`local` 容器日志每个服务最多
+5 个 10 MiB 文件。可在 `deploy/.env` 调整 `*_CPU_LIMIT`、`*_MEMORY_LIMIT`
+和 `*_PIDS_LIMIT`。Neo4j 的资源上限也已定义，但 `graph` profile 仍不启用。
+
+健康巡检检查数据盘与备份盘，默认低于 10 GiB 或 10% 可用空间时写入后台告警，
+不把磁盘不足当作重启可修复故障。阈值为 `OPERATIONS_MIN_FREE_DISK_GB` 与
+`OPERATIONS_MIN_FREE_DISK_PERCENT`。备份保留数可通过 `BACKUP_DAILY_RETENTION`
+（默认 7）和 `BACKUP_WEEKLY_RETENTION`（默认 4）设置，范围均为 1–365。

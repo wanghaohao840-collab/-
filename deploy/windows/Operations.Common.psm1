@@ -112,6 +112,14 @@ function Get-OperationsConfig {
     }
     $repositoryPath = (Resolve-Path -LiteralPath $RepositoryRoot).Path
     $composeFile = Join-Path $repositoryPath 'compose.yaml'
+    $releaseFile = Join-Path $repositoryPath 'compose.release.yaml'
+    if (Test-Path -LiteralPath $releaseFile) {
+        $releaseItem = Get-Item -Force -LiteralPath $releaseFile
+        if ($releaseItem.PSIsContainer -or ($releaseItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Invalid fixed-image release configuration'
+        }
+        $composeFile = $releaseFile
+    }
     if (-not (Test-Path -LiteralPath $composeFile -PathType Leaf)) {
         throw "Repository compose.yaml was not found: $repositoryPath"
     }
@@ -276,6 +284,30 @@ function Show-OperationsToast {
     [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]::CreateToastNotifier('Python Self Agent').Show($toast)
 }
 
+function Write-BackgroundNotification {
+    param(
+        [Parameter(Mandatory)][string]$StateRoot,
+        [Parameter(Mandatory)][string]$Category,
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message
+    )
+    $notificationRoot = Join-Path $StateRoot 'notifications'
+    New-Item -ItemType Directory -Force -Path $notificationRoot | Out-Null
+    $safeCategory = $Category -replace '[^a-zA-Z0-9_.-]', '_'
+    $payload = [ordered]@{
+        category = $safeCategory
+        title = Protect-LogText $Title
+        message = Protect-LogText $Message
+        created_at = (Get-Date).ToUniversalTime().ToString('o')
+        acknowledged = $false
+    } | ConvertTo-Json
+    [IO.File]::WriteAllText(
+        (Join-Path $notificationRoot "$safeCategory.latest.json"),
+        $payload,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
 function Send-OperationsNotification {
     [CmdletBinding()]
     param(
@@ -303,7 +335,8 @@ function Send-OperationsNotification {
         if ($null -eq $NotificationAction) {
             $NotificationAction = {
                 param($NotificationTitle, $NotificationMessage)
-                Show-OperationsToast -Title $NotificationTitle -Message $NotificationMessage
+                Write-BackgroundNotification -StateRoot $StateRoot -Category $Category `
+                    -Title $NotificationTitle -Message $NotificationMessage
             }
         }
         & $NotificationAction (Protect-LogText $Title) (Protect-LogText $Message) | Out-Null
@@ -388,13 +421,13 @@ function Get-FreeTcpPort {
 
 function Enter-OperationsLock {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$StateRoot)
+    param([Parameter(Mandatory)][string]$StateRoot, [string]$RecoveryId)
 
     $root = [IO.Path]::GetFullPath($StateRoot)
     New-Item -ItemType Directory -Force -Path $root | Out-Null
     $lockPath = Join-Path $root 'operations.lock'
     try {
-        return [IO.File]::Open(
+        $operationHandle = [IO.File]::Open(
             $lockPath,
             [IO.FileMode]::OpenOrCreate,
             [IO.FileAccess]::ReadWrite,
@@ -402,6 +435,55 @@ function Enter-OperationsLock {
         )
     } catch [IO.IOException] {
         throw 'Another deployment operation is already in progress'
+    }
+    try {
+        $markerPath = Join-Path $root 'maintenance.json'
+        $marker = $null
+        try {
+            $marker = Get-Item -Force -LiteralPath $markerPath -ErrorAction Stop
+        } catch [System.Management.Automation.ItemNotFoundException] {
+            # Only an absent marker permits ordinary operations.
+        }
+        if ($null -ne $marker -and [string]::IsNullOrEmpty($RecoveryId)) {
+            throw 'Persistent deployment maintenance requires recovery'
+        }
+        if (-not [string]::IsNullOrEmpty($RecoveryId)) {
+            try {
+                $parsedId = [guid]::ParseExact($RecoveryId, 'D')
+                if ($parsedId.ToString('D') -cne $RecoveryId -or $null -eq $marker -or
+                    $marker.PSIsContainer -or ($marker.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $marker.Length -gt 4096) {
+                    throw 'invalid marker'
+                }
+                $markerStream = [IO.File]::Open($markerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try {
+                    $buffer = New-Object byte[] 4097
+                    $total = 0
+                    while ($total -lt $buffer.Length) {
+                        $read = $markerStream.Read($buffer, $total, $buffer.Length - $total)
+                        if ($read -eq 0) { break }
+                        $total += $read
+                    }
+                    if ($total -gt 4096) { throw 'invalid marker' }
+                    $utf8 = New-Object Text.UTF8Encoding($false, $true)
+                    $content = $utf8.GetString($buffer, 0, $total) | ConvertFrom-Json -ErrorAction Stop
+                } finally {
+                    $markerStream.Dispose()
+                }
+                $keys = @($content.PSObject.Properties.Name | Sort-Object)
+                if (($keys -join ',') -ne 'operation_id,version' -or
+                    $content.version -isnot [int] -or $content.version -ne 1 -or
+                    $content.operation_id -isnot [string] -or $content.operation_id -cne $RecoveryId) {
+                    throw 'invalid marker'
+                }
+            } catch {
+                throw 'Invalid maintenance recovery identity'
+            }
+        }
+        return $operationHandle
+    } catch {
+        $operationHandle.Dispose()
+        throw
     }
 }
 

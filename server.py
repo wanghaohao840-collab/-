@@ -1,4 +1,4 @@
-from api.app import create_application
+from deploy.maintenance_app import create_server_application
 
 
-app = create_application()
+app = create_server_application()

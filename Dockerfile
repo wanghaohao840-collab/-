@@ -32,6 +32,8 @@ COPY ui/ /app/ui/
 COPY evals/ /app/evals/
 COPY deploy/entrypoint.sh deploy/healthcheck.py deploy/backup.sh deploy/restore.sh deploy/smoke_test.py deploy/embedding_probe.py deploy/embedding_migrate.py deploy/embedding_cutover.py /app/deploy/
 COPY server.py /app/server.py
+COPY deploy/learning_offline_upgrade.py /app/deploy/learning_offline_upgrade.py
+COPY deploy/maintenance_app.py /app/deploy/maintenance_app.py
 COPY --from=web-build /web/dist /app/web/dist
 RUN mkdir -p /app/data \
     && chmod 0755 /app/deploy/entrypoint.sh \

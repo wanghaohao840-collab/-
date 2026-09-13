@@ -74,16 +74,40 @@ function Test-DeploymentHttp {
 function Invoke-DeploymentHealthChecks {
     param([Parameter(Mandatory)]$Config)
 
+    $minimumGbRaw = Read-DeployEnvValue -EnvFile $Config.EnvFile -Name 'OPERATIONS_MIN_FREE_DISK_GB'
+    $minimumPercentRaw = Read-DeployEnvValue -EnvFile $Config.EnvFile -Name 'OPERATIONS_MIN_FREE_DISK_PERCENT'
+    $minimumGb = if ([string]::IsNullOrWhiteSpace($minimumGbRaw)) { 10.0 } else { [double]$minimumGbRaw }
+    $minimumPercent = if ([string]::IsNullOrWhiteSpace($minimumPercentRaw)) { 10.0 } else { [double]$minimumPercentRaw }
+    if ($minimumGb -lt 0 -or $minimumPercent -lt 0 -or $minimumPercent -gt 100) {
+        return [PSCustomObject]@{ Healthy = $false; CanRecover = $false; Reason = 'Disk alert thresholds are invalid' }
+    }
+    $checkedDrives = @{}
+    foreach ($path in @($Config.DataRoot, $Config.BackupRoot)) {
+        $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($path))
+        if ($checkedDrives.ContainsKey($root)) { continue }
+        $checkedDrives[$root] = $true
+        $drive = [IO.DriveInfo]::new($root)
+        $freeGb = $drive.AvailableFreeSpace / 1GB
+        $freePercent = if ($drive.TotalSize -eq 0) { 0 } else { 100.0 * $drive.AvailableFreeSpace / $drive.TotalSize }
+        if ($freeGb -lt $minimumGb -or $freePercent -lt $minimumPercent) {
+            return [PSCustomObject]@{
+                Healthy = $false; CanRecover = $false
+                Reason = "Low disk space on $root ($([Math]::Round($freeGb, 1)) GB, $([Math]::Round($freePercent, 1))% free)"
+            }
+        }
+    }
+
     if (-not (Test-DockerReady)) {
-        return [PSCustomObject]@{ Healthy = $false; Reason = 'Docker Engine is not ready' }
+        return [PSCustomObject]@{ Healthy = $false; CanRecover = $true; Reason = 'Docker Engine is not ready' }
     }
 
     $composeHealth = Test-ComposeHealth -Config $Config
     if (-not $composeHealth.Healthy) {
-        return [PSCustomObject]@{ Healthy = $false; Reason = $composeHealth.Reason }
+        return [PSCustomObject]@{ Healthy = $false; CanRecover = $true; Reason = $composeHealth.Reason }
     }
 
-    return Test-DeploymentHttp -Config $Config
+    $http = Test-DeploymentHttp -Config $Config
+    return [PSCustomObject]@{ Healthy = $http.Healthy; CanRecover = $true; Reason = $http.Reason }
 }
 
 $modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'
@@ -92,6 +116,8 @@ $operationsStateRoot = $trustedFallbackStateRoot
 $config = $null
 $previousStatus = $null
 $recoveryAttempted = $false
+$operationLock = $null
+$maintenanceActive = $false
 
 try {
     Import-Module $modulePath -Force
@@ -99,15 +125,33 @@ try {
     $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot
     $operationsStateRoot = $config.StateRoot
     $previousStatus = Get-PreviousHealthStatus -OperationsStateRoot $operationsStateRoot
+    try {
+        $operationLock = Enter-OperationsLock -StateRoot $operationsStateRoot
+    } catch {
+        if ($_.Exception.Message -notin @('Another deployment operation is already in progress', 'Persistent deployment maintenance requires recovery')) {
+            throw
+        }
+        $maintenanceActive = $true
+        Write-OperationsLog $operationsStateRoot 'health' 'Health recovery deferred while maintenance is active'
+        Write-OperationsStatus $operationsStateRoot @{
+            status = 'maintenance'; category = 'health'; recovery_attempted = $false
+            checked_at = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        return
+    }
     $health = Invoke-DeploymentHealthChecks -Config $config
-    if (-not $health.Healthy -and $AttemptRecovery) {
+    if (-not $health.Healthy -and $health.CanRecover -and $AttemptRecovery) {
         $recoveryAttempted = $true
         Write-OperationsLog $operationsStateRoot 'health' "Health check failed; attempting Compose recovery: $($health.Reason)" 'WARN'
 
         try {
             Push-Location $config.RepositoryRoot
             try {
-                Invoke-External docker @('compose', '--env-file', $config.EnvFile, 'up', '-d') | Out-Null
+                $composeArgs = @('compose', '--file', $config.ComposeFile, '--env-file', $config.EnvFile, 'up', '-d')
+                if ([IO.Path]::GetFileName($config.ComposeFile) -eq 'compose.release.yaml') {
+                    $composeArgs += @('--no-build', '--pull', 'never')
+                }
+                Invoke-External docker $composeArgs | Out-Null
             } finally {
                 Pop-Location
             }
@@ -150,4 +194,8 @@ try {
         Write-TrustedFallbackTelemetry -Category 'health'
     }
     throw
+} finally {
+    if ($null -ne $operationLock) {
+        Exit-OperationsLock -Lock $operationLock
+    }
 }

@@ -48,14 +48,39 @@ def import_module() -> str:
 
 
 @pytest.fixture
-def trusted_fallback_state():
-    state = ROOT / "deploy-state"
-    if state.exists():
-        pytest.skip("trusted fallback state exists and must not be disturbed")
-    try:
-        yield state
-    finally:
-        shutil.rmtree(state, ignore_errors=True)
+def trusted_fallback_state(tmp_path: Path, monkeypatch):
+    # Fallback paths are derived from the script directory, so copy the scripts
+    # rather than touching a checkout's real telemetry or skipping its tests.
+    repository = tmp_path / "trusted-script-repository"
+    windows = repository / "deploy" / "windows"
+    windows.mkdir(parents=True)
+    shutil.copy2(MODULE, windows / MODULE.name)
+    for name in ("START", "HEALTH"):
+        script = globals()[name]
+        copied = windows / script.name
+        shutil.copy2(script, copied)
+        monkeypatch.setitem(globals(), name, copied)
+    yield repository / "deploy-state"
+
+
+@pytest.fixture
+def isolated_health_repository(tmp_path: Path):
+    """Run the real health logic without local credentials or desktop toasts."""
+    repository = tmp_path / "repository"
+    windows = repository / "deploy" / "windows"
+    windows.mkdir(parents=True)
+    (repository / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    env_file = repository / "deploy.env"
+    env_file.write_text(
+        "DEPLOY_DATA_ROOT=data\nDEPLOY_BACKUP_ROOT=backups\n", encoding="utf-8"
+    )
+    shutil.copy2(HEALTH, windows / HEALTH.name)
+    (windows / MODULE.name).write_text(
+        MODULE.read_text(encoding="utf-8")
+        + "\nfunction Show-OperationsToast { param($Title, $Message) }\n",
+        encoding="utf-8-sig",
+    )
+    return repository, env_file, windows / HEALTH.name
 
 
 def test_common_module_redacts_named_secrets_and_url_credentials():
@@ -514,8 +539,9 @@ def test_health_attempts_at_most_one_compose_recovery():
 
 
 def test_health_runs_one_recovery_before_reporting_persistent_http_failure(
-    tmp_path: Path,
+    tmp_path: Path, isolated_health_repository,
 ):
+    repository, env_file, health_script = isolated_health_repository
     docker_calls = tmp_path / "docker-calls.jsonl"
     state = tmp_path / "state"
     result = run_ps(
@@ -525,8 +551,8 @@ def test_health_runs_one_recovery_before_reporting_persistent_http_failure(
         + "'app|running|healthy'; 'qdrant|running|healthy' }; "
         + "function global:Invoke-WebRequest { throw 'forced HTTP failure' }; "
         + "try { "
-        + f"& '{ps_quote(HEALTH)}' -RepositoryRoot '{ps_quote(ROOT)}' "
-        + "-EnvFile 'deploy/.env' "
+        + f"& '{ps_quote(health_script)}' -RepositoryRoot '{ps_quote(repository)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' "
         + f"-StateRoot '{ps_quote(state)}' -AttemptRecovery $true "
         + "} catch { }; "
         + "if (-not (Test-Path (Join-Path '"
@@ -638,8 +664,9 @@ def test_scripts_record_missing_env_failures_without_leaking_secret(
 
 
 def test_health_reruns_checks_once_when_compose_recovery_command_fails(
-    tmp_path: Path,
+    tmp_path: Path, isolated_health_repository,
 ):
+    repository, env_file, health_script = isolated_health_repository
     docker_calls = tmp_path / "docker-calls.jsonl"
     state = tmp_path / "state"
     result = run_ps(
@@ -651,8 +678,8 @@ def test_health_reruns_checks_once_when_compose_recovery_command_fails(
         + "'app|running|healthy'; 'qdrant|running|healthy' }; "
         + "function global:Invoke-WebRequest { throw 'forced HTTP failure' }; "
         + "try { "
-        + f"& '{ps_quote(HEALTH)}' -RepositoryRoot '{ps_quote(ROOT)}' "
-        + "-EnvFile 'deploy/.env' "
+        + f"& '{ps_quote(health_script)}' -RepositoryRoot '{ps_quote(repository)}' "
+        + f"-EnvFile '{ps_quote(env_file)}' "
         + f"-StateRoot '{ps_quote(state)}' -AttemptRecovery $true "
         + "} catch { }; exit 0"
     )
@@ -664,11 +691,11 @@ def test_health_reruns_checks_once_when_compose_recovery_command_fails(
     assert calls[-1] == [
         "compose",
         "--project-directory",
-        str(ROOT),
+        str(repository),
         "--file",
-        str(ROOT / "compose.yaml"),
+        str(repository / "compose.yaml"),
         "--env-file",
-        str(ROOT / "deploy/.env"),
+        str(env_file),
         "ps",
         "--format",
         "{{.Service}}|{{.State}}|{{.Health}}",

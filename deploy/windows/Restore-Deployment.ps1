@@ -9,7 +9,8 @@ param(
     [ValidateRange(1, 600)][int]$HealthTimeoutSeconds = 180,
     [scriptblock]$ExternalInvoker,
     [scriptblock]$HealthProbe,
-    [IO.FileStream]$InheritedOperationLock
+    [IO.FileStream]$InheritedOperationLock,
+    [switch]$KeepStopped
 )
 
 Set-StrictMode -Version Latest
@@ -39,22 +40,27 @@ function Assert-InheritedOperationsLock {
         throw 'The inherited lock must be a live exclusive operations lock'
     }
 
-    $probe = $null
-    try {
-        $probe = [IO.File]::Open(
-            $expectedPath,
-            [IO.FileMode]::OpenOrCreate,
-            [IO.FileAccess]::ReadWrite,
-            [IO.FileShare]::None
-        )
-    } catch [IO.IOException] {
-        return
-    } finally {
-        if ($null -ne $probe) {
-            $probe.Dispose()
+    foreach ($access in @([IO.FileAccess]::Read, [IO.FileAccess]::Write)) {
+        $probe = $null
+        $exclusive = $false
+        try {
+            # A None-sharing probe would itself conflict with even a shared
+            # parent handle. Only parent-denied access proves exclusion.
+            $probe = [IO.File]::Open(
+                $expectedPath, [IO.FileMode]::Open, $access,
+                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+            )
+        } catch [IO.IOException] {
+            if (($_.Exception.HResult -band 0xffff) -eq 32) {
+                $exclusive = $true
+            }
+        } finally {
+            if ($null -ne $probe) { $probe.Dispose() }
+        }
+        if (-not $exclusive) {
+            throw 'The inherited lock must be a live exclusive operations lock'
         }
     }
-    throw 'The inherited lock must be a live exclusive operations lock'
 }
 
 function Test-PathOverlap {
@@ -96,7 +102,7 @@ function Invoke-ComposeForServices {
     param(
         [Parameter(Mandatory)]$Config,
         [Parameter(Mandatory)][ValidateSet('stop', 'start')][string]$Action,
-        [Parameter(Mandatory)][string[]]$Services
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Services
     )
     if ($Services.Count -eq 0) { return }
     Invoke-RestoreExternal -FilePath 'docker' -ArgumentList (
@@ -157,7 +163,13 @@ function Rename-Sibling {
     Rename-Item -LiteralPath $LiteralPath -NewName ([IO.Path]::GetFileName($Destination))
 }
 
+if ($KeepStopped -and $null -eq $InheritedOperationLock) {
+    throw 'KeepStopped requires an inherited live exclusive operations lock'
+}
 $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
+if ($KeepStopped) {
+    Assert-InheritedOperationsLock -Lock $InheritedOperationLock -StateRoot $config.StateRoot | Out-Null
+}
 $dataRoot = [IO.Path]::GetFullPath($config.DataRoot).TrimEnd('\', '/')
 $backupPath = [IO.Path]::GetFullPath($config.BackupRoot).TrimEnd('\', '/')
 if ((Test-PathOverlap $dataRoot $backupPath) -or (Test-PathOverlap $dataRoot $config.StateRoot)) {
@@ -251,6 +263,9 @@ $qdrantVolumeName = $null
 $qdrantHelperImage = $null
 try {
     Invoke-ComposeForServices -Config $config -Action stop -Services $runningServices
+    if ($KeepStopped -and @(Get-RunningDeploymentServices -Config $config).Count -ne 0) {
+        throw 'Deployment services remain running after stop'
+    }
     if ($useQdrantVolume) {
         New-Item -ItemType Directory -Force -Path $config.StateRoot | Out-Null
         Assert-SafePath -Path $qdrantRollbackArchive -AllowedRoot $config.StateRoot | Out-Null
@@ -274,8 +289,10 @@ try {
         Import-QdrantVolume -Name $qdrantVolumeName -Archive $qdrantArchivePath -HelperImage $qdrantHelperImage -RequireEmpty -ExternalInvoker $ExternalInvoker
         $qdrantCandidateInstalled = $true
     }
-    Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
-    if (-not (Test-RestoreHealth -Config $config)) { throw 'Deployment did not become healthy after the restore swap' }
+    if (-not $KeepStopped) {
+        Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
+        if (-not (Test-RestoreHealth -Config $config)) { throw 'Deployment did not become healthy after the restore swap' }
+    }
 } catch {
     $restoreError = $_
     $compensationErrors = @()
@@ -314,11 +331,13 @@ try {
         }
     }
     $restartSucceeded = $false
-    try {
-        Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
-        $restartSucceeded = $true
-    } catch {
-        $compensationErrors += "restart services: $($_.Exception.Message)"
+    if (-not $KeepStopped) {
+        try {
+            Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
+            $restartSucceeded = $true
+        } catch {
+            $compensationErrors += "restart services: $($_.Exception.Message)"
+        }
     }
     if ($rollbackCreated -and $rollbackRestored -and $restartSucceeded) {
         try {
@@ -352,6 +371,8 @@ try {
     Rollback = $rollbackPath
     QdrantVolume = $qdrantVolumeName
     QdrantRollback = if ($qdrantRollbackCreated) { $qdrantRollbackArchive } else { $null }
+    KeptStopped = [bool]$KeepStopped
+    PreviouslyRunningServices = @($runningServices)
 }
 } finally {
     if ($ownsOperationLock) {

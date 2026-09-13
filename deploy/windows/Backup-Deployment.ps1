@@ -8,7 +8,8 @@ param(
     [ValidateRange(1, 600)][int]$HealthTimeoutSeconds = 180,
     [scriptblock]$ExternalInvoker,
     [scriptblock]$HealthProbe,
-    [IO.FileStream]$InheritedOperationLock
+    [IO.FileStream]$InheritedOperationLock,
+    [switch]$KeepStopped
 )
 
 Set-StrictMode -Version Latest
@@ -38,22 +39,27 @@ function Assert-InheritedOperationsLock {
         throw 'The inherited lock must be a live exclusive operations lock'
     }
 
-    $probe = $null
-    try {
-        $probe = [IO.File]::Open(
-            $expectedPath,
-            [IO.FileMode]::OpenOrCreate,
-            [IO.FileAccess]::ReadWrite,
-            [IO.FileShare]::None
-        )
-    } catch [IO.IOException] {
-        return
-    } finally {
-        if ($null -ne $probe) {
-            $probe.Dispose()
+    foreach ($access in @([IO.FileAccess]::Read, [IO.FileAccess]::Write)) {
+        $probe = $null
+        $exclusive = $false
+        try {
+            # A None-sharing probe would itself conflict with even a shared
+            # parent handle. Only parent-denied access proves exclusion.
+            $probe = [IO.File]::Open(
+                $expectedPath, [IO.FileMode]::Open, $access,
+                ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+            )
+        } catch [IO.IOException] {
+            if (($_.Exception.HResult -band 0xffff) -eq 32) {
+                $exclusive = $true
+            }
+        } finally {
+            if ($null -ne $probe) { $probe.Dispose() }
+        }
+        if (-not $exclusive) {
+            throw 'The inherited lock must be a live exclusive operations lock'
         }
     }
-    throw 'The inherited lock must be a live exclusive operations lock'
 }
 
 function Test-PathOverlap {
@@ -114,7 +120,7 @@ function Invoke-ComposeForServices {
     param(
         [Parameter(Mandatory)]$Config,
         [Parameter(Mandatory)][ValidateSet('stop', 'start')][string]$Action,
-        [Parameter(Mandatory)][string[]]$Services
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Services
     )
     if ($Services.Count -eq 0) {
         return
@@ -178,6 +184,26 @@ function Write-BackupChecksum {
     return $hash
 }
 
+function Get-BackupRetentionCount {
+    param(
+        [Parameter(Mandatory)][string]$EnvFile,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][int]$Default
+    )
+    $raw = Read-DeployEnvValue -EnvFile $EnvFile -Name $Name
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $Default
+    }
+    $parsed = 0
+    if (-not [int]::TryParse($raw, [ref]$parsed) -or $parsed -lt 1 -or $parsed -gt 365) {
+        throw "$Name must be an integer between 1 and 365"
+    }
+    return $parsed
+}
+
+if ($KeepStopped -and $null -eq $InheritedOperationLock) {
+    throw 'KeepStopped requires an inherited live exclusive operations lock'
+}
 $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot -BackupRoot $BackupRoot
 $dataRoot = $config.DataRoot
 $backupPath = $config.BackupRoot
@@ -223,6 +249,9 @@ $operationError = $null
 $restartError = $null
 try {
     Invoke-ComposeForServices -Config $config -Action stop -Services $runningServices
+    if ($KeepStopped -and @(Get-RunningDeploymentServices -Config $config).Count -ne 0) {
+        throw 'Deployment services remain running after stop'
+    }
     $qdrantHash = $null
     $qdrantVolumeName = Get-QdrantVolumeName -Config $config
     if (Test-QdrantVolumeExists -Name $qdrantVolumeName -ExternalInvoker $ExternalInvoker) {
@@ -248,7 +277,9 @@ try {
     $operationError = $_
 } finally {
     try {
-        Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
+        if (-not $KeepStopped) {
+            Invoke-ComposeForServices -Config $config -Action start -Services $runningServices
+        }
     } catch {
         $restartError = $_
     }
@@ -259,6 +290,19 @@ if ($null -ne $operationError) {
 }
 if ($null -ne $restartError) {
     throw $restartError
+}
+if ($KeepStopped) {
+    # Parent owns the live lock, restart/recovery and final backup retention.
+    [PSCustomObject]@{
+        Archive = $archive
+        Checksum = "$archive.sha256"
+        Metadata = "$archive.meta"
+        QdrantArchive = if (Test-Path -LiteralPath $qdrantArchive -PathType Leaf) { $qdrantArchive } else { $null }
+        QdrantChecksum = if (Test-Path -LiteralPath "$qdrantArchive.sha256" -PathType Leaf) { "$qdrantArchive.sha256" } else { $null }
+        KeptStopped = $true
+        PreviouslyRunningServices = @($runningServices)
+    }
+    return
 }
 if (-not (Test-BackupHealth -Config $config)) {
     throw 'Deployment did not become healthy after the cold backup'
@@ -295,8 +339,10 @@ if ($weeklySet.Count -eq 0) {
     }
 }
 
-$dailyPlan = Get-RetentionPlan -Directory $dailyDirectory -Prefix 'assistant-' -Keep 7
-$weeklyPlan = Get-RetentionPlan -Directory $weeklyDirectory -Prefix 'assistant-week-' -Keep 4
+$dailyRetention = Get-BackupRetentionCount -EnvFile $config.EnvFile -Name 'BACKUP_DAILY_RETENTION' -Default 7
+$weeklyRetention = Get-BackupRetentionCount -EnvFile $config.EnvFile -Name 'BACKUP_WEEKLY_RETENTION' -Default 4
+$dailyPlan = Get-RetentionPlan -Directory $dailyDirectory -Prefix 'assistant-' -Keep $dailyRetention
+$weeklyPlan = Get-RetentionPlan -Directory $weeklyDirectory -Prefix 'assistant-week-' -Keep $weeklyRetention
 foreach ($set in @($dailyPlan.Remove)) {
     Remove-BackupSet -BackupSet $set -AllowedRoot $dailyDirectory
 }

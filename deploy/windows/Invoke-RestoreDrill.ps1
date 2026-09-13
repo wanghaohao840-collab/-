@@ -327,7 +327,8 @@ try {
     $stage = 'extraction'
     Invoke-DrillExternal -FilePath 'tar.exe' -ArgumentList @('-C', $drillDataRoot, '-xzf', $archivePath) | Out-Null
     Assert-BackupTreeSafe -Path $drillDataRoot -AllowedRoot $drillDirectory | Out-Null
-    foreach ($requiredDirectory in @('app', 'qdrant')) {
+    $requiredDirectories = if ([string]::IsNullOrWhiteSpace($qdrantArchivePath)) { @('app', 'qdrant') } else { @('app') }
+    foreach ($requiredDirectory in $requiredDirectories) {
         if (-not (Test-Path -LiteralPath (Join-Path $drillDataRoot $requiredDirectory) -PathType Container)) {
             throw "Archive is missing required directory: $requiredDirectory"
         }
@@ -349,8 +350,12 @@ try {
     }
     $stage = 'compose-start'
     $composeAttempted = $true
+    $startCommand = @('up', '-d')
+    if ([IO.Path]::GetFileName($config.ComposeFile) -eq 'compose.release.yaml') {
+        $startCommand += @('--no-build', '--pull', 'never')
+    }
     Invoke-DrillExternal -FilePath 'docker' -ArgumentList (
-        Get-DrillComposeArguments -Config $config -ProjectName $projectName -DrillEnvFile $temporaryEnv -Command @('up', '-d')
+        Get-DrillComposeArguments -Config $config -ProjectName $projectName -DrillEnvFile $temporaryEnv -Command $startCommand
     ) | Out-Null
     $stage = 'health-check'
     $healthy = Wait-Until -TimeoutSeconds $HealthTimeoutSeconds -IntervalSeconds 2 -Condition {

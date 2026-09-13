@@ -227,7 +227,7 @@ function New-OperationsTaskAction {
         [switch]$IncludeBackupRoot
     )
 
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -RepositoryRoot "{1}" -EnvFile "{2}" -StateRoot "{3}"' -f $ScriptPath, $Config.RepositoryRoot, $Config.EnvFile, $Config.StateRoot
+    $arguments = '-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -RepositoryRoot "{1}" -EnvFile "{2}" -StateRoot "{3}"' -f $ScriptPath, $Config.RepositoryRoot, $Config.EnvFile, $Config.StateRoot
     if ($IncludeBackupRoot) {
         $arguments += ' -BackupRoot "{0}"' -f $Config.BackupRoot
     }

@@ -42,11 +42,25 @@ $modulePath = Join-Path $PSScriptRoot 'Operations.Common.psm1'
 $moduleAvailable = $false
 $config = $null
 $startupJob = $null
+$operationLock = $null
 
 try {
     Import-Module $modulePath -Force
     $moduleAvailable = $true
     $config = Get-OperationsConfig -RepositoryRoot $RepositoryRoot -EnvFile $EnvFile -StateRoot $StateRoot
+    try {
+        $operationLock = Enter-OperationsLock -StateRoot $config.StateRoot
+    } catch {
+        if ($_.Exception.Message -notin @('Another deployment operation is already in progress', 'Persistent deployment maintenance requires recovery')) {
+            throw
+        }
+        Write-OperationsLog $config.StateRoot 'startup' 'Login recovery deferred while maintenance is active'
+        Write-OperationsStatus $config.StateRoot @{
+            status = 'maintenance'; category = 'startup'
+            checked_at = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        return
+    }
     $deadlineUtc = (Get-Date).ToUniversalTime().AddSeconds($TimeoutSeconds)
     $startupJob = Start-Job -ScriptBlock {
         param($Config, $Deadline, $ModulePath)
@@ -69,7 +83,11 @@ try {
 
             Push-Location $Config.RepositoryRoot
             try {
-                Invoke-External docker @('compose', '--env-file', $Config.EnvFile, 'up', '-d') | Out-Null
+                $composeArgs = @('compose', '--file', $Config.ComposeFile, '--env-file', $Config.EnvFile, 'up', '-d')
+                if ([IO.Path]::GetFileName($Config.ComposeFile) -eq 'compose.release.yaml') {
+                    $composeArgs += @('--no-build', '--pull', 'never')
+                }
+                Invoke-External docker $composeArgs | Out-Null
             } finally {
                 Pop-Location
             }
@@ -129,5 +147,8 @@ try {
 } finally {
     if ($null -ne $startupJob) {
         Remove-Job -Job $startupJob -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $operationLock) {
+        Exit-OperationsLock -Lock $operationLock
     }
 }
