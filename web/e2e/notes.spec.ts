@@ -320,6 +320,41 @@ test("failed projection is non-blocking and explicit retry converges", async ({ 
   await expect(page.getByLabel("笔记正文")).toHaveValue(/笔记仍然成功保存/);
 });
 
+test("Notes long content and multiple sources stay within the workspace", async ({ appUrl, page }, testInfo) => {
+  await registerUser(page, appUrl, uniqueUsername(`notes_long_${testInfo.project.name}`));
+  const title = "长期知识积累与跨文档理解".repeat(12);
+  const fixture = {
+    id: "layout-note", body_markdown: `# ${title}\n\n${"理解、证据与概念关系。".repeat(800)}`,
+    concept: "跨文档理解", tags: ["长期积累", "RAG"], version: 1, projection_state: "ready",
+    created_at: "2026-09-13T00:00:00Z", updated_at: "2026-09-13T00:00:00Z", deleted_at: null,
+    sources: Array.from({ length: 8 }, (_, index) => ({
+      id: `source-${index}`, kind: "document_chunk", deleted: false,
+      qa_thread_id: null, qa_message_id: null, citation_id: `citation-${index}-${"abcdef".repeat(15)}`,
+      document_id: `document-${index}`, locator: { page: index + 1 },
+      title_snapshot: `${"LongDocumentNameWithoutSpaces".repeat(10)}.pdf`,
+      excerpt_snapshot: "可追溯的文献证据。".repeat(35),
+      created_at: "2026-09-13T00:00:00Z", source_deleted_at: null,
+    })),
+  };
+  await page.route("**/api/v1/notes?*", (route) => route.fulfill({ json: { items: [fixture], next_cursor: null } }));
+  await page.route("**/api/v1/notes/layout-note", (route) => route.fulfill({ json: fixture }));
+  await page.goto(`${appUrl}/notes?note=layout-note`);
+  await expect(page.getByLabel("笔记正文")).toHaveValue(fixture.body_markdown);
+  await page.getByRole("tab", { name: "预览" }).click();
+  await expect(page.getByRole("region", { name: "笔记编辑器" }).getByRole("heading", { name: title, exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "来源", exact: true }).click();
+  const sourceCards = page.getByRole("dialog", { name: "笔记来源" }).locator(".notes-source-card");
+  await expect(sourceCards).toHaveCount(8);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+    await page.evaluate(() => document.documentElement.clientWidth),
+  );
+  const overflow = await sourceCards.evaluateAll((cards) =>
+    cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length,
+  );
+  expect(overflow).toBe(0);
+  await page.screenshot({ path: testInfo.outputPath("notes-long-content.png"), fullPage: true });
+});
+
 test("Notes approved visuals, accessibility, overflow and mobile primary targets", async ({ appUrl, page }, testInfo) => {
   test.slow();
   await registerUser(page, appUrl, uniqueUsername(`notes_visual_${testInfo.project.name}`));

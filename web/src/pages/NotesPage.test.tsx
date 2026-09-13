@@ -24,7 +24,18 @@ describe("NotesPage", () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/notes?query=memory&tags=rag,study"]}><NotesPage /></MemoryRouter></QueryClientProvider>);
     expect(await screen.findByRole("heading", { level: 1, name: "学习笔记" })).toBeVisible();
-    expect(screen.getByLabelText("搜索笔记")).toHaveValue("memory");
+    expect(await screen.findByLabelText("搜索笔记")).toHaveValue("memory");
+  });
+
+  it("does not render an empty library while the list request is pending", () => {
+    const capabilities = vi.spyOn(noteQueries, "useNotesCapabilities").mockReturnValue({ isPending: false, data: { enabled: true } } as never);
+    const list = vi.spyOn(noteQueries, "useNotesQuery").mockReturnValue({ isPending: true, items: [] } as never);
+    const client = new QueryClient();
+    render(<QueryClientProvider client={client}><MemoryRouter initialEntries={["/notes"]}><NotesPage /></MemoryRouter></QueryClientProvider>);
+    expect(screen.getByRole("status")).toHaveTextContent("正在加载笔记库");
+    expect(screen.queryByText("还没有笔记")).not.toBeInTheDocument();
+    expect(screen.queryByText("全部笔记 · 0")).not.toBeInTheDocument();
+    list.mockRestore(); capabilities.mockRestore();
   });
 
   it("restores a canceled history traversal and allows a confirmed traversal", async () => {
