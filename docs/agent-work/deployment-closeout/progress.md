@@ -20,3 +20,11 @@
 - **Status:** complete
 - **Verification:** Docker 应用与 Qdrant healthy；真实账号 `1127230940` 进入学习笔记，显示 2 条笔记。验收笔记正文、概念「学习闭环」、标签「部署验收 / RAG」、已保存状态、最近保存时间和真实文档摘录均正确；来源面板显示 1 条文献证据及关联概念「学习闭环」。
 - **Result:** 部署收尾目标全部完成。未修改或删除用户资料，未读取密码。不要重复发布或历史迁移。
+
+## 2026-09-24 — 当前镜像业务闭环与隔离故障回退
+
+- **Status:** 当前单实例发布验收完成，可作为分布式升级的业务基线；尚未验收多实例运行。
+- **Business verification:** 2026-09-14 在现有账号中导入验收文档，完成真实问答、原文引用、来源笔记保存与刷新，以及学习计划创建、任务完成和撤销的刷新持久化检查。现场证据保存在本机 `.runtime/ui-live-acceptance/acceptance-20260914-result.json`，不入库。
+- **Rollback verification:** 2026-09-20 使用配对归档在独立目录、内部网络和新 Qdrant 卷上启动候选镜像，写入 SQLite 与 Qdrant 测试标记，强制停止隔离容器，再把配对备份恢复到全新目录和卷。前一镜像健康启动；数据库、文档文件及两个 Qdrant 集合的点数与内容哈希恢复到基线。演练资源清理完成，生产容器身份未变。现场证据保存在本机 `.runtime/restore-drills/zhiyan-fault-46571c278094/result.json`，不入库。
+- **Source review:** 现有会话、助手实例及 CSRF 保存在 `app/session.py` 的进程内注册表；`app/coordination.py` 的用户写锁只作用于同一进程，`app/history.py` 的 JSON 更新依赖该锁。`app/summary_tasks.py` 的旧摘要任务也在进程内。相对地，产品问答与摘要走 `app/qa_job_repository.py` 的数据库租约，笔记投影走 `app/note_projection.py` 的租约，学习任务使用 `app/learning_repository.py` 的用户作用域、请求幂等和版本检查。当前代码没有发现妨碍以这些业务契约为基线逐步升级的问题，但不能直接增加 API 副本数。
+- **Next design gate:** 确认先做单机多实例兼容层，还是直接实施已批准的跨主机 PostgreSQL/S3 方案。无论选择哪条路径，都保持单实例生产服务与配对回退路径，先在隔离环境验收。
