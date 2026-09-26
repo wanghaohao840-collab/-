@@ -15,6 +15,7 @@ describe("NotesWorkspace", () => {
     render(<NotesWorkspace items={[sourced]} selectedNote={sourced} onSelect={vi.fn()} onSave={vi.fn()} onCreate={vi.fn()} onDelete={vi.fn()} onClear={vi.fn()} onRetryProjection={vi.fn()} />);
     const panel = screen.getByRole("complementary", { name: "笔记来源" });
     expect(within(panel).getByText("文献证据")).toBeVisible();
+    expect(within(panel).getByRole("link", { name: "检索该文档" })).toHaveAttribute("href", "/search?documents=doc1");
     expect(within(panel).queryByText("问答回答")).not.toBeInTheDocument();
     expect(screen.getByRole("option", { name: "文档片段" })).toHaveValue("document_chunk");
   });

@@ -80,6 +80,14 @@ test("scoped search, source details, editable note and QA handoff use real servi
   expect(note.sources[0].excerpt_snapshot).toContain("检索增强学习");
   await expect(page).toHaveURL(`${appUrl}/notes?note=${note.id}`);
   await expect(page.getByLabel("笔记正文")).toHaveValue("我的检索笔记：检索证据后应核验原始来源。");
+  if (testInfo.project.name !== "desktop") {
+    await page.getByRole("button", { name: "来源", exact: true }).click();
+  }
+  const sources = page.getByRole(testInfo.project.name === "desktop" ? "complementary" : "dialog", { name: "笔记来源" });
+  await sources.getByRole("link", { name: "检索该文档" }).click();
+  await expect(page).toHaveURL(`${appUrl}/search?documents=${note.sources[0].document_id}`);
+  await expect(page.getByRole("checkbox", { name: filename })).toBeChecked();
+  await expect(page.getByLabel("你想从这些资料中找到什么？")).toHaveValue("");
   await page.goto(`${appUrl}/search`);
   await expect(page.getByLabel("你想从这些资料中找到什么？")).toHaveValue("");
   await expect(page.getByRole("checkbox", { name: filename })).not.toBeChecked();

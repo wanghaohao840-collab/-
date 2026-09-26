@@ -18,6 +18,7 @@ export function SourceCard({ source }: { source: NoteSource | NoteListSource }) 
     {detail?.excerpt_snapshot ? <blockquote>{detail.excerpt_snapshot}</blockquote> : <p className="notes-muted">暂无证据摘要</p>}
     <div className="notes-source-card__actions">
       {detail?.qa_thread_id ? <a href={`/qa?conversation=${encodeURIComponent(detail.qa_thread_id)}`}>查看问答原文 ↗</a> : null}
+      {source.document_id ? <a href={`/search?documents=${encodeURIComponent(source.document_id)}`}>检索该文档</a> : null}
       {detail?.locator ? <button type="button" className="notes-source__copy" onClick={() => void copy()}>复制来源定位</button> : null}
     </div>
     {feedback ? <span role="status">{feedback}</span> : null}
