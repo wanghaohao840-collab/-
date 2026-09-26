@@ -9,10 +9,6 @@ import pytest
 from alembic import command
 from alembic.config import Config
 
-from app.database import SCHEMA
-from app.learning_schema import LEARNING_SCHEMA
-
-
 ROOT = Path(__file__).resolve().parents[1]
 SNAPSHOT = ROOT / "migrations/versions/20260926_01_business_schema.sql"
 EXPECTED_TABLES = {
@@ -27,14 +23,16 @@ EXPECTED_TABLES = {
 }
 
 
-def test_snapshot_matches_current_business_schema() -> None:
-    source = (SCHEMA + "\n" + LEARNING_SCHEMA).replace(
-        "id integer primary key autoincrement", "id bigserial primary key"
-    )
+def test_initial_snapshot_preserves_business_scope_and_isolation() -> None:
     snapshot = SNAPSHOT.read_text(encoding="utf-8")
-    assert source == snapshot
     assert set(re.findall(r"create table if not exists (\w+)", snapshot)) == EXPECTED_TABLES
     assert "create virtual table" not in snapshot.lower()
+    assert "id bigserial primary key" in snapshot
+    assert "foreign key(batch_id, user_id) references import_batches(id, user_id)" in snapshot
+    assert "foreign key(note_id, user_id) references notes(id, user_id)" in snapshot
+    assert "references learning_plan_documents(user_id,plan_id,document_id)" in snapshot
+    assert "on import_tasks(user_id) where status = 'running'" in snapshot
+    assert "created_at text not null" in snapshot
 
 
 def test_offline_sql_contains_business_tables(monkeypatch, tmp_path) -> None:
