@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 import app.bootstrap as bootstrap
+from app.deployment import DeploymentConfigurationError
 from app.bootstrap import (
     ApplicationServices,
     get_application_services,
@@ -43,6 +44,20 @@ def test_create_uses_explicit_absolute_data_root_before_environment(tmp_path, mo
         services.document_library.deletion_repository
         is services.qa_deletion_repository
     )
+
+
+def test_distributed_mode_cannot_start_with_local_repositories(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_DATA_MODE", "distributed")
+    monkeypatch.setenv("APP_PROCESS_ROLE", "api")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://app:secret@postgres/app")
+    monkeypatch.setenv("S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("S3_BUCKET", "objects")
+    data_root = tmp_path / "data"
+
+    with pytest.raises(DeploymentConfigurationError, match="not enabled"):
+        ApplicationServices.create(data_root)
+
+    assert not data_root.exists()
 
 
 def test_create_uses_environment_data_root_when_not_explicit(tmp_path, monkeypatch):

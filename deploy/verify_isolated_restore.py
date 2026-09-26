@@ -107,9 +107,19 @@ def drill(app_archive, qdrant_archive, app_image, qdrant_image, rollback_image, 
                 if state == 'healthy': break
                 time.sleep(2)
             else: raise RuntimeError('Isolated application did not become healthy')
-            probe = "import urllib.request,json; b='http://127.0.0.1:7860'; assert urllib.request.urlopen(b+'/healthz').status==200; assert urllib.request.urlopen(b+'/notes').status==200; q=json.load(urllib.request.urlopen('http://qdrant:6333/collections')); print(len(q['result']['collections']))"
-            collections = int(docker('exec', acontainer, 'python', '-c', probe))
-            results.append(dict(image=image, healthy=True, qdrant_collections=collections))
+            probe = """import urllib.request,json
+b='http://127.0.0.1:7860'
+assert urllib.request.urlopen(b+'/healthz').status==200
+assert urllib.request.urlopen(b+'/notes').status==200
+q='http://qdrant:6333'
+names=[item['name'] for item in json.load(urllib.request.urlopen(q+'/collections'))['result']['collections']]
+counts={}
+for name in names:
+    request=urllib.request.Request(q+'/collections/'+name+'/points/count', data=b'{"exact":true}', headers={'Content-Type':'application/json'})
+    counts[name]=json.load(urllib.request.urlopen(request))['result']['count']
+print(json.dumps(counts))"""
+            collections = json.loads(docker('exec', acontainer, 'python', '-c', probe))
+            results.append(dict(image=image, healthy=True, qdrant_points=collections))
             docker('rm', '-f', acontainer); created.remove('app')
         restored = sqlite3.connect(db_path.as_uri()+'?mode=ro', uri=True)
         assert restored.execute('pragma integrity_check').fetchall() == [('ok',)]

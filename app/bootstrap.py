@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import RLock
 
 from app.database import initialize_database
+from app.deployment import DeploymentConfigurationError, DeploymentSettings
 from app.learning_repository import LearningRepository
 from app.learning_service import LearningService
 from app.document_library import DocumentLibraryService
@@ -85,6 +86,12 @@ class ApplicationServices:
         *,
         qa_answer_engine: QaAnswerEngine | None = None,
     ) -> "ApplicationServices":
+        settings = DeploymentSettings.from_env()
+        settings.validate()
+        if settings.data_mode == "distributed":
+            raise DeploymentConfigurationError(
+                "distributed mode is not enabled until shared repositories and Worker are ready"
+            )
         resolved_data_root = Path(
             data_root
             or os.getenv("PDF_ASSISTANT_DATA_DIR")
