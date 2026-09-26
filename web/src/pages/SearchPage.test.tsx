@@ -13,9 +13,9 @@ const item = { document_id: id, name: "学习资料.md", loaded_at: "today", sta
 const resultItem = { document_id: id, document_name: item.name, excerpt: "<script>原始摘录</script> 检索证据", rank: 1, score: 0.5, page_number: null, section: null, locator: { document_id: id, chunk_id: "c0", chunk_index: 0, content_sha256: "a".repeat(64) } };
 const response = { request_id: "r", document_ids: [id], result_count: 1, results: [resultItem] };
 function Path() { const location = useLocation(); return <output data-testid="path">{location.pathname}{location.search}</output>; }
-function setup() {
+function setup(path = "/search") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const ui = <QueryClientProvider client={client}><MemoryRouter initialEntries={["/search"]}><SearchPage /><Path /></MemoryRouter></QueryClientProvider>;
+  const ui = <QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}><SearchPage /><Path /></MemoryRouter></QueryClientProvider>;
   return { client, ui, ...render(ui) };
 }
 async function submit() {
@@ -38,6 +38,22 @@ describe("SearchPage", () => {
     Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute("open"); } });
   });
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+  it("selects a linked source document only after confirming it is in this account's library", async () => {
+    setup(`/search?documents=${id}`);
+    expect(await screen.findByRole("checkbox", { name: item.name })).toBeChecked();
+    expect(mock.request.mock.calls.filter(([url]) => url === "/api/v1/search")).toHaveLength(0);
+    fireEvent.change(screen.getByLabelText("你想从这些资料中找到什么？"), { target: { value: "学习闭环" } });
+    fireEvent.click(screen.getByRole("button", { name: "检索证据" }));
+    expect(await screen.findByText("返回 1 条相关片段")).toBeVisible();
+    const request = mock.request.mock.calls.find(([url]) => url === "/api/v1/search");
+    expect(JSON.parse(request![1].body)).toMatchObject({ document_ids: [id] });
+  });
+  it("does not preselect a linked document that is absent from this account's library", async () => {
+    setup("/search?documents=missing-document");
+    expect(await screen.findByRole("checkbox", { name: item.name })).not.toBeChecked();
+    expect(screen.getByText("已选择 0 份资料")).toBeVisible();
+    expect(mock.request.mock.calls.filter(([url]) => url === "/api/v1/search")).toHaveLength(0);
+  });
   it("requires explicit scope and nonblank query, without auto-submission or persistence", async () => {
     setup();
     expect(screen.getByRole("button", { name: "检索证据" })).toBeDisabled();

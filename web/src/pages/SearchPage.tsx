@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthProvider";
 import { useSearchDocumentsQuery, useSearchMutation } from "../features/search/queries";
@@ -18,8 +19,10 @@ export function SearchPage() {
 }
 
 function SearchWorkspace() {
+  const [params] = useSearchParams();
   const documents = useSearchDocumentsQuery();
   const [chosen, setChosen] = useState<string[]>([]);
+  const linkedDocument = useRef(params.get("documents"));
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState<SearchInput["limit"]>(10);
@@ -27,6 +30,12 @@ function SearchWorkspace() {
   const [initialEditing, setInitialEditing] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const items = documents.data?.items ?? [];
+  useEffect(() => {
+    const id = linkedDocument.current;
+    if (!id || !documents.data) return;
+    linkedDocument.current = null;
+    if (documents.data.items.some((item) => item.document_id === id)) setChosen([id]);
+  }, [documents.data]);
   const missing = chosen.some((id) => !items.some((item) => item.document_id === id));
   const scopeStamp = items.map((item) => `${item.document_id}:${item.loaded_at}`).sort().join(",");
   const fingerprint = JSON.stringify([query, chosen.slice().sort(), limit, scopeStamp, Boolean(documents.error)]);
