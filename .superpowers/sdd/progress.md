@@ -15,3 +15,6 @@
 
 ## Distributed cutover 2026-09-26
 - PostgreSQL baseline schema: complete (commits 528e70e..e91a84d, task review clean; 7 real-PG tests passed). Full distributed cutover remains active.
+- Distributed cutover foundation: complete (commit 83ebbf3, scoped review approved; 43 focused tests passed, disposable PostgreSQL pool smoke passed, paired stopped-write restore drill passed). Full distributed cutover remains active.
+- Relational migration prerequisite: complete (commit 1e6e783; 5 real-PG migration tests passed). Against the isolated paired-backup app.db, dry-run reported 14 nonempty tables ready, apply copied all 25 tables, repeat apply was unchanged, and verify was equal; evidence is retained under `.runtime/distributed-cutover/paired-relational-evidence.json`.
+- Immutable object store contract: complete (working-tree implementation; unit plus real source-built S3-compatible service tests 9 passed). Versioning, replay, tenant scope, content hashes, and explicit version reads survived later overwrite and delete-marker checks. Runtime publication and distributed bootstrap wiring remain open.
