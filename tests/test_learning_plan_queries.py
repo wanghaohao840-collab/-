@@ -70,7 +70,7 @@ def test_query_limit_and_cross_query_cursor(setup, monkeypatch):
     _, repo = setup
     for _ in range(3):
         repo.create_plan('owner', command(), document_name='资料', now=NOW)
-    import app.learning_queries as queries
+    import app.learning_persistence as queries
     original = queries.connect
     statements = []
     def traced(path):
