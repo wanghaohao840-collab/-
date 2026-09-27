@@ -1,5 +1,6 @@
 import io
 import json
+from botocore.exceptions import ClientError
 from pathlib import Path
 from uuid import uuid4
 
@@ -75,6 +76,73 @@ def test_apply_saves_refs_and_replay_reads_explicit_versions_without_reupload(so
         repeated = migrate_files(source, store, "apply", manifest_path=manifest)
         assert repeated["uploaded"] == 0
         stub.assert_no_pending_responses()
+
+
+def test_interrupted_apply_resumes_from_saved_version_without_reupload(source, case, tmp_path):
+    client, store = case
+    manifest = tmp_path / "evidence.json"
+    files = migrate_files(source, store, "dry-run", manifest_path=manifest)["files"]
+    contents = {
+        item["key"]: (source / "users" / item["user_id"] / item["kind"] / (item["artifact_id"] + item["suffix"])).read_bytes()
+        for item in files
+    }
+
+    with Stubber(client) as stub:
+        _write_response(stub, files[0], contents[files[0]["key"]], "version-first")
+        stub.add_client_error("put_object", service_error_code="InternalError", http_status_code=500)
+        with pytest.raises(ClientError):
+            migrate_files(source, store, "apply", manifest_path=manifest)
+        stub.assert_no_pending_responses()
+
+    checkpoint = json.loads(manifest.read_text(encoding="utf-8"))
+    assert set(checkpoint["completed"]) == {files[0]["key"]}
+    assert checkpoint["completed"][files[0]["key"]]["version_id"] == "version-first"
+
+    with Stubber(client) as stub:
+        first_content = contents[files[0]["key"]]
+        stub.add_response("get_object", {"Body": StreamingBody(io.BytesIO(first_content), len(first_content))}, {
+            "Bucket": "test-bucket", "Key": files[0]["key"], "VersionId": "version-first",
+        })
+        _write_response(stub, files[1], contents[files[1]["key"]], "version-second")
+        resumed = migrate_files(source, store, "apply", manifest_path=manifest)
+        assert resumed["uploaded"] == 1 and resumed["complete"]
+        stub.assert_no_pending_responses()
+
+    final = json.loads(manifest.read_text(encoding="utf-8"))
+    assert set(final["completed"]) == {item["key"] for item in files}
+
+
+def test_lexically_contained_manifest_is_rejected_even_if_resolution_escapes(source, case, tmp_path, monkeypatch):
+    client, store = case
+    evidence_dir = source / "evidence"
+    evidence_dir.mkdir()
+    manifest = evidence_dir / "manifest.json"
+    outside_target = tmp_path / "outside" / "manifest.json"
+    outside_target.parent.mkdir()
+    concrete_path = type(manifest)
+    original_resolve = concrete_path.resolve
+
+    def resolve_as_external_for_manifest(path, strict=False):
+        if path == manifest:
+            return original_resolve(outside_target, strict=strict)
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(concrete_path, "resolve", resolve_as_external_for_manifest)
+    before = {
+        item.relative_to(source).as_posix(): item.read_bytes() if item.is_file() else None
+        for item in source.rglob("*")
+    }
+    with Stubber(client) as stub:
+        with pytest.raises(ValueError, match="manifest_path must be outside source_root"):
+            migrate_files(source, store, "apply", manifest_path=manifest)
+        stub.assert_no_pending_responses()
+    after = {
+        item.relative_to(source).as_posix(): item.read_bytes() if item.is_file() else None
+        for item in source.rglob("*")
+    }
+    assert after == before
+    assert not Path(str(manifest) + ".lock").exists()
+    assert not manifest.exists()
 
 
 def test_verify_rejects_corrupt_saved_version(source, case, tmp_path):

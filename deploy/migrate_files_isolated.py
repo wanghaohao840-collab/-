@@ -184,6 +184,26 @@ def _ref_json(ref: ObjectRef) -> dict[str, Any]:
     return {"key": ref.key, "sha256": ref.sha256, "size_bytes": ref.size_bytes, "version_id": ref.version_id}
 
 
+def _ensure_manifest_outside_source(source: Path, manifest: Path) -> None:
+    source = source.absolute()
+    manifest = manifest.absolute()
+    source_resolved = source.resolve(strict=True)
+    candidates = (
+        manifest,
+        manifest.with_name(manifest.name + ".lock"),
+        manifest.with_name(manifest.name + f".{os.getpid()}.tmp"),
+    )
+    for candidate in candidates:
+        # Check lexical containment first: a manifest symlink inside the frozen
+        # source can resolve outside, while its lock and atomic-write temp remain
+        # inside the source directory.
+        if candidate == source or source in candidate.parents:
+            raise ValueError("manifest_path must be outside source_root")
+        resolved = candidate.resolve(strict=False)
+        if resolved == source_resolved or source_resolved in resolved.parents:
+            raise ValueError("manifest_path must be outside source_root")
+
+
 def migrate_files(source_root: str | Path, store: Any, mode: str, *, manifest_path: str | Path) -> dict[str, Any]:
     if mode not in {"dry-run", "apply", "verify"}:
         raise ValueError("mode must be dry-run, apply, or verify")
@@ -191,11 +211,8 @@ def migrate_files(source_root: str | Path, store: Any, mode: str, *, manifest_pa
     manifest_file = Path(manifest_path).absolute()
     if ".." in source.parts or ".." in manifest_file.parts:
         raise ValueError("parent traversal is not allowed in migration paths")
+    _ensure_manifest_outside_source(source, manifest_file)
     files = _scan(source)
-    source_resolved = source.resolve(strict=True)
-    manifest_resolved = manifest_file.resolve(strict=False)
-    if manifest_resolved == source_resolved or source_resolved in manifest_resolved.parents:
-        raise ValueError("manifest_path must be outside source_root")
     if mode == "dry-run":
         return {"mode": mode, "files": files, "count": len(files), "uploaded": 0}
 
