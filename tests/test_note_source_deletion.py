@@ -10,7 +10,7 @@ import pytest
 from app.database import connect, initialize_database
 from app.note_models import NewNoteSource
 from app.note_repository import NoteRepository
-import app.note_repository as note_repository_module
+import app.database as note_database_module
 from app.note_models import NoteSourceDeletingError, NoteSourceSelector
 from app.note_service import NoteService
 from app.qa_deletion import QaDeletionRepository, QaDeletionWorker
@@ -237,7 +237,7 @@ def test_source_create_wins_race_then_deletion_scrubs_it(tmp_path, scope, monkey
     service = _source_service(db)
     begun = Event()
     release = Event()
-    original_connect = note_repository_module.connect
+    original_connect = note_database_module.connect
 
     class BlockingConnection:
         def __init__(self, connection):
@@ -263,7 +263,7 @@ def test_source_create_wins_race_then_deletion_scrubs_it(tmp_path, scope, monkey
             return BlockingConnection(original_connect(path))
         return original_connect(path)
 
-    monkeypatch.setattr(note_repository_module, "connect", synchronized_connect)
+    monkeypatch.setattr(note_database_module, "connect", synchronized_connect)
     state = {}
     def create():
         try:

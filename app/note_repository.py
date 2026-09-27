@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 from uuid import uuid4
 
-from app.database import connect
+from app.note_persistence import NoteStore, SQLiteNotePersistence, PostgresNotePersistence
 from app.note_models import (
     NewNoteSource,
     Note,
@@ -37,6 +37,7 @@ def utc_now() -> str:
 class NoteRepository:
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
+        self.persistence = SQLiteNotePersistence(self.db_path)
 
     def create(
         self,
@@ -52,9 +53,7 @@ class NoteRepository:
         request_digest: str | None = None,
         guard_sources: bool = False,
     ) -> Note:
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
+        with self.persistence.write(user_id) as conn:
             note = self.create_in_transaction(
                 conn,
                 user_id,
@@ -68,24 +67,11 @@ class NoteRepository:
                 request_digest=request_digest,
                 guard_sources=guard_sources,
             )
-            conn.commit()
             return note
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def list_activity_dates(self, user_id: str, *, since: str) -> tuple[str, ...]:
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                select created_at from notes
-                where user_id = ? and deleted_at is null and created_at >= ?
-                order by created_at
-                """,
-                (user_id, since),
-            ).fetchall()
+        with self.persistence.read() as conn:
+            rows = conn.activity_dates((user_id, since)).fetchall()
         return tuple(row["created_at"] for row in rows)
 
     def create_in_transaction(
@@ -103,6 +89,7 @@ class NoteRepository:
         request_digest: str | None = None,
         guard_sources: bool = False,
     ) -> Note:
+        conn = self.persistence.caller_owned(conn, user_id)
         body, normalized_concept, normalized_tags = validate_note_input(
             body_markdown, concept, tags
         )
@@ -114,10 +101,7 @@ class NoteRepository:
         digest = request_digest or _request_digest(
             body, normalized_concept, normalized_tags, sources
         )
-        existing = conn.execute(
-            "select id, request_digest from notes where user_id=? and client_request_id=?",
-            (user_id, request_id),
-        ).fetchone()
+        existing = conn.request((user_id, request_id)).fetchone()
         if existing is not None:
             if existing["request_digest"] != digest:
                 raise NoteIdempotencyConflict(request_id)
@@ -126,14 +110,7 @@ class NoteRepository:
         identifier = note_id or str(uuid4())
         timestamp = now or utc_now()
         try:
-            conn.execute(
-                """
-                insert into notes (
-                    id,user_id,body_markdown,concept,version,projection_state,
-                    client_request_id,request_digest,created_at,updated_at
-                ) values (?,?,?,?,1,'pending',?,?,?,?)
-                """,
-                (
+            conn.insert_note((
                     identifier,
                     user_id,
                     body,
@@ -142,8 +119,7 @@ class NoteRepository:
                     digest,
                     timestamp,
                     timestamp,
-                ),
-            )
+                ))
         except sqlite3.IntegrityError as exc:
             if "client_request_id" in str(exc):
                 raise NoteIdempotencyConflict(request_id) from exc
@@ -168,14 +144,8 @@ class NoteRepository:
         """
 
         request_id = str(client_request_id or "").strip()
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                select id, request_digest from notes
-                where user_id=? and client_request_id=?
-                """,
-                (user_id, request_id),
-            ).fetchone()
+        with self.persistence.read() as conn:
+            row = conn.request((user_id, request_id)).fetchone()
             if row is None:
                 return None
             if row["request_digest"] != request_digest:
@@ -183,18 +153,13 @@ class NoteRepository:
             return self._get(conn, user_id, row["id"], include_deleted=True)
 
     def get(self, user_id: str, note_id: str) -> Note | None:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                "select 1 from notes where id=? and user_id=? and deleted_at is null",
-                (note_id, user_id),
-            ).fetchone()
+        with self.persistence.read() as conn:
+            row = conn.live_exists((note_id, user_id)).fetchone()
             return self._get(conn, user_id, note_id) if row is not None else None
 
     def get_including_deleted(self, user_id: str, note_id: str) -> Note | None:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                "select 1 from notes where id=? and user_id=?", (note_id, user_id)
-            ).fetchone()
+        with self.persistence.read() as conn:
+            row = conn.exists((note_id, user_id)).fetchone()
             return (
                 self._get(conn, user_id, note_id, include_deleted=True)
                 if row is not None
@@ -219,43 +184,14 @@ class NoteRepository:
         if source_kind is not None and source_kind not in {"qa_message", "qa_citation", "document_chunk"}:
             raise NoteValidationError("source_kind is invalid")
         normalized_tags = tuple(normalize_tag(tag)[0] for tag in tags if normalize_tag(tag)[0])
-        params: list[object] = [user_id]
-        clauses = ["n.user_id=?", "n.deleted_at is null"]
-        joins = ""
         normalized_query = unicodedata.normalize("NFKC", str(query or "")).strip()
-        if normalized_query:
-            match_query = _fts_query(normalized_query)
-            if not match_query:
-                return NotePage((), None)
-            joins += " join notes_fts f on f.note_id=n.id and f.user_id=n.user_id"
-            clauses.append("notes_fts match ?")
-            params.append(match_query)
-        for normalized_tag in dict.fromkeys(normalized_tags):
-            clauses.append(
-                "exists (select 1 from note_tags t where t.user_id=n.user_id and t.note_id=n.id and t.normalized_tag=?)"
-            )
-            params.append(normalized_tag)
-        if source_kind == "document_chunk":
-            clauses.append("exists (select 1 from note_document_sources s where s.user_id=n.user_id and s.note_id=n.id)")
-        elif source_kind is not None:
-            clauses.append(
-                "exists (select 1 from note_sources s where s.user_id=n.user_id and s.note_id=n.id and s.source_kind=?)"
-            )
-            params.append(source_kind)
-        if cursor:
-            timestamp, identifier = decode_note_cursor(cursor)
-            clauses.append("(n.updated_at < ? or (n.updated_at=? and n.id < ?))")
-            params.extend((timestamp, timestamp, identifier))
-        params.append(limit + 1)
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select n.id from notes n {joins}
-                where {' and '.join(clauses)}
-                order by n.updated_at desc, n.id desc limit ?
-                """,
-                params,
-            ).fetchall()
+        match_query = _fts_query(normalized_query) if normalized_query else None
+        if normalized_query and not match_query:
+            return NotePage((), None)
+        last = decode_note_cursor(cursor) if cursor else None
+        with self.persistence.read() as conn:
+            rows = conn.page(user_id, limit=limit, match_query=match_query,
+                             tags=normalized_tags, source_kind=source_kind, last=last)
             has_more = len(rows) > limit
             rows = rows[:limit]
             items = tuple(self._get(conn, user_id, row["id"]) for row in rows)
@@ -279,39 +215,21 @@ class NoteRepository:
             body_markdown, concept, tags
         )
         timestamp = now or utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            row = conn.execute(
-                "select version, deleted_at from notes where id=? and user_id=?",
-                (note_id, user_id),
-            ).fetchone()
+        with self.persistence.write(user_id) as conn:
+            row = conn.version((note_id, user_id)).fetchone()
             if row is None or row["deleted_at"] is not None:
                 raise NoteNotFoundError(note_id)
             if row["version"] != expected_version:
                 raise NoteVersionConflict(note_id, row["version"])
             version = expected_version + 1
-            updated = conn.execute(
-                """
-                update notes set body_markdown=?, concept=?, version=?,
-                    projection_state='pending', updated_at=?
-                where id=? and user_id=? and deleted_at is null and version=?
-                """,
-                (body, normalized_concept, version, timestamp, note_id, user_id, expected_version),
-            )
+            updated = conn.update_note((body, normalized_concept, version, timestamp, note_id, user_id, expected_version))
             if not updated.rowcount:
                 raise NoteVersionConflict(note_id)
             self._replace_tags(conn, user_id, note_id, normalized_tags)
             self._replace_fts(conn, user_id, note_id, body, normalized_concept, normalized_tags)
             self._enqueue(conn, user_id, note_id, version, "upsert", timestamp)
             note = self._get(conn, user_id, note_id)
-            conn.commit()
             return note
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def soft_delete(
         self,
@@ -322,102 +240,45 @@ class NoteRepository:
         now: str | None = None,
     ) -> Note:
         timestamp = now or utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            row = conn.execute(
-                "select version, deleted_at from notes where id=? and user_id=?",
-                (note_id, user_id),
-            ).fetchone()
+        with self.persistence.write(user_id) as conn:
+            row = conn.version((note_id, user_id)).fetchone()
             if row is None or row["deleted_at"] is not None:
                 raise NoteNotFoundError(note_id)
             if row["version"] != expected_version:
                 raise NoteVersionConflict(note_id, row["version"])
             version = expected_version + 1
-            result = conn.execute(
-                """
-                update notes set deleted_at=?, updated_at=?, version=?, projection_state='pending'
-                where id=? and user_id=? and deleted_at is null and version=?
-                """,
-                (timestamp, timestamp, version, note_id, user_id, expected_version),
-            )
+            result = conn.soft_delete((timestamp, timestamp, version, note_id, user_id, expected_version))
             if not result.rowcount:
                 raise NoteVersionConflict(note_id)
-            conn.execute("delete from notes_fts where note_id=? and user_id=?", (note_id, user_id))
+            conn.delete_search((note_id, user_id))
             self._enqueue(conn, user_id, note_id, version, "delete", timestamp)
             note = self._get(conn, user_id, note_id, include_deleted=True)
-            conn.commit()
             return note
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def clear_all(self, user_id: str, *, now: str | None = None) -> int:
         timestamp = now or utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            rows = conn.execute(
-                "select id, version from notes where user_id=? and deleted_at is null",
-                (user_id,),
-            ).fetchall()
+        with self.persistence.write(user_id) as conn:
+            rows = conn.live_notes((user_id,)).fetchall()
             for row in rows:
                 version = row["version"] + 1
-                conn.execute(
-                    "update notes set deleted_at=?,updated_at=?,version=?,projection_state='pending' where id=? and user_id=?",
-                    (timestamp, timestamp, version, row["id"], user_id),
-                )
-                conn.execute(
-                    "delete from notes_fts where note_id=? and user_id=?", (row["id"], user_id)
-                )
+                conn.mark_deleted((timestamp, timestamp, version, row["id"], user_id))
+                conn.delete_search((row["id"], user_id))
                 self._enqueue(conn, user_id, row["id"], version, "delete", timestamp)
-            conn.commit()
             return len(rows)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def retry_failed_projections(self, user_id: str, *, now: str | None = None) -> int:
         timestamp = now or utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            rows = conn.execute(
-                """
-                select t.id, t.note_id from note_projection_tasks t
-                join notes n on n.id=t.note_id and n.user_id=t.user_id
-                where t.user_id=? and t.status='failed' and t.note_version=n.version
-                """,
-                (user_id,),
-            ).fetchall()
+        with self.persistence.write(user_id) as conn:
+            rows = conn.failed_projections((user_id,)).fetchall()
             if rows:
-                conn.executemany(
-                    "update note_projection_tasks set status='queued', attempt_count=0, available_at=?, lease_owner=null, lease_expires_at=null, last_error_code=null, finished_at=null where id=?",
-                    [(timestamp, row["id"]) for row in rows],
-                )
-                conn.executemany(
-                    "update notes set projection_state='pending' where id=? and user_id=?",
-                    [(row["note_id"], user_id) for row in rows],
-                )
-            conn.commit()
+                conn.retry_projections([(timestamp, row["id"]) for row in rows])
+                conn.mark_pending([(row["note_id"], user_id) for row in rows])
             return len(rows)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def count(self, user_id: str) -> int:
-        with connect(self.db_path) as conn:
+        with self.persistence.read() as conn:
             return int(
-                conn.execute(
-                    "select count(*) from notes where user_id=? and deleted_at is null",
-                    (user_id,),
-                ).fetchone()[0]
+                conn.count((user_id,)).fetchone()["n"]
             )
 
     def scrub_sources_in_transaction(
@@ -429,8 +290,8 @@ class NoteRepository:
         thread_id: str | None = None,
         deleted_at: str,
     ) -> int:
-        return scrub_sources_in_transaction(
-            conn,
+        return _scrub_sources(
+            self.persistence.caller_owned(conn, user_id),
             user_id=user_id,
             document_id=document_id,
             thread_id=thread_id,
@@ -441,26 +302,12 @@ class NoteRepository:
         self, conn: sqlite3.Connection, user_id: str, note_id: str, *, include_deleted: bool = False
     ) -> Note:
         condition = "" if include_deleted else "and deleted_at is null"
-        row = conn.execute(
-            f"select * from notes where id=? and user_id=? {condition}", (note_id, user_id)
-        ).fetchone()
+        row = conn.note((note_id, user_id), condition).fetchone()
         if row is None:
             raise NoteNotFoundError(note_id)
-        tag_rows = conn.execute(
-            "select display_tag from note_tags where user_id=? and note_id=? order by rowid",
-            (user_id, note_id),
-        ).fetchall()
-        source_rows = conn.execute(
-            "select * from note_sources where user_id=? and note_id=? order by created_at,id",
-            (user_id, note_id),
-        ).fetchall()
-        source_rows.extend(conn.execute(
-            """select id,user_id,note_id,'document_chunk' as source_kind,
-               null as qa_thread_id,null as qa_message_id,null as citation_id,
-               document_id,locator_json,title_snapshot,excerpt_snapshot,source_deleted_at,created_at
-               from note_document_sources where user_id=? and note_id=?""",
-            (user_id, note_id),
-        ).fetchall())
+        tag_rows = conn.tags((user_id, note_id)).fetchall()
+        source_rows = conn.sources((user_id, note_id)).fetchall()
+        source_rows.extend(conn.document_sources((user_id, note_id)).fetchall())
         source_rows.sort(key=lambda item: (item["created_at"], item["id"]))
         return Note(
             id=row["id"],
@@ -480,11 +327,8 @@ class NoteRepository:
     def _replace_tags(
         conn: sqlite3.Connection, user_id: str, note_id: str, tags: Sequence[str]
     ) -> None:
-        conn.execute("delete from note_tags where user_id=? and note_id=?", (user_id, note_id))
-        conn.executemany(
-            "insert into note_tags (user_id,note_id,normalized_tag,display_tag) values (?,?,?,?)",
-            [(user_id, note_id, *normalize_tag(tag)) for tag in tags],
-        )
+        conn.delete_tags((user_id, note_id))
+        conn.insert_tags([(user_id, note_id, *normalize_tag(tag)) for tag in tags])
 
     @staticmethod
     def _insert_source(
@@ -501,30 +345,15 @@ class NoteRepository:
         )
         if source.kind == "document_chunk":
             locator = source.locator
-            conn.execute(
-                """insert into note_document_sources (
-                    id,user_id,note_id,document_id,chunk_id,chunk_index,content_sha256,
-                    locator_json,title_snapshot,excerpt_snapshot,created_at
-                ) values (?,?,?,?,?,?,?,?,?,?,?)""",
-                (str(uuid4()), user_id, note_id, source.document_id, locator["chunk_id"],
+            conn.insert_document_source((str(uuid4()), user_id, note_id, source.document_id, locator["chunk_id"],
                  locator["chunk_index"], locator["content_sha256"], locator_json,
-                 source.title_snapshot, source.excerpt_snapshot, timestamp),
-            )
+                 source.title_snapshot, source.excerpt_snapshot, timestamp))
             return
-        conn.execute(
-            """
-            insert into note_sources (
-                id,user_id,note_id,source_kind,qa_thread_id,qa_message_id,
-                citation_id,document_id,locator_json,title_snapshot,
-                excerpt_snapshot,created_at
-            ) values (?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
+        conn.insert_source((
                 str(uuid4()), user_id, note_id, source.kind, source.qa_thread_id,
                 source.qa_message_id, source.citation_id, source.document_id,
                 locator_json, source.title_snapshot, source.excerpt_snapshot, timestamp,
-            ),
-        )
+            ))
 
     @staticmethod
     def _guard_source_in_transaction(
@@ -542,73 +371,37 @@ class NoteRepository:
         if source.kind == "document_chunk":
             # Completed fences also close the gap between resolution and insertion.
             # Document UUIDs are not reused for a new import.
-            fence = conn.execute(
-                """select status from qa_deletion_fences
-                   where user_id=? and target_type='document' and target_id=? limit 1""",
-                (user_id, source.document_id),
-            ).fetchone()
+            fence = conn.document_fence((user_id, source.document_id)).fetchone()
             if fence is not None:
                 if fence["status"] == "completed":
                     raise NoteSourceNotFoundError(source.document_id)
                 raise NoteSourceDeletingError(source.document_id)
             return
 
-        message = conn.execute(
-            """
-            select id, conversation_id from qa_messages
-            where id=? and conversation_id=? and user_id=?
-              and role='assistant' and status='completed'
-            """,
-            (source.qa_message_id, source.qa_thread_id, user_id),
-        ).fetchone()
+        message = conn.completed_message((source.qa_message_id, source.qa_thread_id, user_id)).fetchone()
         if message is None:
             raise NoteSourceNotFoundError(source.qa_message_id or "")
 
         document_id: str | None = None
         if source.kind == "qa_citation":
-            citation = conn.execute(
-                """
-                select citation_id, document_id from qa_message_sources
-                where assistant_message_id=? and conversation_id=? and user_id=?
-                  and citation_id=?
-                """,
-                (
+            citation = conn.citation((
                     source.qa_message_id,
                     source.qa_thread_id,
                     user_id,
                     source.citation_id,
-                ),
-            ).fetchone()
+                )).fetchone()
             if citation is None:
                 raise NoteSourceNotFoundError(source.citation_id or "")
             document_id = citation["document_id"]
 
-        active = conn.execute(
-            """
-            select 1 from qa_deletion_fences
-            where user_id=?
-              and (
-                status in ('queued','running')
-                or (status='failed' and attempt_count < 3)
-              )
-              and (
-                (target_type='conversation' and target_id=?)
-                or (target_type='document' and target_id=? and exists (
-                    select 1 from qa_conversation_documents
-                    where user_id=? and conversation_id=? and document_id=?
-                ))
-              )
-            limit 1
-            """,
-            (
+        active = conn.active_fence((
                 user_id,
                 source.qa_thread_id,
                 document_id,
                 user_id,
                 source.qa_thread_id,
                 document_id,
-            ),
-        ).fetchone()
+            )).fetchone()
         if active is not None:
             raise NoteSourceDeletingError(source.qa_message_id or "")
 
@@ -621,17 +414,14 @@ class NoteRepository:
         concept: str | None,
         tags: Sequence[str],
     ) -> None:
-        conn.execute("delete from notes_fts where note_id=? and user_id=?", (note_id, user_id))
-        conn.execute(
-            "insert into notes_fts (note_id,user_id,body_markdown,concept,tags_text) values (?,?,?,?,?)",
-            (
+        conn.delete_search((note_id, user_id))
+        conn.insert_search((
                 note_id,
                 user_id,
                 body,
                 concept or "",
                 " ".join(normalize_tag(tag)[0] for tag in tags),
-            ),
-        )
+            ))
 
     @staticmethod
     def _enqueue(
@@ -642,18 +432,27 @@ class NoteRepository:
         operation: str,
         timestamp: str,
     ) -> None:
-        conn.execute(
-            """
-            insert or ignore into note_projection_tasks (
-                id,user_id,note_id,note_version,operation,status,attempt_count,
-                available_at,created_at
-            ) values (?,?,?,?,?,'queued',0,?,?)
-            """,
-            (str(uuid4()), user_id, note_id, version, operation, timestamp, timestamp),
-        )
+        conn.enqueue((str(uuid4()), user_id, note_id, version, operation, timestamp, timestamp))
 
 
-def scrub_sources_in_transaction(
+class PostgresNoteRepository(NoteRepository):
+    """Shared Notes rules backed by an opened PostgreSQL pool.
+
+    Caller-owned create/scrub require an active transaction. The surrounding
+    writer MUST lock users(id) before any domain/fence reads or writes; the
+    caller-owned boundary also acquires that lock before Notes operations.
+    These methods never commit or roll back the caller's transaction.
+    """
+    def __init__(self, database):
+        self.persistence = PostgresNotePersistence(database)
+
+
+def scrub_sources_in_transaction(conn: sqlite3.Connection, **kwargs) -> int:
+    """SQLite deletion seam; transaction ownership stays with the caller."""
+    return _scrub_sources(NoteStore(conn), **kwargs)
+
+
+def _scrub_sources(
     conn: sqlite3.Connection,
     *,
     user_id: str,
@@ -665,46 +464,18 @@ def scrub_sources_in_transaction(
         raise NoteValidationError("exactly one source deletion scope is required")
     field = "document_id" if document_id is not None else "qa_thread_id"
     value = document_id if document_id is not None else thread_id
-    rows = conn.execute(
-        f"""
-        select distinct note_id from note_sources
-        where user_id=? and {field}=? and source_deleted_at is null
-        """,
-        (user_id, value),
-    ).fetchall()
+    rows = conn.scrub_candidates((user_id, value), field).fetchall()
     note_ids = {row["note_id"] for row in rows}
     if document_id is not None:
-        note_ids.update(row["note_id"] for row in conn.execute(
-            "select distinct note_id from note_document_sources where user_id=? and document_id=? and source_deleted_at is null",
-            (user_id, document_id),
-        ))
-        conn.execute(
-            """update note_document_sources set document_id=null,chunk_id=null,chunk_index=null,
-               content_sha256=null,locator_json=null,title_snapshot=null,excerpt_snapshot=null,
-               source_deleted_at=? where user_id=? and document_id=? and source_deleted_at is null""",
-            (deleted_at, user_id, document_id),
-        )
+        note_ids.update(row["note_id"] for row in conn.document_scrub_candidates((user_id, document_id)))
+        conn.scrub_document_sources((deleted_at, user_id, document_id))
     for note_id in sorted(note_ids):
-        conn.execute(
-            f"""
-            update note_sources set qa_thread_id=null,qa_message_id=null,citation_id=null,
-                document_id=null,locator_json=null,title_snapshot=null,excerpt_snapshot=null,
-                source_deleted_at=?
-            where user_id=? and note_id=? and {field}=? and source_deleted_at is null
-            """,
-            (deleted_at, user_id, note_id, value),
-        )
-        note = conn.execute(
-            "select version from notes where id=? and user_id=? and deleted_at is null",
-            (note_id, user_id),
-        ).fetchone()
+        conn.scrub_qa_sources((deleted_at, user_id, note_id, value), field)
+        note = conn.live_version((note_id, user_id)).fetchone()
         if note is None:
             continue
         version = note["version"] + 1
-        conn.execute(
-            "update notes set version=?,updated_at=?,projection_state='pending' where id=? and user_id=?",
-            (version, deleted_at, note_id, user_id),
-        )
+        conn.bump_version((version, deleted_at, note_id, user_id))
         NoteRepository._enqueue(conn, user_id, note_id, version, "upsert", deleted_at)
     return len(note_ids)
 
