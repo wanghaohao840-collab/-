@@ -27,7 +27,9 @@ def upgrade() -> None:
         primary key (user_id,note_id,field,position),
         foreign key (note_id,user_id) references notes(id,user_id) on delete cascade
     )''')
-    op.execute('create index ix_note_search_token on note_search_tokens(user_id,token,note_id)')
+    # Valid note tokens can exceed PostgreSQL's B-tree index tuple size limit.
+    # The primary key supports our user/note-correlated positional lookups;
+    # keep unbounded token text out of indexes without truncating search terms.
 
 
 def downgrade() -> None:

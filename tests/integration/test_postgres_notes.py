@@ -106,6 +106,40 @@ def test_search_sqlite_parity_and_tag_intersection(repositories, tmp_path):
     assert pg.count('bob') == 1
 
 
+def test_long_incompressible_token_create_search_update_parity(repositories, tmp_path):
+    from random import Random
+    from string import ascii_lowercase
+
+    _, pg, _, _ = repositories
+    path = tmp_path / 'long-token.db'
+    initialize_database(path)
+    with connect(path) as conn:
+        conn.execute('insert into users values (?,?,?,?,?,?,?)',
+                     ('alice', 'alice', 'alice', 'hash', 'active', 'now', 'now'))
+    local = NoteRepository(path)
+    random = Random(20260927)
+    original = ''.join(random.choices(ascii_lowercase, k=6000))
+    replacement = ''.join(random.choices(ascii_lowercase, k=6000))
+    queries = (original, original[:3000], replacement, replacement[:3000])
+
+    for repo in (local, pg):
+        note = repo.create('alice', original, None, (), 'long', note_id='long-note')
+        assert note.body_markdown == original
+    for query in queries:
+        expected = ['long-note'] if query in (original, original[:3000]) else []
+        assert [n.id for n in local.list_page('alice', query=query).items] == expected
+        assert [n.id for n in pg.list_page('alice', query=query).items] == expected
+
+    for repo in (local, pg):
+        note = repo.update('alice', 'long-note', expected_version=1,
+                           body_markdown=replacement, concept=None, tags=())
+        assert note.body_markdown == replacement and note.version == 2
+    for query in queries:
+        expected = ['long-note'] if query in (replacement, replacement[:3000]) else []
+        assert [n.id for n in local.list_page('alice', query=query).items] == expected
+        assert [n.id for n in pg.list_page('alice', query=query).items] == expected
+
+
 def test_scope_pagination_activity_update_clear_and_retry(repositories):
     db, repo, second, _ = repositories
     notes = [repo.create('alice', 'searchable', None, ('z', 'a'), f'r{i}',
