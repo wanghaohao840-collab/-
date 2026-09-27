@@ -10,6 +10,11 @@ import tarfile
 from contextlib import closing
 from pathlib import Path, PurePosixPath
 
+if __package__:
+    from .structured_authority_inventory import inventory_authorities
+else:
+    from structured_authority_inventory import inventory_authorities
+
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -87,6 +92,7 @@ def inventory_pair(app_archive: Path) -> dict[str, object]:
     seen: set[str] = set()
     files: list[dict[str, object]] = []
     database_bytes: bytes | None = None
+    user_contents: dict[str, bytes] = {}
     with tarfile.open(app_archive, "r:gz") as archive:
         for member in archive:
             name = _safe_name(member)
@@ -106,6 +112,7 @@ def inventory_pair(app_archive: Path) -> dict[str, object]:
             if name == "app/app.db":
                 database_bytes = content
             elif name.startswith("app/users/"):
+                user_contents[name] = content
                 files.append(
                     {
                         "path": name,
@@ -125,6 +132,7 @@ def inventory_pair(app_archive: Path) -> dict[str, object]:
         "sqlite_sha256": hashlib.sha256(database_bytes).hexdigest(),
         "sqlite_integrity": "ok",
         "tables": _sqlite_tables(database_bytes),
+        "structured_authorities": inventory_authorities(database_bytes, user_contents),
         "files": files,
         "user_file_count": len(files),
         "user_file_bytes": sum(int(item["bytes"]) for item in files),
