@@ -169,7 +169,7 @@ def test_waiting_refresh_cannot_revive_expired_session(shared_database):
                     blocked = observer.execute(
                         "select exists(select 1 from pg_stat_activity "
                         "where wait_event_type='Lock' and query like "
-                        "'select s.user_id,s.csrf_token,s.expires_at,u.username,u.status%')"
+                        "'select user_id,csrf_token,expires_at from auth_sessions%')"
                     ).fetchone()[0]
                     if blocked:
                         break
@@ -181,6 +181,57 @@ def test_waiting_refresh_cannot_revive_expired_session(shared_database):
             holder.commit()
             future.result(timeout=10)
     assert outcomes == ["expired"]
+
+
+def test_waiting_get_rechecks_disabled_user(shared_database):
+    open_pool, url = shared_database
+    db1, db2 = open_pool(), open_pool()
+    user = PostgresAuthService(db1).register("Alice", "correct-password")
+    session = PostgresSessionRepository(db1).create(user.id)
+    started = threading.Event()
+    outcomes = []
+    conninfo = url.replace("postgresql+psycopg://", "postgresql://")
+    token_hash = hashlib.sha256(session.token.encode()).hexdigest()
+
+    def get_session():
+        started.set()
+        try:
+            PostgresSessionRepository(db2).get(session.token)
+            outcomes.append("accepted")
+        except InvalidSessionError:
+            outcomes.append("disabled")
+
+    with psycopg.connect(conninfo) as holder:
+        original_expiry = holder.execute(
+            "select expires_at from auth_sessions where token_hash=%s for update", (token_hash,)
+        ).fetchone()[0]
+        with ThreadPoolExecutor(max_workers=1) as workers:
+            future = workers.submit(get_session)
+            assert started.wait(timeout=5)
+            with psycopg.connect(conninfo, autocommit=True) as observer:
+                deadline = time.monotonic() + 5
+                blocked = False
+                while time.monotonic() < deadline:
+                    blocked = observer.execute(
+                        "select exists(select 1 from pg_stat_activity "
+                        "where wait_event_type='Lock' and query like "
+                        "'select user_id,csrf_token,expires_at from auth_sessions%')"
+                    ).fetchone()[0]
+                    if blocked:
+                        break
+                if not blocked:
+                    holder.commit()
+                    future.result(timeout=10)
+                assert blocked, "get did not wait for the session row lock"
+            with psycopg.connect(conninfo) as disabler:
+                disabler.execute("update users set status='disabled' where id=%s", (user.id,))
+            holder.commit()
+            future.result(timeout=10)
+    assert outcomes == ["disabled"]
+    with psycopg.connect(conninfo) as check:
+        assert check.execute(
+            "select expires_at from auth_sessions where token_hash=%s", (token_hash,)
+        ).fetchone()[0] == original_expiry
 
 
 def test_downgrade_refuses_live_sessions(shared_database):

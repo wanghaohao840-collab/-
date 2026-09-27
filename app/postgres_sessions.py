@@ -64,20 +64,24 @@ class PostgresSessionRepository:
             raise InvalidSessionError("Please log in first")
         with self.database.transaction() as cursor:
             row = cursor.execute(
-                "select s.user_id,s.csrf_token,s.expires_at,u.username,u.status "
-                "from auth_sessions s join users u on u.id=s.user_id "
-                "where s.token_hash=%s for update of s", (self._hash(token),)
+                "select user_id,csrf_token,expires_at from auth_sessions "
+                "where token_hash=%s for update", (self._hash(token),)
             ).fetchone()
             # Read the clock only after acquiring the row lock. A waiter must not
             # refresh a token that expired while another transaction held it.
             now = cursor.execute("select clock_timestamp() as now").fetchone()["now"]
-            if row is None or row["status"] != "active" or row["expires_at"] <= now:
+            if row is None or row["expires_at"] <= now:
+                raise InvalidSessionError("Session expired or logged out")
+            user = cursor.execute(
+                "select username from users where id=%s and status='active'", (row["user_id"],)
+            ).fetchone()
+            if user is None:
                 raise InvalidSessionError("Session expired or logged out")
             cursor.execute(
                 "update auth_sessions set last_accessed_at=%s,expires_at=%s where token_hash=%s",
                 (now, now + self.idle_timeout, self._hash(token)),
             )
-        return SharedSession(token, row["csrf_token"], row["user_id"], row["username"], now)
+        return SharedSession(token, row["csrf_token"], row["user_id"], user["username"], now)
 
     def validate_csrf(self, token: str | None, csrf_token: str | None) -> SharedSession:
         session = self.get(token)
