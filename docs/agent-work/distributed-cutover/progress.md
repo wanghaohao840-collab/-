@@ -2,6 +2,8 @@
 
 ## 2026-09-27 — business persistence prerequisites
 
+- **Notes:** `384b16b` keeps business rules shared through explicit local/PG domain persistence, with user-first write locking and consistent paginated reads. PostgreSQL stores derived lexical positions; a disposable in-memory FTS5 tokenizer preserves existing Chinese/diacritic/phrase-prefix behavior without local durable authority. Focused local/API/deletion + PG suite: 105 passed. Review reproduced a valid 6000-character token exceeding the secondary B-tree key limit; `b047100` removes that redundant full-token index, preserving exact token contents. Final PG suite 7 passed in 11.68s and independent re-review approved. Schema004 is unreleased; any retained pre-fix004+ schema would require index removal or recreation. Source tag-order/token rebuild and Worker claims remain open.
+
 - **Report bytes and metadata:** `dfb89e7` publishes a report record and its S3 bucket/key/version/hash/size in one PG transaction after immutable upload. Failed publication leaves no visible report; pinned versions survive latest-object overwrite/delete markers. Six real-PG/S3 tests passed; independent review approved. API download streaming and migration of old report references are not wired yet.
 - **Episodic document rows:** `46ce3cf` adds user-scoped PG storage that preserves original metadata text and supports publication in the caller's snapshot transaction. Final suite 5 passed in 6.27s; independent review approved. Closing the adapter preserves the shared pool. EpisodicMemory construction still uses local SQLite until runtime injection; vector publication and source migration remain open.
 
