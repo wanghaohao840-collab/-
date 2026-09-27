@@ -2,6 +2,9 @@
 
 ## 2026-09-27 — business persistence prerequisites
 
+- **Report bytes and metadata:** `dfb89e7` publishes a report record and its S3 bucket/key/version/hash/size in one PG transaction after immutable upload. Failed publication leaves no visible report; pinned versions survive latest-object overwrite/delete markers. Six real-PG/S3 tests passed; independent review approved. API download streaming and migration of old report references are not wired yet.
+- **Episodic document rows:** `46ce3cf` adds user-scoped PG storage that preserves original metadata text and supports publication in the caller's snapshot transaction. Final suite 5 passed in 6.27s; independent review approved. Closing the adapter preserves the shared pool. EpisodicMemory construction still uses local SQLite until runtime injection; vector publication and source migration remain open.
+
 - **Structured source inventory:** `a94304f` plus reviewed correction `de1eb82` validates History/Memory/episode owners, finite and duplicate-free JSON, supported Memory types, and known episode schema. Document/report bodies are not retained after byte hashing; source note tag order is recorded explicitly for later PG rebuild. Final focused suite: 18 passed; independent re-review approved. The real paired CLI passed after corrections, recording History 2 documents, Memory 4 episodic + 2 semantic items and episode SQLite 4 rows. Private manifest is `source-authorities-inventory.json`. This records migration inputs and does not migrate them.
 
 - **Learning:** `39f10fa` shares existing validation, idempotency, scheduling and version rules through a narrow SQLite/PostgreSQL persistence adapter. PG writers lock the user first; paginated reads use a transaction-local consistent snapshot with the frozen cursor instant. Five local suites plus six real-PG scenarios: 53 passed in 39.75s; independent review approved. LearningService's legacy gate and PG composite deletion wiring remain open.

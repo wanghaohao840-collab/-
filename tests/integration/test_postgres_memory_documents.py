@@ -86,3 +86,25 @@ def test_caller_delete_rollback_and_autocommit_rejected(documents):
                     store.delete_document_in_transaction(cursor, 'd')
         finally:
             connection.autocommit = False
+
+
+def test_explicit_autocommit_transaction_owns_publication(documents):
+    first, second, (user, _other) = documents
+    store = PostgresMemoryDocumentStore(first, user)
+    metadata = json.dumps({'user_id': user})
+    with first.connection() as connection:
+        connection.autocommit = True
+        try:
+            with connection.cursor() as cursor:
+                with pytest.raises(ValueError, match='transaction'):
+                    store.add_document_in_transaction(cursor, 'd', 'invalid', metadata)
+                with pytest.raises(RuntimeError, match='abort'):
+                    with connection.transaction():
+                        store.add_document_in_transaction(cursor, 'd', 'rolled back', metadata)
+                        raise RuntimeError('abort')
+                assert PostgresMemoryDocumentStore(second, user).get_document('d') is None
+                with connection.transaction():
+                    store.add_document_in_transaction(cursor, 'd', 'committed', metadata)
+        finally:
+            connection.autocommit = False
+    assert PostgresMemoryDocumentStore(second, user).get_document('d')['content'] == 'committed'
