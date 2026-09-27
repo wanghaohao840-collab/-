@@ -1,5 +1,11 @@
 # Distributed cutover progress
 
+## 2026-09-27 — business persistence prerequisites
+
+- **Learning:** `39f10fa` shares existing validation, idempotency, scheduling and version rules through a narrow SQLite/PostgreSQL persistence adapter. PG writers lock the user first; paginated reads use a transaction-local consistent snapshot with the frozen cursor instant. Five local suites plus six real-PG scenarios: 53 passed in 39.75s; independent review approved. LearningService's legacy gate and PG composite deletion wiring remain open.
+- **History/Memory snapshots:** `009c5be` adds explicit revision 003 and a user-scoped version/CAS repository, serialized mutation and caller-owned transaction publication. Independent review approved; both minor coverage requests were added. Final real-PG suite: 8 passed in 3.66s, covering concurrent writes, stale positive versions, rollback, ownership and nested JSON preservation. It does not yet hydrate runtime managers, migrate source snapshots, replace episodic SQLite, or fence Worker publication.
+- **Delivery boundary:** both are repository prerequisites. Bootstrap still rejects distributed startup. Complete migrated product journeys, independent Worker recovery, two distinct compatible distributed-image rollback and production approval remain pending.
+
 ## 2026-09-24 — isolated branch and baseline
 
 - **Status:** active; no distributed application is enabled.

@@ -153,3 +153,27 @@ def test_autocommit_requires_explicit_transaction(snapshots):
         finally:
             connection.autocommit = False
     assert repos[1].read(user, 'history') is None
+
+
+def test_positive_cas_and_json_copies_preserve_winner(snapshots):
+    repos, (user, _), _pools = snapshots
+    original = history()
+    original['documents'] = [{'document_id': 'd', 'pages': [3, 1], 'nested': {'text': '中文', 'flag': True, 'missing': None}}]
+    first = repos[0].compare_and_swap(user, 'history', original, expected_version=0)
+    original['documents'][0]['pages'].append(99)
+    assert first.data['documents'][0]['pages'] == [3, 1]
+    first.data['documents'][0]['pages'].append(2)
+    second = repos[1].compare_and_swap(user, 'history', first.data, expected_version=1)
+    assert second.version == 2
+    with pytest.raises(SnapshotConflict):
+        repos[0].compare_and_swap(user, 'history', history(), expected_version=1)
+    second.data['documents'].clear()
+    saved = repos[0].read(user, 'history')
+    assert saved.version == 2
+    assert saved.data['documents'][0]['pages'] == [3, 1, 2]
+    for value in (float('nan'), float('inf'), (1, 2), {1: 'integer key'}):
+        invalid = history()
+        invalid['extra'] = value
+        with pytest.raises(ValueError):
+            repos[0].compare_and_swap(user, 'history', invalid, expected_version=2)
+    assert repos[1].read(user, 'history').data == saved.data
