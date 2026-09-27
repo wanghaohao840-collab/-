@@ -112,7 +112,9 @@ def inventory_pair(app_archive: Path) -> dict[str, object]:
             if name == "app/app.db":
                 database_bytes = content
             elif name.startswith("app/users/"):
-                user_contents[name] = content
+                parts = PurePosixPath(name).parts
+                # Retain paths for ownership checks, not document/report payloads.
+                user_contents[name] = b"" if len(parts) >= 4 and parts[3] in {"documents", "reports"} else content
                 files.append(
                     {
                         "path": name,

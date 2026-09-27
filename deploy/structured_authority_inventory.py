@@ -7,6 +7,7 @@ from collections import Counter
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 from pathlib import PurePosixPath
 import sqlite3
 
@@ -30,7 +31,13 @@ def _unique_object(pairs):
 
 
 def _json(content):
-    return json.loads(content, parse_constant=_invalid_constant, object_pairs_hook=_unique_object)
+    def finite_float(value):
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError('Snapshot contains non-finite JSON')
+        return result
+    return json.loads(content, parse_constant=_invalid_constant, parse_float=finite_float,
+                      object_pairs_hook=_unique_object)
 
 
 @contextmanager
@@ -93,6 +100,11 @@ def inventory_authorities(database_bytes: bytes, user_files: dict[str, bytes]) -
             fields = ('documents', 'questions', 'notes', 'sessions')
             if not isinstance(value, dict) or any(not isinstance(value.get(key), list) for key in fields):
                 raise ValueError('History snapshot schema is invalid')
+            for document in value['documents']:
+                if not isinstance(document, dict):
+                    raise ValueError('History document schema is invalid')
+                if 'user_id' in document and document['user_id'] != owner:
+                    raise ValueError('History document owner mismatch')
             evidence.update(counts={key: len(value[key]) for key in fields}, payload_sha256=_digest(value))
             users[owner]['history'] = evidence
         elif relative == 'memory/memories.json':
@@ -102,7 +114,9 @@ def inventory_authorities(database_bytes: bytes, user_files: dict[str, bytes]) -
                 raise ValueError('Memory snapshot schema or owner is invalid')
             for item in value['memories']:
                 if (not isinstance(item, dict) or not isinstance(item.get('metadata'), dict)
-                        or item['metadata'].get('user_id') != owner or not isinstance(item.get('memory_type'), str)):
+                        or item['metadata'].get('user_id') != owner
+                        or not isinstance(item.get('memory_type'), str)
+                        or item['memory_type'] not in {'working', 'episodic', 'semantic'}):
                     raise ValueError('Memory item schema or owner is invalid')
             evidence.update(types=dict(sorted(Counter(item['memory_type'] for item in value['memories']).items())),
                             payload_sha256=_digest(value))

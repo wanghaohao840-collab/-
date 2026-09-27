@@ -70,3 +70,65 @@ def test_inventory_refuses_unknown_structured_file():
     source['app/users/u/memory/extra.db'] = source['app/users/u/memory/memory_u.db']
     with pytest.raises(ValueError, match='unsupported'):
         inventory_authorities(database(), source)
+
+
+def test_history_rejects_document_with_foreign_explicit_owner():
+    source = files()
+    history = json.loads(source['app/users/u/history.json'])
+    history['documents'][0]['user_id'] = 'other'
+    source['app/users/u/history.json'] = json.dumps(history).encode()
+    with pytest.raises(ValueError, match='owner'):
+        inventory_authorities(database(), source)
+    history['documents'][0]['user_id'] = 'u'
+    source['app/users/u/history.json'] = json.dumps(history).encode()
+    assert inventory_authorities(database(), source)['users']['u']['history']['counts']['documents'] == 1
+
+
+@pytest.mark.parametrize('number', ['1e999', '-1e999', 'NaN', 'Infinity'])
+def test_episode_rejects_nonfinite_metadata(number):
+    source = files()
+    with sqlite3.connect(':memory:') as conn:
+        conn.deserialize(source['app/users/u/memory/memory_u.db'])
+        conn.execute('update documents set metadata=?', ('{"user_id":"u","nested":{"score":' + number + '}}',))
+        conn.commit()
+        source['app/users/u/memory/memory_u.db'] = conn.serialize()
+    with pytest.raises(ValueError, match='non-finite'):
+        inventory_authorities(database(), source)
+
+
+def test_memory_rejects_unsupported_type_without_disclosing_it():
+    source = files()
+    memory = json.loads(source['app/users/u/memory/memories.json'])
+    memory['memories'][0]['memory_type'] = 'private-unsupported-value'
+    source['app/users/u/memory/memories.json'] = json.dumps(memory).encode()
+    with pytest.raises(ValueError, match='Memory item') as error:
+        inventory_authorities(database(), source)
+    assert 'private-unsupported-value' not in str(error.value)
+
+
+def test_pair_does_not_retain_document_or_report_bytes(tmp_path, monkeypatch):
+    import hashlib
+    import tarfile
+    from tests.deploy.test_inventory_paired_backup import _pair, _add_file, _hash
+    import deploy.inventory_paired_backup as paired
+    path = _pair(tmp_path)
+    with tarfile.open(path, 'r:gz') as archive:
+        db_content = archive.extractfile('./app/app.db').read()
+    with tarfile.open(path, 'w:gz') as archive:
+        _add_file(archive, './app/app.db', db_content)
+        _add_file(archive, './app/users/user-id/documents/doc.txt', b'private-document')
+        _add_file(archive, './app/users/user-id/reports/report.md', b'private-report')
+    metadata_path = tmp_path / 'paired.tar.gz.meta'
+    metadata = json.loads(metadata_path.read_text())
+    metadata['sha256'] = _hash(path)
+    metadata_path.write_text(json.dumps(metadata))
+    real_inventory = paired.inventory_authorities
+    def inspect_contents(db, contents):
+        assert contents == {'app/users/user-id/documents/doc.txt': b'',
+                            'app/users/user-id/reports/report.md': b''}
+        return real_inventory(db, contents)
+    monkeypatch.setattr(paired, 'inventory_authorities', inspect_contents)
+    result = paired.inventory_pair(path)
+    for item, payload in zip(result['files'], (b'private-document', b'private-report')):
+        assert item['bytes'] == len(payload)
+        assert item['sha256'] == hashlib.sha256(payload).hexdigest()
