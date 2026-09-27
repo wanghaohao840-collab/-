@@ -172,7 +172,7 @@ def test_scanner_rejects_unexpected_durable_file(source, case, tmp_path, bad_nam
         migrate_files(source, case[1], "dry-run", manifest_path=tmp_path / "m.json")
 
 
-def test_scanner_rejects_symlinked_document_and_missing_users(source, case, tmp_path):
+def test_scanner_rejects_symlinked_document(source, case, tmp_path):
     folder = next((source / "users").iterdir()) / "documents"
     original = next(folder.iterdir())
     linked = folder / (str(uuid4()) + ".txt")
@@ -182,7 +182,9 @@ def test_scanner_rejects_symlinked_document_and_missing_users(source, case, tmp_
         pytest.skip("symlink creation is unavailable")
     with pytest.raises(ValueError, match="symlink/reparse"):
         migrate_files(source, case[1], "dry-run", manifest_path=tmp_path / "m.json")
-    linked.unlink()
+
+
+def test_scanner_rejects_missing_users(source, case, tmp_path):
     (source / "users").rename(source / "users-old")
     with pytest.raises(FileNotFoundError):
         migrate_files(source, case[1], "dry-run", manifest_path=tmp_path / "m.json")

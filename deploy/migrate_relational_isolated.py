@@ -72,12 +72,18 @@ def _fingerprint(rows) -> str:
     return digest.hexdigest()
 
 
-def _source(path: Path, expected_sha256: str):
-    if not path.is_file():
-        raise MigrationError("Source SQLite file does not exist")
+def _reject_source_journals(path: Path) -> None:
     for suffix in ("-wal", "-journal", "-shm"):
         if Path(str(path) + suffix).exists():
             raise MigrationError("Source has live SQLite journal siblings")
+
+
+def _source(path: Path, expected_sha256: str):
+    # The caller must keep the source frozen throughout the command. Rechecks
+    # detect common violations; immutable SQLite is not a writer coordination API.
+    if not path.is_file():
+        raise MigrationError("Source SQLite file does not exist")
+    _reject_source_journals(path)
     actual = _digest_file(path)
     if len(expected_sha256) != 64 or actual != expected_sha256.lower():
         raise MigrationError("Source SHA-256 mismatch")
@@ -101,6 +107,7 @@ def _source(path: Path, expected_sha256: str):
             rows[table] = connection.execute(f'select * from "{table}"').fetchall()
         if _digest_file(path) != actual:
             raise MigrationError("Source changed during inspection")
+        _reject_source_journals(path)
         return actual, columns, rows
     finally:
         connection.close()

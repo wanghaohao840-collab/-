@@ -56,5 +56,7 @@ def test_real_store_replay_isolation_and_prior_version_retention(store):
     later = store.client.put_object(Bucket=store.bucket, Key=key, Body=b"unpublished later bytes")
     assert later["VersionId"] != first.ref.version_id
     assert store.read_verified(user_id, first.ref) == content
-    store.client.delete_object(Bucket=store.bucket, Key=key)
+    deleted = store.client.delete_object(Bucket=store.bucket, Key=key)
+    assert deleted["DeleteMarker"] is True
+    assert deleted["VersionId"] not in {first.ref.version_id, later["VersionId"], "null", ""}
     assert store.read_verified(user_id, first.ref) == content
