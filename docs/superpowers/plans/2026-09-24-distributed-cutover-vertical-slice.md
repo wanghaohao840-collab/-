@@ -31,7 +31,7 @@
 - [x] Read repository instructions, project knowledge, both designs, current Git state and old worktree draft status.
 - [x] Record `528e70e`, current application image digest, Qdrant image/collection identity, deployed service identity, and source paired backup names. Read production artifacts only to construct an isolated copy; do not mutate the running deployment. Evidence: `docs/agent-work/distributed-cutover/progress.md`.
 - [ ] Finish baseline tests from this worktree and record exact command, exit code and failures. Build a minimal read-only source inventory of SQLite tables, rows by user and status, files with SHA-256/size, Qdrant collections/point counts and index identity from one paired backup.
-- [ ] Record an authenticated product journey checklist: login, import, search/citations, QA, source note, learning plan/task, report generation/read/download, delete, cross-user denial, restart persistence. Synthetic models may make requests deterministic, but real PostgreSQL/S3/Qdrant and actual product endpoints must be exercised.
+- [x] Record an authenticated product journey checklist: login, import, search/citations, QA, source note, learning plan/task, report generation/read/download, delete, cross-user denial, restart persistence. Recorded in `docs/agent-work/distributed-cutover/business-acceptance.md`; execution remains pending. Synthetic models may make requests deterministic, but real PostgreSQL/S3/Qdrant and actual product endpoints must be exercised.
 
 **Gate:** source inventory is reproducible from a paired backup and the baseline failures, if any, are classified before code changes.
 
