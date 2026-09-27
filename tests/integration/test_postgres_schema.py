@@ -39,8 +39,8 @@ def postgres_schema(monkeypatch):
 def test_upgrade_twice_and_business_constraints(postgres_schema):
     schema, base_url, _url = postgres_schema
     config = Config(str(ROOT / "alembic.ini"))
-    command.upgrade(config, "head")
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260926_01")
+    command.upgrade(config, "20260926_01")
     with psycopg.connect(base_url, options=f"-csearch_path={schema}") as connection:
         rows = connection.execute(
             "select version_num from alembic_version"
@@ -92,7 +92,7 @@ def test_existing_business_table_refused(postgres_schema):
         connection.execute("create table users (id integer primary key)")
         connection.commit()
     with pytest.raises(RuntimeError, match="Business tables already exist"):
-        command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
+        command.upgrade(Config(str(ROOT / "alembic.ini")), "20260926_01")
     with psycopg.connect(base_url, options=f"-csearch_path={schema}") as connection:
         assert connection.execute("select count(*) from users").fetchone() == (0,)
         assert connection.execute(

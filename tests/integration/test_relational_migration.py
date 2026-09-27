@@ -31,7 +31,7 @@ def target(monkeypatch):
     ).render_as_string(hide_password=False)
     monkeypatch.setenv("DATABASE_URL", url)
     try:
-        command.upgrade(Config("alembic.ini"), "head")
+        command.upgrade(Config("alembic.ini"), "20260926_01")
         yield schema, base_url
     finally:
         with psycopg.connect(base_url, autocommit=True) as admin:

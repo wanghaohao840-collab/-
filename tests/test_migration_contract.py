@@ -41,7 +41,7 @@ def test_offline_sql_contains_business_tables(monkeypatch, tmp_path) -> None:
     output = tmp_path / "upgrade.sql"
     with output.open("w", encoding="utf-8") as stream:
         config.output_buffer = stream
-        command.upgrade(config, "head", sql=True)
+        command.upgrade(config, "20260926_01", sql=True)
     sql = output.read_text(encoding="utf-8")
     assert "CREATE TABLE alembic_version" in sql
     assert set(re.findall(r"create table if not exists (\w+)", sql)) == EXPECTED_TABLES
@@ -51,10 +51,10 @@ def test_offline_sql_contains_business_tables(monkeypatch, tmp_path) -> None:
 def test_non_postgres_url_rejected(monkeypatch, url) -> None:
     monkeypatch.setenv("DATABASE_URL", url)
     with pytest.raises(RuntimeError, match="postgresql"):
-        command.upgrade(Config(str(ROOT / "alembic.ini")), "head", sql=True)
+        command.upgrade(Config(str(ROOT / "alembic.ini")), "20260926_01", sql=True)
 
 
 def test_missing_url_rejected(monkeypatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(RuntimeError, match="DATABASE_URL"):
-        command.upgrade(Config(str(ROOT / "alembic.ini")), "head", sql=True)
+        command.upgrade(Config(str(ROOT / "alembic.ini")), "20260926_01", sql=True)
