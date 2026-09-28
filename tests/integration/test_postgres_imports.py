@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
+from psycopg.errors import UniqueViolation
 
 from app.import_models import ImportTaskCreate
 from app.import_persistence import ImportStore
@@ -57,7 +58,7 @@ def test_validation_scope_and_atomic_failure(repositories):
         assert cursor.execute("select count(*) as n from import_batches").fetchone()["n"] == 0
         assert cursor.execute("select count(*) as n from import_tasks").fetchone()["n"] == 0
     writer.create_batch("owner", [task()], now="T1")
-    with pytest.raises(Exception):
+    with pytest.raises(UniqueViolation):
         writer.create_batch("owner", [task("task-2", "batch-2"), task("task-1", "batch-2")])
     assert reader.list_batches("owner")[0].total == 1
     assert reader.get_batch("owner", "batch-2") is None

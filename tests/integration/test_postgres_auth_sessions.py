@@ -25,7 +25,7 @@ from app.session import InvalidCsrfTokenError, InvalidSessionError
 
 
 @pytest.fixture
-def shared_database(monkeypatch):
+def shared_database(monkeypatch, request):
     base = os.environ.get("POSTGRES_TEST_URL")
     if not base:
         pytest.skip("POSTGRES_TEST_URL is required")
@@ -36,7 +36,7 @@ def shared_database(monkeypatch):
                              query={"options": f"-csearch_path={schema}"})
     url = url.render_as_string(hide_password=False)
     monkeypatch.setenv("DATABASE_URL", url)
-    command.upgrade(Config("alembic.ini"), "head")
+    command.upgrade(Config("alembic.ini"), getattr(request, "param", "head"))
     databases = []
 
     def open_pool():
@@ -234,6 +234,7 @@ def test_waiting_get_rechecks_disabled_user(shared_database):
         ).fetchone()[0] == original_expiry
 
 
+@pytest.mark.parametrize("shared_database", ["20260927_02"], indirect=True)
 def test_downgrade_refuses_live_sessions(shared_database):
     open_pool, _ = shared_database
     db = open_pool()
