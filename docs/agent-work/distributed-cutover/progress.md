@@ -1,5 +1,12 @@
 # Distributed cutover progress
 
+## 2026-09-28 — structured authority copy
+
+- **Isolated migration:** `2ca3eec` copies History/Memory snapshots, episodic rows and Notes derived state from verified paired archives without extracting or writing source files. It requires all25 baseline relational tables to match, locks the explicit revision006 target, and accepts only empty or fully equal scoped authority. Five focused PG tests passed, including injected rollback and changed-target rejection.
+- **Actual paired copy:** created new task schema `cutover_authorities_20260928`, copied baseline001 data and upgraded to006. Structured dry-run/apply/reapply/verify returned ready/applied/unchanged/equal: 2 snapshots,4episodicrows,24notetokenpositions,2tagpositions. Repository readback matched2Historydocuments/6Memoryitems;5Notesqueries matched originalSQLiteFTS. Original `cutover_paired_20260926` remains001. Private evidence: `paired-structured-evidence.json` and `paired-structured-readback.json`.
+- **Review pending correction:** evidence output must use atomic replacement to prevent an outside hard-link alias from truncating a frozen backup. Hard-link and partial-authority regressions are added; correction/re-review remain open. This does not establish report/document reference migration, RAG authority, authenticated distributed API, Worker recovery or image rollback acceptance.
+- **Remote:** `git ls-remote` confirmed `c8afd34` on the branch. Later local structured-migration work is not yet pushed. Task Qdrant container was observed stopped (exit143); PostgreSQL and S3 task services were running. No production migration or cutover occurred.
+
 ## 2026-09-27 — business persistence prerequisites
 
 - **Notes:** `384b16b` keeps business rules shared through explicit local/PG domain persistence, with user-first write locking and consistent paginated reads. PostgreSQL stores derived lexical positions; a disposable in-memory FTS5 tokenizer preserves existing Chinese/diacritic/phrase-prefix behavior without local durable authority. Focused local/API/deletion + PG suite: 105 passed. Review reproduced a valid 6000-character token exceeding the secondary B-tree key limit; `b047100` removes that redundant full-token index, preserving exact token contents. Final PG suite 7 passed in 11.68s and independent re-review approved. Schema004 is unreleased; any retained pre-fix004+ schema would require index removal or recreation. Source tag-order/token rebuild and Worker claims remain open.
