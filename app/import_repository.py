@@ -3,15 +3,12 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
 
 from app.database import connect, transaction
+from app.import_persistence import ImportControlRepository, ImportStore
 from app.import_models import (
     ImportBatchSummary,
-    ImportCancelDecision,
     ImportStage,
-    ImportStatus,
-    ImportTaskCreate,
     ImportTaskRecord,
 )
 from app.storage import UserStorage
@@ -29,176 +26,16 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-class ImportTaskRepository:
+class ImportTaskRepository(ImportControlRepository):
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
+        self._init_import_control(self.db_path)
 
-    def create_batch(
-        self,
-        user_id: str,
-        tasks: Iterable[ImportTaskCreate],
-        now: str | None = None,
-    ) -> ImportBatchSummary:
-        task_list = list(tasks)
-        if not task_list:
-            raise ValueError("an import batch requires at least one task")
-        batch_ids = {task.batch_id for task in task_list}
-        if len(batch_ids) != 1 or any(task.user_id != user_id for task in task_list):
-            raise ValueError("all import tasks must belong to one user and batch")
 
-        timestamp = now or _utc_now()
-        batch_id = task_list[0].batch_id
-        with transaction(self.db_path) as conn:
-            conn.execute(
-                """
-                insert into import_batches (id, user_id, created_at, updated_at)
-                values (?, ?, ?, ?)
-                """,
-                (batch_id, user_id, timestamp, timestamp),
-            )
-            conn.executemany(
-                """
-                insert into import_tasks (
-                    id, batch_id, user_id, document_id, original_name, file_suffix,
-                    size_bytes, staged_relative_path, status, stage, progress,
-                    created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 'queued', 0, ?, ?)
-                """,
-                [
-                    (
-                        task.task_id,
-                        task.batch_id,
-                        task.user_id,
-                        task.document_id,
-                        task.original_name,
-                        task.file_suffix,
-                        task.size_bytes,
-                        task.staged_relative_path,
-                        timestamp,
-                        timestamp,
-                    )
-                    for task in task_list
-                ],
-            )
-            return self._get_batch(conn, user_id, batch_id)
 
-    def list_batches(self, user_id: str, limit: int = 50) -> list[ImportBatchSummary]:
-        if limit < 1:
-            return []
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                """
-                select id from import_batches
-                where user_id = ?
-                order by created_at desc, id desc
-                limit ?
-                """,
-                (user_id, limit),
-            ).fetchall()
-            return [self._get_batch(conn, user_id, row["id"]) for row in rows]
 
-    def get_batch(self, user_id: str, batch_id: str) -> ImportBatchSummary | None:
-        with connect(self.db_path) as conn:
-            return self._get_batch(conn, user_id, batch_id)
 
-    def get_task(self, user_id: str, task_id: str) -> ImportTaskRecord | None:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                "select * from import_tasks where id = ? and user_id = ?",
-                (task_id, user_id),
-            ).fetchone()
-            return _task_from_row(row) if row is not None else None
 
-    def request_cancel(
-        self,
-        user_id: str,
-        batch_id: str,
-        task_id: str,
-        now: str | None = None,
-    ) -> ImportCancelDecision:
-        timestamp = now or _utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            row = conn.execute(
-                """
-                select * from import_tasks
-                where id = ? and batch_id = ? and user_id = ?
-                """,
-                (task_id, batch_id, user_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError("import task was not found")
-
-            changed = False
-            if row["status"] in ("queued", "retry_wait"):
-                updated = conn.execute(
-                    """
-                    update import_tasks
-                    set status = 'cancelled', stage = 'cancelled',
-                        next_attempt_at = null, cancel_requested_at = ?,
-                        finished_at = ?, updated_at = ?
-                    where id = ? and batch_id = ? and user_id = ?
-                      and status in ('queued', 'retry_wait')
-                    """,
-                    (timestamp, timestamp, timestamp, task_id, batch_id, user_id),
-                )
-                changed = bool(updated.rowcount)
-                outcome = "cancelled"
-            elif row["status"] == "running" and row["stage"] == "committing":
-                outcome = "not_cancellable"
-            elif row["status"] == "running":
-                updated = conn.execute(
-                    """
-                    update import_tasks
-                    set cancel_requested_at = ?, updated_at = ?
-                    where id = ? and batch_id = ? and user_id = ?
-                      and status = 'running' and stage != 'committing'
-                      and cancel_requested_at is null
-                    """,
-                    (timestamp, timestamp, task_id, batch_id, user_id),
-                )
-                changed = bool(updated.rowcount)
-                outcome = "cancel_requested"
-            else:
-                outcome = "unchanged"
-
-            updated_row = conn.execute(
-                """
-                select * from import_tasks
-                where id = ? and batch_id = ? and user_id = ?
-                """,
-                (task_id, batch_id, user_id),
-            ).fetchone()
-            if changed:
-                conn.execute(
-                    """
-                    update import_batches set updated_at = ?
-                    where id = ? and user_id = ?
-                    """,
-                    (updated_row["updated_at"], batch_id, user_id),
-                )
-            conn.commit()
-            return ImportCancelDecision(
-                task=_task_from_row(updated_row),
-                outcome=outcome,
-            )
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def is_cancel_requested(self, user_id: str, task_id: str) -> bool:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                select cancel_requested_at from import_tasks
-                where id = ? and user_id = ?
-                """,
-                (task_id, user_id),
-            ).fetchone()
-            return row is not None and row["cancel_requested_at"] is not None
 
     def try_begin_committing(
         self,
@@ -398,43 +235,7 @@ class ImportTaskRepository:
             (error_code, error_summary, timestamp, timestamp),
         )
 
-    def retry_task(
-        self, user_id: str, task_id: str, now: str | None = None
-    ) -> ImportTaskRecord:
-        timestamp = now or _utc_now()
-        return self._transition_update(
-            user_id,
-            task_id,
-            "status = 'failed'",
-            """status = 'queued', stage = 'queued', progress = 0,
-               auto_retry_count = 0, manual_retry_count = manual_retry_count + 1,
-               next_attempt_at = null, error_code = null, error_summary = null,
-               started_at = null, finished_at = null, updated_at = ?""",
-            (timestamp,),
-        )
 
-    def retry_failed_in_batch(
-        self, user_id: str, batch_id: str, now: str | None = None
-    ) -> int:
-        timestamp = now or _utc_now()
-        with transaction(self.db_path) as conn:
-            updated = conn.execute(
-                """
-                update import_tasks
-                set status = 'queued', stage = 'queued', progress = 0,
-                    auto_retry_count = 0, manual_retry_count = manual_retry_count + 1,
-                    next_attempt_at = null, error_code = null, error_summary = null,
-                    started_at = null, finished_at = null, updated_at = ?
-                where user_id = ? and batch_id = ? and status = 'failed'
-                """,
-                (timestamp, user_id, batch_id),
-            )
-            if updated.rowcount:
-                conn.execute(
-                    "update import_batches set updated_at = ? where id = ? and user_id = ?",
-                    (timestamp, batch_id, user_id),
-                )
-            return updated.rowcount
 
     def recover_running(self, storage: UserStorage, now: str | None = None) -> int:
         timestamp = now or _utc_now()
@@ -516,30 +317,7 @@ class ImportTaskRepository:
                 pass
         return removed
 
-    def has_active_tasks(self, user_id: str) -> bool:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                select 1 from import_tasks
-                where user_id = ? and status in ('queued', 'running', 'retry_wait')
-                limit 1
-                """,
-                (user_id,),
-            ).fetchone()
-            return row is not None
 
-    def has_active_task_for_document(self, user_id: str, document_id: str) -> bool:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                """
-                select 1 from import_tasks
-                where user_id = ? and document_id = ?
-                  and status in ('queued', 'running', 'retry_wait')
-                limit 1
-                """,
-                (user_id, document_id),
-            ).fetchone()
-            return row is not None
 
     def _transition_update(
         self,
@@ -584,50 +362,8 @@ class ImportTaskRepository:
             raise KeyError("import task was not found")
         raise InvalidImportTransition("import task is not in the required state")
 
-    def _get_batch(
-        self, conn: sqlite3.Connection, user_id: str, batch_id: str
-    ) -> ImportBatchSummary | None:
-        row = conn.execute(
-            """
-            select b.id, b.user_id, b.created_at, b.updated_at,
-                   count(t.id) as total,
-                   coalesce(sum(t.status = 'queued'), 0) as queued,
-                   coalesce(sum(t.status = 'running'), 0) as running,
-                   coalesce(sum(t.status = 'retry_wait'), 0) as retry_wait,
-                   coalesce(sum(t.status = 'succeeded'), 0) as succeeded,
-                   coalesce(sum(t.status = 'failed'), 0) as failed,
-                   coalesce(sum(t.status = 'cancelled'), 0) as cancelled
-            from import_batches b
-            left join import_tasks t on t.batch_id = b.id and t.user_id = b.user_id
-            where b.id = ? and b.user_id = ?
-            group by b.id, b.user_id, b.created_at, b.updated_at
-            """,
-            (batch_id, user_id),
-        ).fetchone()
-        if row is None:
-            return None
-        task_rows = conn.execute(
-            """
-            select * from import_tasks
-            where batch_id = ? and user_id = ?
-            order by created_at, id
-            """,
-            (batch_id, user_id),
-        ).fetchall()
-        return ImportBatchSummary(
-            batch_id=row["id"],
-            user_id=row["user_id"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-            total=row["total"],
-            queued=row["queued"],
-            running=row["running"],
-            retry_wait=row["retry_wait"],
-            succeeded=row["succeeded"],
-            failed=row["failed"],
-            tasks=tuple(_task_from_row(task_row) for task_row in task_rows),
-            cancelled=row["cancelled"],
-        )
+    def _get_batch(self, conn: sqlite3.Connection, user_id: str, batch_id: str) -> ImportBatchSummary | None:
+        return self._batch(ImportStore(conn), user_id, batch_id)
 
 
 def _task_from_row(row: sqlite3.Row) -> ImportTaskRecord:
@@ -663,3 +399,58 @@ def _blocked_user_clause(user_ids: set[str]) -> tuple[str, tuple[str, ...]]:
         return "", ()
     placeholders = ", ".join("?" for _ in user_ids)
     return f"and user_id not in ({placeholders})", tuple(user_ids)
+
+
+class PostgresImportTaskRepository(ImportControlRepository):
+    """Shared submission/control; distributed worker leases are a later gate."""
+
+    def __init__(self, database):
+        self._init_import_control(database, postgres=True)
+
+    def create_batch_in_transaction(self, cursor, user_id, tasks, now=None):
+        task_list = self._validate_tasks(user_id, tasks)
+        store = self._imports.caller_owned(cursor, user_id)
+        return self._create_batch(store, user_id, task_list, now)
+
+    @staticmethod
+    def _lease_required():
+        raise RuntimeError("PostgreSQL import worker lease is not implemented")
+
+    def claim_next(self, *args, **kwargs):
+        self._lease_required()
+
+    def try_begin_committing(self, *args, **kwargs):
+        self._lease_required()
+
+    def update_progress(self, *args, **kwargs):
+        self._lease_required()
+
+    def release_claim(self, *args, **kwargs):
+        self._lease_required()
+
+    def mark_succeeded(self, *args, **kwargs):
+        self._lease_required()
+
+    def mark_cancelled(self, *args, **kwargs):
+        self._lease_required()
+
+    def mark_retry_wait(self, *args, **kwargs):
+        self._lease_required()
+
+    def mark_failed(self, *args, **kwargs):
+        self._lease_required()
+
+    def recover_running(self, *args, **kwargs):
+        self._lease_required()
+
+    def cleanup_succeeded_staging(self, *args, **kwargs):
+        self._lease_required()
+
+    def _transition_update(self, *args, **kwargs):
+        self._lease_required()
+
+    def _raise_transition_error(self, *args, **kwargs):
+        self._lease_required()
+
+    def _get_batch(self, *args, **kwargs):
+        self._lease_required()
