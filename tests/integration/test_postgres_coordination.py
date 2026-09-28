@@ -304,3 +304,33 @@ def test_autocommit_pool_fails_closed_without_explicit_transaction(coordination)
                 pytest.fail('autocommit publication is unsafe')
     finally:
         isolated.close()
+
+
+def test_caller_owned_live_heartbeat_release_are_atomic(coordination):
+    database, other_db, first, second = coordination
+    lease = first.acquire('owner','worker')
+    for method in (first.require_live_in_transaction, first.heartbeat_in_transaction, first.release_in_transaction):
+        with database.connection() as connection:
+            with connection.cursor() as cursor:
+                with pytest.raises(ValueError,match='transaction'):
+                    method(cursor,lease)
+    with pytest.raises(RuntimeError,match='abort'):
+        with database.transaction() as cursor:
+            cursor.execute('begin')
+            assert first.require_live_in_transaction(cursor,lease)['lease_token']==lease.lease_token
+            renewed=first.heartbeat_in_transaction(cursor,lease,120)
+            assert renewed.expires_at>lease.expires_at
+            assert first.release_in_transaction(cursor,renewed)
+            with other_db.transaction() as reader:
+                assert reader.execute('select lease_expires_at from user_mutation_leases').fetchone()['lease_expires_at']==lease.expires_at
+            raise RuntimeError('abort')
+    with database.transaction() as cursor:
+        assert cursor.execute('select lease_expires_at from user_mutation_leases').fetchone()['lease_expires_at']==lease.expires_at
+    with database.transaction() as cursor:
+        cursor.execute('begin')
+        assert first.release_in_transaction(cursor,lease)
+    with pytest.raises(MutationLeaseLost):
+        with database.transaction() as cursor:
+            cursor.execute('begin')
+            first.release_in_transaction(cursor,lease)
+    assert second.release(lease) is False

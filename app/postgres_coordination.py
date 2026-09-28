@@ -105,7 +105,10 @@ class PostgresUserMutationCoordinator:
             (user_id, owner, uuid4(), row['lease_version'] + 1 if row else 1, lease_seconds),
         ).fetchone())
 
-    def _require_live(self, cursor, handle):
+    def require_live_in_transaction(self, cursor, handle):
+        """Lock and validate ownership using the caller's active transaction."""
+        if cursor.connection.info.transaction_status != TransactionStatus.INTRANS:
+            raise ValueError('Active caller-owned transaction required')
         if (not isinstance(handle, UserMutationLease) or not _identity(handle.user_id)
                 or not _identity(handle.owner) or not isinstance(handle.lease_token, UUID)
                 or type(handle.lease_version) is not int or handle.lease_version < 1):
@@ -125,31 +128,45 @@ class PostgresUserMutationCoordinator:
             raise MutationLeaseLost('User mutation lease is no longer live')
         return row
 
+    def heartbeat_in_transaction(self, cursor, handle, lease_seconds=60):
+        """Renew without committing; any failure requires caller rollback."""
+        _duration(lease_seconds)
+        self.require_live_in_transaction(cursor, handle)
+        row = cursor.execute(
+            'with t as materialized (select clock_timestamp() as now) '
+            'update user_mutation_leases set heartbeat_at=t.now, '
+            "lease_expires_at=t.now + %s * interval '1 second' from t "
+            'where user_id=%s and lease_expires_at > t.now returning user_mutation_leases.*',
+            (lease_seconds, handle.user_id),
+        ).fetchone()
+        if row is None:
+            raise MutationLeaseLost('User mutation lease expired before renewal')
+        return _handle(row)
+
     def heartbeat(self, handle, lease_seconds=60):
         _duration(lease_seconds)
         with self.database.transaction() as cursor:
-            self._require_live(cursor, handle)
-            row = cursor.execute(
-                'with t as materialized (select clock_timestamp() as now) '
-                'update user_mutation_leases set heartbeat_at=t.now, '
-                "lease_expires_at=t.now + %s * interval '1 second' from t "
-                'where user_id=%s and lease_expires_at > t.now returning user_mutation_leases.*',
-                (lease_seconds, handle.user_id),
-            ).fetchone()
-            if row is None:
-                raise MutationLeaseLost('User mutation lease expired before renewal')
-            return _handle(row)
+            self._isolation(cursor)
+            return self.heartbeat_in_transaction(cursor, handle, lease_seconds)
+
+    def release_in_transaction(self, cursor, handle):
+        """Release live ownership in caller transaction; loss always raises."""
+        self.require_live_in_transaction(cursor, handle)
+        row = cursor.execute(
+            'with t as materialized (select clock_timestamp() as now) '
+            'update user_mutation_leases set lease_expires_at=t.now from t '
+            'where user_id=%s and lease_expires_at > t.now returning user_id',
+            (handle.user_id,),
+        ).fetchone()
+        if row is None:
+            raise MutationLeaseLost('User mutation lease expired before release')
+        return True
 
     def release(self, handle):
         try:
             with self.database.transaction() as cursor:
-                self._require_live(cursor, handle)
-                return cursor.execute(
-                    'with t as materialized (select clock_timestamp() as now) '
-                    'update user_mutation_leases set lease_expires_at=t.now from t '
-                    'where user_id=%s and lease_expires_at > t.now returning user_id',
-                    (handle.user_id,),
-                ).fetchone() is not None
+                self._isolation(cursor)
+                return self.release_in_transaction(cursor, handle)
         except MutationLeaseLost:
             return False
 
@@ -161,6 +178,7 @@ class PostgresUserMutationCoordinator:
         helper commits. Exceptions or expiry roll back every domain change.
         """
         with self.database.transaction() as cursor:
-            self._require_live(cursor, handle)
+            self._isolation(cursor)
+            self.require_live_in_transaction(cursor, handle)
             yield cursor
-            self._require_live(cursor, handle)
+            self.require_live_in_transaction(cursor, handle)
