@@ -14,18 +14,20 @@ from app.import_models import (
     ImportTaskCreate,
 )
 from app.import_repository import ImportTaskRepository
+from app.import_uploads import (
+    STAGING_CHUNK_BYTES,
+    ImportLimitError,
+    ImportUpload,
+    PendingImport,
+    StreamSizeCounter,
+    inspect_upload,
+    validate_file_count,
+)
 from app.storage import UserStorage
 
 
 class ImportTasksActiveError(RuntimeError):
     """Raised when a destructive operation conflicts with active imports."""
-
-
-class ImportLimitError(ValueError):
-    def __init__(self, code: str, message: str, *, status_code: int) -> None:
-        super().__init__(message)
-        self.code = code
-        self.status_code = status_code
 
 
 class ImportTaskNotCancellableError(RuntimeError):
@@ -53,28 +55,13 @@ class ImportBatchCommitConfirmationError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class ImportUpload:
-    original_name: str
-    stream: BinaryIO
-
-
-@dataclass(frozen=True)
 class _PathImport:
     source: Path
     original_name: str
 
 
-@dataclass(frozen=True)
-class _PendingImport:
-    upload: ImportUpload
-    original_name: str
-    suffix: str
-    task_id: str
-    document_id: str
-
-
 logger = logging.getLogger(__name__)
-_STAGING_CHUNK_BYTES = 1024 * 1024
+_STAGING_CHUNK_BYTES = STAGING_CHUNK_BYTES
 
 
 class ImportTaskService:
@@ -293,40 +280,11 @@ class ImportTaskService:
         self.storage.validate_suffix(source.suffix)
         return _PathImport(source=source, original_name=source.name)
 
-    def _inspect_upload(self, upload: ImportUpload) -> _PendingImport:
-        if not isinstance(upload, ImportUpload):
-            raise ValueError("Uploaded document is invalid")
-        raw_name = str(upload.original_name or "").replace("\\", "/")
-        original_name = Path(raw_name).name
-        if (
-            not original_name
-            or original_name in {".", ".."}
-            or "\x00" in original_name
-            or not hasattr(upload.stream, "read")
-        ):
-            raise ValueError("Uploaded document name is invalid")
-        suffix = self.storage.validate_suffix(Path(original_name).suffix)
-        return _PendingImport(
-            upload=upload,
-            original_name=original_name,
-            suffix=suffix,
-            task_id=str(uuid.uuid4()),
-            document_id=str(uuid.uuid4()),
-        )
+    def _inspect_upload(self, upload: ImportUpload) -> PendingImport:
+        return inspect_upload(upload, self.storage.validate_suffix)
 
     def _validate_file_count(self, count: int) -> None:
-        if count == 0:
-            raise ImportLimitError(
-                "import_no_files",
-                "at least one file is required",
-                status_code=400,
-            )
-        if count > self.limits.max_files:
-            raise ImportLimitError(
-                "import_too_many_files",
-                f"batch cannot contain more than {self.limits.max_files} files",
-                status_code=413,
-            )
+        validate_file_count(count, self.limits)
 
     def _stage_stream(
         self,
@@ -336,33 +294,18 @@ class ImportTaskService:
         batch_bytes: int,
     ) -> tuple[int, int]:
         file_bytes = 0
+        counter = StreamSizeCounter(self.limits, batch_bytes)
         with partial.open("xb") as staged:
             while True:
                 chunk = stream.read(_STAGING_CHUNK_BYTES)
-                if not chunk:
+                if not chunk and isinstance(chunk, (bytes, bytearray, memoryview)):
                     break
-                if not isinstance(chunk, (bytes, bytearray, memoryview)):
-                    raise ValueError("Uploaded document stream must be binary")
-                chunk_size = len(chunk)
-                file_bytes += chunk_size
-                batch_bytes += chunk_size
-                if file_bytes > self.limits.max_file_bytes:
-                    raise ImportLimitError(
-                        "import_file_too_large",
-                        f"each file must be at most {self.limits.max_file_bytes} bytes",
-                        status_code=413,
-                    )
-                if batch_bytes > self.limits.max_batch_bytes:
-                    raise ImportLimitError(
-                        "import_batch_too_large",
-                        f"batch must be at most {self.limits.max_batch_bytes} bytes",
-                        status_code=413,
-                    )
+                file_bytes = counter.check(chunk, file_bytes)
                 staged.write(chunk)
             staged.flush()
             os.fsync(staged.fileno())
         os.replace(partial, target)
-        return file_bytes, batch_bytes
+        return file_bytes, counter.batch_bytes
 
     @staticmethod
     def _cleanup_owned_staging(paths: Iterable[Path]) -> bool:
