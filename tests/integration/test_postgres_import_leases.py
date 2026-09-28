@@ -333,57 +333,62 @@ def test_cancel_committing_race_serializes_on_user(fixture,monkeypatch,winner):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     import time
+    from app.import_persistence import ImportStore
     from app.import_repository import PostgresImportTaskRepository
     db,other,_,owner,_,_=fixture
     submit(fixture)
     repo=PostgresImportLeaseRepository(db)
-    attempt=repo.claim_next('worker')
-    # Hold the winning transaction after its task write, then observe the
-    # competing connection's actual PostgreSQL row-lock wait before release.
-    entered,allow=Event(),Event()
-    original_touch=repo._touch
-    def pause_touch(cursor,row):
-        original_touch(cursor,row)
-        entered.set()
-        assert allow.wait(5)
-    if winner=='committing': monkeypatch.setattr(repo,'_touch',pause_touch)
-    def winning_cancel():
-        with db.transaction() as cursor:
-            cursor.execute('select id from users where id=%s for update',(owner,))
-            cursor.execute("update import_tasks set cancel_requested_at=clock_timestamp()::text where id=%s",(attempt.task.task_id,))
-            entered.set()
-            assert allow.wait(5)
     control=PostgresImportTaskRepository(other)
+    attempt=repo.claim_next('worker')
+    entered,allow=Event(),Event()
+    backend=[]
+    if winner=='committing':
+        original_touch=repo._touch
+        def pause_touch(cursor,row):
+            original_touch(cursor,row)
+            entered.set()
+            assert allow.wait(10)
+        monkeypatch.setattr(repo,'_touch',pause_touch)
+        original_lock=control._imports.lock_user
+        def observe_control_lock(cursor,user_id):
+            backend.append(cursor.connection.info.backend_pid)
+            return original_lock(cursor,user_id)
+        monkeypatch.setattr(control._imports,'lock_user',observe_control_lock)
+    else:
+        original_touch=ImportStore.touch_batch
+        def pause_control_touch(store,*args):
+            original_touch(store,*args)
+            entered.set()
+            assert allow.wait(10)
+        monkeypatch.setattr(ImportStore,'touch_batch',pause_control_touch)
+        original_live=repo.coordinator.require_live_in_transaction
+        def observe_attempt_lock(cursor,handle):
+            backend.append(cursor.connection.info.backend_pid)
+            return original_live(cursor,handle)
+        monkeypatch.setattr(repo.coordinator,'require_live_in_transaction',observe_attempt_lock)
+    actions={
+        'committing':lambda:repo.try_begin_committing(attempt),
+        'cancel':lambda:control.request_cancel(owner,attempt.task.batch_id,attempt.task.task_id).outcome,
+    }
     with ThreadPoolExecutor(2) as pool:
-        leading=pool.submit(repo.try_begin_committing,attempt) if winner=='committing' else pool.submit(winning_cancel)
-        assert entered.wait(3)
-        backend=[]
-        def trailing():
-            with other.connection() as conn:
-                backend.append(conn.info.backend_pid)
-                # Reserve this connection for a deterministic observed PID.
-                if winner=='committing':
-                    with conn.cursor() as cursor:
-                        cursor.execute('select id from users where id=%s for update',(owner,))
-                else:
-                    with conn.cursor() as cursor:
-                        cursor.execute('begin')
-                        return PostgresImportLeaseRepository(other)._live(cursor,attempt)['cancel_requested_at'] is None
-            return control.request_cancel(owner,attempt.task.batch_id,attempt.task.task_id).outcome
-        following=pool.submit(trailing)
-        deadline=time.monotonic()+3
-        while True:
-            if backend:
-                with db.transaction() as observer:
-                    waiting=observer.execute('select wait_event_type from pg_stat_activity where pid=%s',(backend[0],)).fetchone()
-                if waiting['wait_event_type']=='Lock': break
-            assert time.monotonic()<deadline
-            time.sleep(.01)
-        allow.set()
-        leading.result(timeout=3)
-        result=following.result(timeout=3)
-    assert result==('not_cancellable' if winner=='committing' else False)
-    if winner=='cancel': assert not PostgresImportLeaseRepository(other).try_begin_committing(attempt)
+        leading=pool.submit(actions[winner])
+        try:
+            assert entered.wait(5)
+            following=pool.submit(actions['cancel' if winner=='committing' else 'committing'])
+            deadline=time.monotonic()+5
+            while True:
+                if backend:
+                    with db.transaction() as observer:
+                        waiting=observer.execute('select wait_event_type from pg_stat_activity where pid=%s',(backend[0],)).fetchone()
+                    if waiting['wait_event_type']=='Lock': break
+                assert time.monotonic()<deadline
+                time.sleep(.01)
+        finally:
+            allow.set()
+        leading_result=leading.result(timeout=5)
+        trailing_result=following.result(timeout=5)
+    assert leading_result==(True if winner=='committing' else 'cancel_requested')
+    assert trailing_result==('not_cancellable' if winner=='committing' else False)
 
 
 @pytest.mark.parametrize('shared_database',['20260928_08'],indirect=True)
@@ -445,3 +450,43 @@ def test_joint_clock_validation_after_user_check(fixture,monkeypatch):
     with db.transaction() as cursor:
         assert cursor.execute('select stage from import_tasks').fetchone()['stage']=='queued'
         assert cursor.execute('select lease_expires_at from user_mutation_leases').fetchone()['lease_expires_at']==attempt.user_lease.expires_at
+
+
+@pytest.mark.parametrize('mode',['autocommit','repeatable_read','serializable'])
+@pytest.mark.parametrize('bad_transaction',[1,2],ids=['scan','candidate'])
+def test_recovery_rejects_unsupported_transactions_without_writes(fixture,monkeypatch,mode,bad_transaction):
+    from contextlib import contextmanager
+    from psycopg import IsolationLevel
+    from app.postgres import PostgresDatabase
+    db,_,_,_,_,_=fixture
+    submit(fixture)
+    repo=PostgresImportLeaseRepository(db)
+    repo.claim_next('worker')
+    expire(db)
+    tables=('import_tasks','import_task_attempts','user_mutation_leases','import_batches','import_user_schedule')
+    def snapshot():
+        with db.transaction() as cursor:
+            return [cursor.execute(f'select * from {table}').fetchall() for table in tables]
+    before=snapshot()
+    isolated=PostgresDatabase(db._pool.conninfo,min_size=1,max_size=1)
+    isolated.open()
+    original_transaction=isolated.transaction
+    calls=0
+    @contextmanager
+    def selected_mode():
+        nonlocal calls
+        calls+=1
+        if calls==bad_transaction:
+            with isolated.connection() as connection:
+                if mode=='autocommit': connection.autocommit=True
+                else: connection.isolation_level=getattr(IsolationLevel,mode.upper())
+        with original_transaction() as cursor:
+            yield cursor
+    monkeypatch.setattr(isolated,'transaction',selected_mode)
+    try:
+        with pytest.raises(ValueError,match='transaction|READ COMMITTED'):
+            PostgresImportLeaseRepository(isolated).recover_expired()
+        assert calls==bad_transaction
+        assert snapshot()==before
+    finally:
+        isolated.close()

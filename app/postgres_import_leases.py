@@ -288,12 +288,16 @@ class PostgresImportLeaseRepository:
         if type(limit) is not int or not 1 <= limit <= 10000:
             raise ValueError('limit must be an integer between 1 and 10000')
         with self.database.transaction() as cursor:
+            self.coordinator._isolation(cursor)
             candidates = cursor.execute("select id,user_id from import_tasks where status='running' and lease_version>0 order by user_id,id").fetchall()
         recovered = 0
         for candidate in candidates:
             if recovered>=limit:
                 break
             with self.database.transaction() as cursor:
+                # A pool may return a different connection than the scan used.
+                # Reject autocommit/isolation drift before taking any locks.
+                self.coordinator._isolation(cursor)
                 if cursor.execute('select id from users where id=%s for update skip locked',(candidate['user_id'],)).fetchone() is None:
                     continue
                 if cursor.execute('select status from users where id=%s',(candidate['user_id'],)).fetchone()['status']!='active':
