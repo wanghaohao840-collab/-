@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
+from app.qa_persistence import (
+    QaStore, SQLiteQaPersistence, PostgresQaPersistence, _not_fenced_clause,
+)
 from app.database import connect
 from app.qa_models import (
     PendingTurn,
@@ -37,6 +40,7 @@ def _utc_now() -> str:
 class QaRepository:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
+        self._persistence = SQLiteQaPersistence(self.db_path)
 
     def create_conversation(
         self,
@@ -51,33 +55,15 @@ class QaRepository:
         scope = validate_document_candidates(user_id, documents)
         timestamp = now or _utc_now()
         conversation_id = str(uuid4())
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            fenced_document = conn.execute(
-                f"""
-                select 1 from qa_deletion_fences
-                where user_id = ? and target_type = 'document'
-                  and (
-                      status in ('queued', 'running')
-                      or (status = 'failed' and attempt_count < 3)
-                  )
-                  and target_id in ({','.join('?' for _ in scope)})
-                limit 1
-                """,
-                (user_id, *(item.document_id for item in scope)),
+        with self._persistence.write(user_id) as conn:
+            fenced_document = conn.selected_documents_fenced(
+                (user_id, *(item.document_id for item in scope)), len(scope)
             ).fetchone()
             if fenced_document is not None:
                 raise QaValidationError(
                     "QA_DOCUMENT_DELETING", "a selected document is being deleted"
                 )
-            conn.execute(
-                """
-                insert into qa_conversations (
-                    id, user_id, title, origin, created_at, updated_at,
-                    last_message_at
-                ) values (?, ?, '新对话', ?, ?, ?, ?)
-                """,
+            conn.insert_conversation(
                 (
                     conversation_id,
                     user_id,
@@ -85,14 +71,9 @@ class QaRepository:
                     timestamp,
                     timestamp,
                     timestamp,
-                ),
+                )
             )
-            conn.executemany(
-                """
-                insert into qa_conversation_documents (
-                    conversation_id, user_id, document_id, document_name, position
-                ) values (?, ?, ?, ?, ?)
-                """,
+            conn.insert_documents(
                 [
                     (
                         conversation_id,
@@ -102,16 +83,10 @@ class QaRepository:
                         item.position,
                     )
                     for item in scope
-                ],
+                ]
             )
             created = self._get_conversation(conn, user_id, conversation_id)
-            conn.commit()
             return created
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def list_conversations(
         self,
@@ -122,27 +97,12 @@ class QaRepository:
     ) -> QaConversationPage:
         page_size = _validated_limit(limit, maximum=100)
         params: list[object] = [user_id]
-        cursor_clause = ""
         if cursor:
             timestamp, conversation_id = decode_cursor(cursor)
-            cursor_clause = (
-                "and (last_message_at < ? or "
-                "(last_message_at = ? and id < ?))"
-            )
             params.extend((timestamp, timestamp, conversation_id))
         params.append(page_size + 1)
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select * from qa_conversations
-                where user_id = ?
-                  and {_not_fenced_clause('qa_conversations')}
-                  {cursor_clause}
-                order by last_message_at desc, id desc
-                limit ?
-                """,
-                params,
-            ).fetchall()
+        with self._persistence.read() as conn:
+            rows = conn.conversation_page(params, bool(cursor)).fetchall()
             has_more = len(rows) > page_size
             rows = rows[:page_size]
             items = tuple(
@@ -158,7 +118,7 @@ class QaRepository:
     def get_conversation(
         self, user_id: str, conversation_id: str
     ) -> QaConversationAggregate | None:
-        with connect(self.db_path) as conn:
+        with self._persistence.read() as conn:
             return self._get_conversation(conn, user_id, conversation_id)
 
     def list_messages(
@@ -171,31 +131,12 @@ class QaRepository:
     ) -> QaMessagePage:
         page_size = _validated_limit(limit, maximum=200)
         params: list[object] = [user_id, conversation_id]
-        cursor_clause = ""
         if cursor:
             timestamp, message_id = decode_cursor(cursor)
-            cursor_clause = (
-                "and (created_at > ? or (created_at = ? and id > ?))"
-            )
             params.extend((timestamp, timestamp, message_id))
         params.append(page_size + 1)
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select * from qa_messages
-                where user_id = ? and conversation_id = ?
-                  and exists (
-                      select 1 from qa_conversations
-                      where qa_conversations.id = qa_messages.conversation_id
-                        and qa_conversations.user_id = qa_messages.user_id
-                        and {_not_fenced_clause('qa_conversations')}
-                  )
-                  {cursor_clause}
-                order by created_at, id
-                limit ?
-                """,
-                params,
-            ).fetchall()
+        with self._persistence.read() as conn:
+            rows = conn.message_page(params, bool(cursor)).fetchall()
             has_more = len(rows) > page_size
             rows = rows[:page_size]
             items = tuple(self._message_from_row(conn, row) for row in rows)
@@ -215,31 +156,12 @@ class QaRepository:
     ) -> QaMessagePage:
         page_size = _validated_limit(limit, maximum=200)
         params: list[object] = [user_id, conversation_id]
-        cursor_clause = ""
         if cursor:
             timestamp, message_id = decode_cursor(cursor)
-            cursor_clause = (
-                "and (created_at < ? or (created_at = ? and id < ?))"
-            )
             params.extend((timestamp, timestamp, message_id))
         params.append(page_size + 1)
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select * from qa_messages
-                where user_id = ? and conversation_id = ?
-                  and exists (
-                      select 1 from qa_conversations
-                      where qa_conversations.id = qa_messages.conversation_id
-                        and qa_conversations.user_id = qa_messages.user_id
-                        and {_not_fenced_clause('qa_conversations')}
-                  )
-                  {cursor_clause}
-                order by created_at desc, id desc
-                limit ?
-                """,
-                params,
-            ).fetchall()
+        with self._persistence.read() as conn:
+            rows = conn.recent_message_page(params, bool(cursor)).fetchall()
             has_more = len(rows) > page_size
             page_rows = rows[:page_size]
             items = tuple(
@@ -253,19 +175,8 @@ class QaRepository:
         return QaMessagePage(items, next_cursor)
 
     def get_message(self, user_id: str, message_id: str) -> QaMessage | None:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                f"""
-                select * from qa_messages where id = ? and user_id = ?
-                  and exists (
-                      select 1 from qa_conversations
-                      where qa_conversations.id = qa_messages.conversation_id
-                        and qa_conversations.user_id = qa_messages.user_id
-                        and {_not_fenced_clause('qa_conversations')}
-                  )
-                """,
-                (message_id, user_id),
-            ).fetchone()
+        with self._persistence.read() as conn:
+            row = conn.visible_message((message_id, user_id)).fetchone()
             return self._message_from_row(conn, row) if row is not None else None
 
     def create_pending_turn(
@@ -279,9 +190,7 @@ class QaRepository:
         now: str | None = None,
     ) -> PendingTurn:
         timestamp = now or _utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
+        with self._persistence.write(user_id) as conn:
             result = self._create_pending_turn_in_connection(
                 conn,
                 user_id,
@@ -292,13 +201,7 @@ class QaRepository:
                 retry_of_message_id=None,
                 timestamp=timestamp,
             )
-            conn.commit()
             return result
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def create_pending_retry(
         self,
@@ -315,9 +218,7 @@ class QaRepository:
                 "QA_CLIENT_REQUEST_REQUIRED", "client request id is required"
             )
         timestamp = now or _utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
+        with self._persistence.write(user_id) as conn:
             result = self._create_pending_retry_in_connection(
                 conn,
                 user_id,
@@ -326,13 +227,7 @@ class QaRepository:
                 request_id,
                 timestamp,
             )
-            conn.commit()
             return result
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def complete_turn(
         self,
@@ -350,41 +245,16 @@ class QaRepository:
             raise QaValidationError("QA_SOURCE_STATE_INVALID", "invalid source state")
         source_list = tuple(sources)
         timestamp = now or _utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            row = conn.execute(
-                f"""
-                select conversation_id from qa_messages
-                where id = ? and user_id = ? and role = 'assistant'
-                  and status = 'pending' and version = ?
-                  and exists (
-                      select 1 from qa_conversations
-                      where qa_conversations.id = qa_messages.conversation_id
-                        and qa_conversations.user_id = qa_messages.user_id
-                        and {_not_fenced_clause('qa_conversations')}
-                  )
-                """,
-                (assistant_message_id, user_id, expected_version),
-            ).fetchone()
+        with self._persistence.write(user_id) as conn:
+            row = conn.pending_for_completion((assistant_message_id, user_id, expected_version)).fetchone()
             if row is None:
-                conn.commit()
                 return False
             conversation_id = row["conversation_id"]
             self._validate_source_scope(
                 conn, user_id, conversation_id, source_list
             )
             memory_status = "completed" if memory_id else "pending"
-            updated = conn.execute(
-                """
-                update qa_messages
-                set status = 'completed', content = ?, source_state = ?,
-                    memory_id = ?, memory_sync_status = ?, safe_error_code = null,
-                    trace_id = null, version = version + 1, updated_at = ?,
-                    completed_at = ?
-                where id = ? and user_id = ? and role = 'assistant'
-                  and status = 'pending' and version = ?
-                """,
+            updated = conn.complete_message(
                 (
                     str(answer),
                     source_state,
@@ -395,20 +265,11 @@ class QaRepository:
                     assistant_message_id,
                     user_id,
                     expected_version,
-                ),
+                )
             )
             if not updated.rowcount:
-                conn.commit()
                 return False
-            conn.executemany(
-                """
-                insert into qa_message_sources (
-                    id, assistant_message_id, conversation_id, user_id,
-                    position, citation_id, document_id, document_name,
-                    page_number, section, excerpt, reference, truncated,
-                    source_type
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+            conn.insert_sources(
                 [
                     (
                         str(uuid4()),
@@ -427,16 +288,10 @@ class QaRepository:
                         source.source_type,
                     )
                     for position, source in enumerate(source_list)
-                ],
+                ]
             )
             self._touch_conversation(conn, user_id, conversation_id, timestamp)
-            conn.commit()
             return True
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def fail_turn(
         self,
@@ -505,61 +360,19 @@ class QaRepository:
     def hard_delete_conversation(
         self, user_id: str, conversation_id: str
     ) -> bool:
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            deleted = conn.execute(
-                "delete from qa_conversations where id = ? and user_id = ?",
-                (conversation_id, user_id),
-            )
-            conn.commit()
+        """Physical deletion seam; the deletion workflow owns authorization and fences."""
+        with self._persistence.write(user_id) as conn:
+            deleted = conn.delete_conversation((conversation_id, user_id))
             return bool(deleted.rowcount)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def list_completed_turns_for_report(
         self, user_id: str
     ) -> tuple[QaReportTurn, ...]:
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select user_message.content as question,
-                       assistant_message.content as answer,
-                       user_message.mode as mode,
-                       user_message.created_at as asked_at,
-                       user_message.conversation_id as conversation_id
-                from qa_messages user_message
-                join qa_messages assistant_message
-                  on assistant_message.user_id = user_message.user_id
-                 and assistant_message.conversation_id = user_message.conversation_id
-                 and assistant_message.turn_id = user_message.turn_id
-                 and assistant_message.role = 'assistant'
-                 and assistant_message.status = 'completed'
-                join qa_conversations
-                  on qa_conversations.id = user_message.conversation_id
-                 and qa_conversations.user_id = user_message.user_id
-                where user_message.user_id = ?
-                  and user_message.role = 'user'
-                  and user_message.status = 'completed'
-                  and {_not_fenced_clause('qa_conversations')}
-                order by user_message.created_at, user_message.id
-                """,
-                (user_id,),
-            ).fetchall()
+        with self._persistence.read() as conn:
+            rows = conn.report_turns((user_id,)).fetchall()
             turns: list[QaReportTurn] = []
             for row in rows:
-                documents = conn.execute(
-                    """
-                    select document_id, document_name
-                    from qa_conversation_documents
-                    where user_id = ? and conversation_id = ?
-                    order by position
-                    """,
-                    (user_id, row["conversation_id"]),
-                ).fetchall()
+                documents = conn.report_documents((user_id, row["conversation_id"])).fetchall()
                 turns.append(
                     QaReportTurn(
                         question=row["question"],
@@ -577,39 +390,11 @@ class QaRepository:
     ) -> tuple[QaReportTurn, ...]:
         if not 1 <= limit <= 20:
             raise ValueError("limit must be between 1 and 20")
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select user_message.content as question,
-                       assistant_message.content as answer,
-                       user_message.mode as mode,
-                       user_message.created_at as asked_at,
-                       user_message.conversation_id as conversation_id
-                from qa_messages user_message
-                join qa_messages assistant_message
-                  on assistant_message.user_id = user_message.user_id
-                 and assistant_message.conversation_id = user_message.conversation_id
-                 and assistant_message.turn_id = user_message.turn_id
-                 and assistant_message.role = 'assistant'
-                 and assistant_message.status = 'completed'
-                join qa_conversations
-                  on qa_conversations.id = user_message.conversation_id
-                 and qa_conversations.user_id = user_message.user_id
-                where user_message.user_id = ? and user_message.role = 'user'
-                  and user_message.status = 'completed'
-                  and {_not_fenced_clause('qa_conversations')}
-                order by user_message.created_at desc, user_message.id desc
-                limit ?
-                """,
-                (user_id, limit),
-            ).fetchall()
+        with self._persistence.read() as conn:
+            rows = conn.recent_report_turns((user_id, limit)).fetchall()
             turns = []
             for row in rows:
-                documents = conn.execute(
-                    """select document_id, document_name from qa_conversation_documents
-                       where user_id = ? and conversation_id = ? order by position""",
-                    (user_id, row["conversation_id"]),
-                ).fetchall()
+                documents = conn.report_documents((user_id, row["conversation_id"])).fetchall()
                 turns.append(QaReportTurn(
                     question=row["question"], answer=row["answer"],
                     document_ids=tuple(item["document_id"] for item in documents),
@@ -619,41 +404,15 @@ class QaRepository:
         return tuple(turns)
 
     def count_completed_turns(self, user_id: str) -> int:
-        with connect(self.db_path) as conn:
-            row = conn.execute(
-                f"""
-                select count(*) as count from qa_messages assistant_message
-                join qa_conversations
-                  on qa_conversations.id = assistant_message.conversation_id
-                 and qa_conversations.user_id = assistant_message.user_id
-                where assistant_message.user_id = ?
-                  and assistant_message.role = 'assistant'
-                  and assistant_message.status = 'completed'
-                  and {_not_fenced_clause('qa_conversations')}
-                """, (user_id,),
-            ).fetchone()
+        with self._persistence.read() as conn:
+            row = conn.completed_count((user_id,)).fetchone()
         return int(row["count"])
 
     def list_completed_activity_dates(
         self, user_id: str, *, since: str
     ) -> tuple[str, ...]:
-        with connect(self.db_path) as conn:
-            rows = conn.execute(
-                f"""
-                select assistant_message.completed_at as occurred_at
-                from qa_messages assistant_message
-                join qa_conversations
-                  on qa_conversations.id = assistant_message.conversation_id
-                 and qa_conversations.user_id = assistant_message.user_id
-                where assistant_message.user_id = ?
-                  and assistant_message.role = 'assistant'
-                  and assistant_message.status = 'completed'
-                  and assistant_message.completed_at >= ?
-                  and {_not_fenced_clause('qa_conversations')}
-                order by assistant_message.completed_at
-                """,
-                (user_id, since),
-            ).fetchall()
+        with self._persistence.read() as conn:
+            rows = conn.activity_dates((user_id, since)).fetchall()
         return tuple(row["occurred_at"] for row in rows if row["occurred_at"])
 
     def update_rolling_summary(
@@ -668,23 +427,8 @@ class QaRepository:
         now: str | None = None,
     ) -> bool:
         timestamp = now or _utc_now()
-        with connect(self.db_path) as conn:
-            updated = conn.execute(
-                f"""
-                update qa_conversations
-                set rolling_summary = ?, summary_through_message_id = ?,
-                    summary_version = summary_version + 1,
-                    version = version + 1, updated_at = ?
-                where id = ? and user_id = ? and version = ?
-                  and summary_version = ?
-                  and {_not_fenced_clause('qa_conversations')}
-                  and exists (
-                      select 1 from qa_messages
-                      where id = ? and conversation_id = qa_conversations.id
-                        and user_id = qa_conversations.user_id
-                        and status = 'completed'
-                  )
-                """,
+        with self._persistence.write(user_id) as conn:
+            updated = conn.update_summary(
                 (
                     summary,
                     through_message_id,
@@ -694,7 +438,7 @@ class QaRepository:
                     expected_version,
                     expected_summary_version,
                     through_message_id,
-                ),
+                )
             )
             return bool(updated.rowcount)
 
@@ -913,47 +657,22 @@ class QaRepository:
         retry_of_message_id: str | None,
         timestamp: str,
     ) -> PendingTurn:
+        conn = self._persistence.caller_owned(conn, user_id)
         normalized_question = normalize_question(question)
         request_id = str(client_request_id or "").strip()
         if not request_id:
             raise QaValidationError(
                 "QA_CLIENT_REQUEST_REQUIRED", "client request id is required"
             )
-        conversation = conn.execute(
-            f"""
-            select * from qa_conversations where id = ? and user_id = ?
-              and {_not_fenced_clause('qa_conversations')}
-            """,
-            (conversation_id, user_id),
-        ).fetchone()
+        conversation = conn.visible_conversation((conversation_id, user_id)).fetchone()
         if conversation is None:
             raise QaValidationError("QA_CONVERSATION_NOT_FOUND", "conversation not found")
-        document_rows = conn.execute(
-            """
-            select document_id from qa_conversation_documents
-            where conversation_id = ? and user_id = ? order by position
-            """,
-            (conversation_id, user_id),
-        ).fetchall()
+        document_rows = conn.ordered_document_ids((conversation_id, user_id)).fetchall()
         normalized_mode = validate_mode(mode, document_rows)
 
-        existing_user = conn.execute(
-            """
-            select * from qa_messages
-            where user_id = ? and conversation_id = ? and role = 'user'
-              and client_request_id = ?
-            """,
-            (user_id, conversation_id, request_id),
-        ).fetchone()
+        existing_user = conn.request_message((user_id, conversation_id, request_id)).fetchone()
         if existing_user is not None:
-            assistant = conn.execute(
-                """
-                select * from qa_messages
-                where user_id = ? and conversation_id = ?
-                  and turn_id = ? and role = 'assistant'
-                """,
-                (user_id, conversation_id, existing_user["turn_id"]),
-            ).fetchone()
+            assistant = conn.turn_assistant((user_id, conversation_id, existing_user["turn_id"])).fetchone()
             if assistant is None:
                 raise QaConflictError("QA_TURN_INCOMPLETE")
             return PendingTurn(
@@ -963,27 +682,13 @@ class QaRepository:
             )
 
         if retry_of_message_id is not None:
-            retried = conn.execute(
-                """
-                select 1 from qa_messages
-                where id = ? and user_id = ? and conversation_id = ?
-                  and role = 'assistant' and status = 'failed'
-                """,
-                (retry_of_message_id, user_id, conversation_id),
-            ).fetchone()
+            retried = conn.failed_assistant_exists((retry_of_message_id, user_id, conversation_id)).fetchone()
             if retried is None:
                 raise QaValidationError(
                     "QA_RETRY_NOT_ALLOWED", "retry target is not a failed answer"
                 )
 
-        busy = conn.execute(
-            """
-            select 1 from qa_messages
-            where user_id = ? and conversation_id = ?
-              and role = 'assistant' and status = 'pending'
-            """,
-            (user_id, conversation_id),
-        ).fetchone()
+        busy = conn.pending_exists((user_id, conversation_id)).fetchone()
         if busy is not None:
             raise QaConflictError("QA_CONVERSATION_BUSY")
 
@@ -994,17 +699,7 @@ class QaRepository:
         user_message_id, assistant_message_id = sorted(
             (str(uuid4()), str(uuid4()))
         )
-        conn.execute(
-            """
-            insert into qa_messages (
-                id, conversation_id, user_id, turn_id, role, status, mode,
-                content, source_state, client_request_id, memory_sync_status,
-                created_at, updated_at, completed_at
-            ) values (
-                ?, ?, ?, ?, 'user', 'completed', ?, ?, 'none', ?,
-                'not_required', ?, ?, ?
-            )
-            """,
+        conn.insert_user_message(
             (
                 user_message_id,
                 conversation_id,
@@ -1016,19 +711,9 @@ class QaRepository:
                 timestamp,
                 timestamp,
                 timestamp,
-            ),
-        )
-        conn.execute(
-            """
-            insert into qa_messages (
-                id, conversation_id, user_id, turn_id, role, status, mode,
-                content, source_state, retry_of_message_id,
-                memory_sync_status, created_at, updated_at
-            ) values (
-                ?, ?, ?, ?, 'assistant', 'pending', ?, '', 'none', ?,
-                'not_required', ?, ?
             )
-            """,
+        )
+        conn.insert_assistant_message(
             (
                 assistant_message_id,
                 conversation_id,
@@ -1038,33 +723,13 @@ class QaRepository:
                 retry_of_message_id,
                 timestamp,
                 timestamp,
-            ),
+            )
         )
-        prior_count = conn.execute(
-            """
-            select count(*) as count from qa_messages
-            where conversation_id = ? and user_id = ? and id != ? and id != ?
-            """,
-            (conversation_id, user_id, user_message_id, assistant_message_id),
-        ).fetchone()["count"]
+        prior_count = conn.prior_message_count((conversation_id, user_id, user_message_id, assistant_message_id)).fetchone()["count"]
         title = conversation_title(normalized_question) if prior_count == 0 else None
-        conn.execute(
-            """
-            update qa_conversations
-            set title = coalesce(?, title), last_message_at = ?, updated_at = ?,
-                version = version + 1
-            where id = ? and user_id = ?
-            """,
-            (title, timestamp, timestamp, conversation_id, user_id),
-        )
-        user_row = conn.execute(
-            "select * from qa_messages where id = ? and user_id = ?",
-            (user_message_id, user_id),
-        ).fetchone()
-        assistant_row = conn.execute(
-            "select * from qa_messages where id = ? and user_id = ?",
-            (assistant_message_id, user_id),
-        ).fetchone()
+        conn.update_conversation_title((title, timestamp, timestamp, conversation_id, user_id))
+        user_row = conn.message((user_message_id, user_id)).fetchone()
+        assistant_row = conn.message((assistant_message_id, user_id)).fetchone()
         return PendingTurn(
             self._message_from_row(conn, user_row),
             self._message_from_row(conn, assistant_row),
@@ -1080,23 +745,12 @@ class QaRepository:
         client_request_id: str,
         timestamp: str,
     ) -> PendingTurn:
-        conversation = conn.execute(
-            f"""
-            select * from qa_conversations where id = ? and user_id = ?
-              and {_not_fenced_clause('qa_conversations')}
-            """,
-            (conversation_id, user_id),
-        ).fetchone()
+        conn = self._persistence.caller_owned(conn, user_id)
+        conversation = conn.visible_conversation((conversation_id, user_id)).fetchone()
         if conversation is None:
             raise QaValidationError("QA_CONVERSATION_NOT_FOUND", "conversation not found")
 
-        request = conn.execute(
-            """
-            select * from qa_retry_requests
-            where user_id = ? and conversation_id = ? and client_request_id = ?
-            """,
-            (user_id, conversation_id, client_request_id),
-        ).fetchone()
+        request = conn.retry_request((user_id, conversation_id, client_request_id)).fetchone()
         if request is not None:
             if request["failed_assistant_message_id"] != failed_assistant_message_id:
                 raise QaValidationError(
@@ -1110,14 +764,7 @@ class QaRepository:
                 request["assistant_message_id"],
             )
 
-        request = conn.execute(
-            """
-            select * from qa_retry_requests
-            where user_id = ? and conversation_id = ?
-              and failed_assistant_message_id = ?
-            """,
-            (user_id, conversation_id, failed_assistant_message_id),
-        ).fetchone()
+        request = conn.retry_for_target((user_id, conversation_id, failed_assistant_message_id)).fetchone()
         if request is not None:
             return self._pending_retry_from_ids(
                 conn,
@@ -1127,27 +774,12 @@ class QaRepository:
                 request["assistant_message_id"],
             )
 
-        failed = conn.execute(
-            """
-            select * from qa_messages
-            where id = ? and user_id = ? and conversation_id = ?
-              and role = 'assistant' and status = 'failed'
-            """,
-            (failed_assistant_message_id, user_id, conversation_id),
-        ).fetchone()
+        failed = conn.failed_assistant((failed_assistant_message_id, user_id, conversation_id)).fetchone()
         if failed is None:
             raise QaValidationError(
                 "QA_RETRY_NOT_ALLOWED", "retry target is not a failed answer"
             )
-        paired_user = conn.execute(
-            """
-            select * from qa_messages
-            where user_id = ? and conversation_id = ? and turn_id = ?
-              and role = 'user' and status = 'completed'
-            order by created_at, id limit 1
-            """,
-            (user_id, conversation_id, failed["turn_id"]),
-        ).fetchone()
+        paired_user = conn.paired_user((user_id, conversation_id, failed["turn_id"])).fetchone()
         if paired_user is None:
             raise QaValidationError(
                 "QA_RETRY_NOT_ALLOWED", "retry target has no user message"
@@ -1155,23 +787,9 @@ class QaRepository:
 
         # Databases created before the retry ledger may already contain a
         # linked assistant. Adopt one canonical child without rewriting history.
-        legacy_retry = conn.execute(
-            """
-            select * from qa_messages
-            where user_id = ? and conversation_id = ?
-              and retry_of_message_id = ? and role = 'assistant'
-            order by created_at, id limit 1
-            """,
-            (user_id, conversation_id, failed_assistant_message_id),
-        ).fetchone()
+        legacy_retry = conn.legacy_retry((user_id, conversation_id, failed_assistant_message_id)).fetchone()
         if legacy_retry is not None:
-            conn.execute(
-                """
-                insert into qa_retry_requests (
-                    user_id, conversation_id, failed_assistant_message_id,
-                    assistant_message_id, client_request_id, created_at
-                ) values (?, ?, ?, ?, ?, ?)
-                """,
+            conn.insert_retry_request(
                 (
                     user_id,
                     conversation_id,
@@ -1179,7 +797,7 @@ class QaRepository:
                     legacy_retry["id"],
                     client_request_id,
                     timestamp,
-                ),
+                )
             )
             return PendingTurn(
                 self._message_from_row(conn, paired_user),
@@ -1187,29 +805,12 @@ class QaRepository:
                 True,
             )
 
-        busy = conn.execute(
-            """
-            select 1 from qa_messages
-            where user_id = ? and conversation_id = ?
-              and role = 'assistant' and status = 'pending'
-            """,
-            (user_id, conversation_id),
-        ).fetchone()
+        busy = conn.pending_exists((user_id, conversation_id)).fetchone()
         if busy is not None:
             raise QaConflictError("QA_CONVERSATION_BUSY")
 
         assistant_message_id = str(uuid4())
-        conn.execute(
-            """
-            insert into qa_messages (
-                id, conversation_id, user_id, turn_id, role, status, mode,
-                content, source_state, retry_of_message_id,
-                memory_sync_status, created_at, updated_at
-            ) values (
-                ?, ?, ?, ?, 'assistant', 'pending', ?, '', 'none', ?,
-                'not_required', ?, ?
-            )
-            """,
+        conn.insert_assistant_message(
             (
                 assistant_message_id,
                 conversation_id,
@@ -1219,15 +820,9 @@ class QaRepository:
                 failed_assistant_message_id,
                 timestamp,
                 timestamp,
-            ),
+            )
         )
-        conn.execute(
-            """
-            insert into qa_retry_requests (
-                user_id, conversation_id, failed_assistant_message_id,
-                assistant_message_id, client_request_id, created_at
-            ) values (?, ?, ?, ?, ?, ?)
-            """,
+        conn.insert_retry_request(
             (
                 user_id,
                 conversation_id,
@@ -1235,20 +830,10 @@ class QaRepository:
                 assistant_message_id,
                 client_request_id,
                 timestamp,
-            ),
+            )
         )
-        conn.execute(
-            """
-            update qa_conversations
-            set last_message_at = ?, updated_at = ?, version = version + 1
-            where id = ? and user_id = ?
-            """,
-            (timestamp, timestamp, conversation_id, user_id),
-        )
-        assistant = conn.execute(
-            "select * from qa_messages where id = ? and user_id = ?",
-            (assistant_message_id, user_id),
-        ).fetchone()
+        conn.touch_conversation((timestamp, timestamp, conversation_id, user_id))
+        assistant = conn.message((assistant_message_id, user_id)).fetchone()
         return PendingTurn(
             self._message_from_row(conn, paired_user),
             self._message_from_row(conn, assistant),
@@ -1263,31 +848,12 @@ class QaRepository:
         failed_assistant_message_id: str,
         assistant_message_id: str,
     ) -> PendingTurn:
-        failed = conn.execute(
-            """
-            select turn_id from qa_messages
-            where id = ? and user_id = ? and conversation_id = ?
-            """,
-            (failed_assistant_message_id, user_id, conversation_id),
-        ).fetchone()
-        assistant = conn.execute(
-            """
-            select * from qa_messages
-            where id = ? and user_id = ? and conversation_id = ?
-            """,
-            (assistant_message_id, user_id, conversation_id),
-        ).fetchone()
+        conn = _domain_store(conn)
+        failed = conn.retry_target_turn((failed_assistant_message_id, user_id, conversation_id)).fetchone()
+        assistant = conn.conversation_message((assistant_message_id, user_id, conversation_id)).fetchone()
         if failed is None or assistant is None:
             raise QaConflictError("QA_RETRY_INCOMPLETE")
-        paired_user = conn.execute(
-            """
-            select * from qa_messages
-            where user_id = ? and conversation_id = ? and turn_id = ?
-              and role = 'user' and status = 'completed'
-            order by created_at, id limit 1
-            """,
-            (user_id, conversation_id, failed["turn_id"]),
-        ).fetchone()
+        paired_user = conn.paired_user((user_id, conversation_id, failed["turn_id"])).fetchone()
         if paired_user is None:
             raise QaConflictError("QA_RETRY_INCOMPLETE")
         return PendingTurn(
@@ -1308,35 +874,11 @@ class QaRepository:
         now: str | None,
     ) -> bool:
         timestamp = now or _utc_now()
-        conn = connect(self.db_path)
-        try:
-            conn.execute("begin immediate")
-            row = conn.execute(
-                f"""
-                select conversation_id from qa_messages
-                where id = ? and user_id = ? and role = 'assistant'
-                  and status = 'pending' and version = ?
-                  and exists (
-                      select 1 from qa_conversations
-                      where qa_conversations.id = qa_messages.conversation_id
-                        and qa_conversations.user_id = qa_messages.user_id
-                        and {_not_fenced_clause('qa_conversations')}
-                  )
-                """,
-                (assistant_message_id, user_id, expected_version),
-            ).fetchone()
+        with self._persistence.write(user_id) as conn:
+            row = conn.pending_for_completion((assistant_message_id, user_id, expected_version)).fetchone()
             if row is None:
-                conn.commit()
                 return False
-            updated = conn.execute(
-                """
-                update qa_messages
-                set status = ?, safe_error_code = ?, trace_id = ?,
-                    memory_sync_status = 'not_required', version = version + 1,
-                    updated_at = ?, completed_at = ?
-                where id = ? and user_id = ? and role = 'assistant'
-                  and status = 'pending' and version = ?
-                """,
+            updated = conn.finish_message(
                 (
                     status,
                     error_code,
@@ -1346,19 +888,14 @@ class QaRepository:
                     assistant_message_id,
                     user_id,
                     expected_version,
-                ),
+                )
             )
-            if updated.rowcount:
+            changed = bool(updated.rowcount)
+            if changed:
                 self._touch_conversation(
                     conn, user_id, row["conversation_id"], timestamp
                 )
-            conn.commit()
-            return bool(updated.rowcount)
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+            return changed
 
     def _validate_source_scope(
         self,
@@ -1367,15 +904,10 @@ class QaRepository:
         conversation_id: str,
         sources: Sequence[QaSourceDraft],
     ) -> None:
+        conn = _domain_store(conn)
         scope = {
             row["document_id"]
-            for row in conn.execute(
-                """
-                select document_id from qa_conversation_documents
-                where user_id = ? and conversation_id = ?
-                """,
-                (user_id, conversation_id),
-            )
+            for row in conn.document_ids((user_id, conversation_id))
         }
         if any(source.document_id not in scope for source in sources):
             raise QaValidationError(
@@ -1389,37 +921,21 @@ class QaRepository:
         conversation_id: str,
         timestamp: str,
     ) -> None:
-        conn.execute(
-            """
-            update qa_conversations
-            set last_message_at = ?, updated_at = ?, version = version + 1
-            where id = ? and user_id = ?
-            """,
-            (timestamp, timestamp, conversation_id, user_id),
-        )
+        conn = _domain_store(conn)
+        conn.touch_conversation((timestamp, timestamp, conversation_id, user_id))
 
     def _get_conversation(
         self, conn: sqlite3.Connection, user_id: str, conversation_id: str
     ) -> QaConversationAggregate | None:
-        row = conn.execute(
-            f"""
-            select * from qa_conversations where id = ? and user_id = ?
-              and {_not_fenced_clause('qa_conversations')}
-            """,
-            (conversation_id, user_id),
-        ).fetchone()
+        conn = _domain_store(conn)
+        row = conn.visible_conversation((conversation_id, user_id)).fetchone()
         return self._aggregate_from_row(conn, row) if row is not None else None
 
     def _aggregate_from_row(
         self, conn: sqlite3.Connection, row: sqlite3.Row
     ) -> QaConversationAggregate:
-        documents = conn.execute(
-            """
-            select * from qa_conversation_documents
-            where conversation_id = ? and user_id = ? order by position
-            """,
-            (row["id"], row["user_id"]),
-        ).fetchall()
+        conn = _domain_store(conn)
+        documents = conn.documents((row["id"], row["user_id"])).fetchall()
         return QaConversationAggregate(
             _conversation_from_row(row),
             tuple(_document_from_row(document) for document in documents),
@@ -1428,14 +944,52 @@ class QaRepository:
     def _message_from_row(
         self, conn: sqlite3.Connection, row: sqlite3.Row
     ) -> QaMessage:
-        source_rows = conn.execute(
-            """
-            select * from qa_message_sources
-            where assistant_message_id = ? and user_id = ? order by position
-            """,
-            (row["id"], row["user_id"]),
-        ).fetchall()
+        conn = _domain_store(conn)
+        source_rows = conn.sources((row["id"], row["user_id"])).fetchall()
         return _message_from_row(row, tuple(_source_from_row(item) for item in source_rows))
+
+
+class PostgresQaRepository(QaRepository):
+    """Shared conversation state. Worker lifecycle requires the durable lease adapter."""
+
+    def __init__(self, database):
+        self._persistence = PostgresQaPersistence(database)
+
+    def create_pending_turn_in_transaction(self, cursor, user_id, conversation_id,
+                                           question, mode, client_request_id, *, now=None):
+        """Use an active caller transaction; lock user first and leave commit to caller."""
+        return self._create_pending_turn_in_connection(
+            cursor, user_id, conversation_id, question, mode, client_request_id,
+            retry_of_message_id=None, timestamp=now or _utc_now())
+
+    def create_pending_retry_in_transaction(self, cursor, user_id, conversation_id,
+                                            failed_assistant_message_id, client_request_id, *, now=None):
+        """Use an active caller transaction; never commit or roll it back here."""
+        request_id = str(client_request_id or "").strip()
+        if not request_id:
+            raise QaValidationError("QA_CLIENT_REQUEST_REQUIRED", "client request id is required")
+        return self._create_pending_retry_in_connection(
+            cursor, user_id, conversation_id, failed_assistant_message_id,
+            request_id, now or _utc_now())
+
+    def _worker_lifecycle_unavailable(self, *args, **kwargs):
+        raise NotImplementedError("PostgreSQL QA worker lifecycle requires durable lease integration")
+
+    claim_next_memory_sync = _worker_lifecycle_unavailable
+    heartbeat_memory_sync = _worker_lifecycle_unavailable
+    complete_memory_sync = _worker_lifecycle_unavailable
+    fail_memory_sync = _worker_lifecycle_unavailable
+    recover_interrupted_questions = _worker_lifecycle_unavailable
+    _finish_memory_sync = _worker_lifecycle_unavailable
+
+
+def _domain_store(conn):
+    # Local job/deletion/Worker callers historically pass a SQLite transaction.
+    if isinstance(conn, QaStore):
+        return conn
+    if isinstance(conn, sqlite3.Connection):
+        return QaStore(conn)
+    raise TypeError("QA domain store or SQLite connection required")
 
 
 def _validated_limit(limit: int, *, maximum: int) -> int:
@@ -1444,37 +998,6 @@ def _validated_limit(limit: int, *, maximum: int) -> int:
             "QA_PAGE_LIMIT_INVALID", f"limit must be between 1 and {maximum}"
         )
     return limit
-
-
-def _not_fenced_clause(conversation_alias: str) -> str:
-    return f"""
-    not exists (
-        select 1 from qa_deletion_fences deletion_fence
-        where deletion_fence.user_id = {conversation_alias}.user_id
-          and (
-              deletion_fence.status in ('queued', 'running')
-              or (
-                  deletion_fence.status = 'failed'
-                  and deletion_fence.attempt_count < 3
-              )
-          )
-          and (
-              (
-                  deletion_fence.target_type = 'conversation'
-                  and deletion_fence.target_id = {conversation_alias}.id
-              )
-              or (
-                  deletion_fence.target_type = 'document'
-                  and exists (
-                      select 1 from qa_conversation_documents fenced_document
-                      where fenced_document.conversation_id = {conversation_alias}.id
-                        and fenced_document.user_id = {conversation_alias}.user_id
-                        and fenced_document.document_id = deletion_fence.target_id
-                  )
-              )
-          )
-    )
-    """
 
 
 def _add_seconds(timestamp: str, seconds: int) -> str:

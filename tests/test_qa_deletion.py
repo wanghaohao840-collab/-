@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.qa_deletion as qa_deletion_module
-import app.qa_repository as qa_repository_module
+import app.qa_persistence as qa_persistence_module
 from app.coordination import UserMutationCoordinator
 from app.database import connect, initialize_database
 from app.document_library import DocumentLibraryService, DocumentNotFoundError
@@ -217,7 +217,7 @@ def test_document_fence_commits_first_and_creation_observes_it(
     release_deletion_commit = threading.Event()
     creation_begin_attempted = threading.Event()
     original_deletion_connect = qa_deletion_module.connect
-    original_repository_connect = qa_repository_module.connect
+    original_repository_connect = qa_persistence_module.connect
 
     def synchronized_deletion_connect(db_path):
         connection = original_deletion_connect(db_path)
@@ -239,7 +239,7 @@ def test_document_fence_commits_first_and_creation_observes_it(
         qa_deletion_module, "connect", synchronized_deletion_connect
     )
     monkeypatch.setattr(
-        qa_repository_module, "connect", synchronized_repository_connect
+        qa_persistence_module, "connect", synchronized_repository_connect
     )
     deletion_state = {}
 
@@ -298,7 +298,7 @@ def test_conversation_immediate_transaction_commits_before_document_snapshot(
     begin_acquired = threading.Event()
     release_creation = threading.Event()
     deletion_begin_attempted = threading.Event()
-    original_repository_connect = qa_repository_module.connect
+    original_repository_connect = qa_persistence_module.connect
     original_deletion_connect = qa_deletion_module.connect
 
     def synchronized_repository_connect(db_path):
@@ -316,7 +316,7 @@ def test_conversation_immediate_transaction_commits_before_document_snapshot(
         return connection
 
     monkeypatch.setattr(
-        qa_repository_module, "connect", synchronized_repository_connect
+        qa_persistence_module, "connect", synchronized_repository_connect
     )
     monkeypatch.setattr(
         qa_deletion_module, "connect", synchronized_deletion_connect
