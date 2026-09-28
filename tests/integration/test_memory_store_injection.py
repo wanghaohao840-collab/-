@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 
 import pytest
 
@@ -36,10 +37,23 @@ def test_public_memory_tool_uses_shared_document_store(documents, backends):
     tool = MemoryTool(user_id=user, memory_config=config, memory_types=['episodic'],
                       episodic_document_store=store)
     try:
-        identifier = tool.memory_manager.add_memory('共享事件', 'episodic', memory_id='episode-1')
+        identifier = tool.memory_manager.add_memory('共享事件', 'episodic', importance=0.8,
+            metadata={'session_id': 'session-1', 'document_id': 'doc-1', 'page_number': 7},
+            memory_id='episode-1')
         row = peer.get_document(identifier)
         assert row['content'] == '共享事件'
-        assert json.loads(row['metadata'])['user_id'] == user
+        metadata = json.loads(row['metadata'])
+        assert {key: metadata[key] for key in ('user_id', 'memory_id', 'episode_id',
+            'session_id', 'document_id', 'page_number', 'memory_type', 'importance', 'content')} == {
+            'user_id': user, 'memory_id': 'episode-1', 'episode_id': 'episode-1',
+            'session_id': 'session-1', 'document_id': 'doc-1', 'page_number': 7,
+            'memory_type': 'episodic', 'importance': 0.8, 'content': '共享事件',
+        }
+        assert datetime.fromisoformat(metadata['timestamp'])
+        hits = tool.memory_manager.retrieve_memories('共享', memory_types=['episodic'])
+        assert [hit.id for hit in hits] == [identifier]
+        assert hits[0].content == '共享事件'
+        assert hits[0].metadata['user_id'] == user
         assert PostgresMemoryDocumentStore(second, other).get_document(identifier) is None
         assert tool.memory_manager.remove_memory(identifier, memory_type='episodic')
         assert peer.get_document(identifier) is None
