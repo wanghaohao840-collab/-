@@ -26,7 +26,9 @@ class MemoryManager:
         enable_episodic: bool = True,
         enable_semantic: bool = True,
         enable_perceptual: bool = False,
-        snapshot_repository: Any = None
+        snapshot_repository: Any = None,
+        *,
+        episodic_document_store: Any = None,
     ):
         self.config = config or MemoryConfig()
         self.user_id = user_id
@@ -49,7 +51,9 @@ class MemoryManager:
         if enable_episodic:
             self.memory_types["episodic"] = EpisodicMemory(
                 config=self.config,
-                storage_backend=self.store
+                storage_backend=self.store,
+                **({"document_store": episodic_document_store}
+                   if episodic_document_store is not None else {}),
             )
 
         if enable_semantic:

@@ -16,7 +16,9 @@ class MemoryTool(Tool):
         user_id: str = "default_user",
         memory_config: Optional[MemoryConfig] = None,
         memory_types: Optional[List[str]] = None,
-        memory_repository: Any = None
+        memory_repository: Any = None,
+        *,
+        episodic_document_store: Any = None,
     ):
         super().__init__(
             name="memory",
@@ -37,7 +39,9 @@ class MemoryTool(Tool):
             enable_episodic="episodic" in self.memory_types,
             enable_semantic="semantic" in self.memory_types,
             enable_perceptual="perceptual" in self.memory_types,
-            snapshot_repository=memory_repository
+            snapshot_repository=memory_repository,
+            **({"episodic_document_store": episodic_document_store}
+               if episodic_document_store is not None else {}),
         )
 
     def close(self) -> None:

@@ -22,11 +22,14 @@ class EpisodicMemory:
     - 支持 session_id、时间范围、重要性过滤
     """
 
-    def __init__(self, config: MemoryConfig, storage_backend=None):
+    def __init__(self, config: MemoryConfig, storage_backend=None, *, document_store=None):
         self.config = config
         self.storage_backend = storage_backend
 
-        self.doc_store = SQLiteDocumentStore(config.database_path)
+        # Explicit stores are authoritative and must not silently lose writes.
+        # The local default retains its existing best-effort persistence behavior.
+        self._strict_persistence = document_store is not None
+        self.doc_store = document_store if document_store is not None else SQLiteDocumentStore(config.database_path)
 
         self.vector_collection = getattr(
             config, "qdrant_collection", "hello_agents_vectors"
@@ -81,6 +84,10 @@ class EpisodicMemory:
             }
         )
 
+        strict = getattr(self, "_strict_persistence", False)
+        if strict:
+            self._persist_episode(episode)
+
         previous = self._episodes.get(episode.episode_id)
         if previous is not None:
             previous_ids = self.sessions.get(previous.session_id, [])
@@ -97,7 +104,8 @@ class EpisodicMemory:
             self.sessions[episode.session_id].append(episode.episode_id)
         self._episodes[episode.episode_id] = episode
 
-        self._persist_episode(episode)
+        if not strict:
+            self._persist_episode(episode)
         return memory_item.id
 
     def retrieve(self, query: str, limit: int = 5, **kwargs) -> List[MemoryItem]:
@@ -256,13 +264,15 @@ class EpisodicMemory:
         }
 
         try:
-            if hasattr(self.doc_store, "add_document"):
+            if getattr(self, "_strict_persistence", False) or hasattr(self.doc_store, "add_document"):
                 self.doc_store.add_document(
                     doc_id=episode.episode_id,
                     content=episode.content,
                     metadata=json.dumps(metadata, ensure_ascii=False)
                 )
         except Exception as e:
+            if getattr(self, "_strict_persistence", False):
+                raise
             print(f"[WARNING] SQLite 保存情景记忆失败: {e}")
 
         try:
@@ -282,6 +292,8 @@ class EpisodicMemory:
             )
 
         except Exception as e:
+            if getattr(self, "_strict_persistence", False):
+                raise
             print(f"[WARNING] Qdrant 保存情景记忆失败: {e}")
 
     def _structured_filter(self, **kwargs) -> Optional[Set[str]]:
