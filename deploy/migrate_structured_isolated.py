@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import sqlite3
 import sys
 import tarfile
+import tempfile
 
 if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -149,6 +150,27 @@ def migrate_structured(archive_path: Path, *, database_url: str, target_schema: 
             'tables': tables, 'discrepancies': differences}
 
 
+def _publish_evidence(path: Path, result: dict) -> None:
+    """Replace the output name without following an existing hardlink or symlink."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf-8', dir=path.parent,
+            prefix=f'.{path.name}.', suffix='.tmp', delete=False,
+        ) as stream:
+            temporary_path = Path(stream.name)
+            json.dump(result, stream, indent=2, sort_keys=True)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('archive', type=Path)
@@ -169,8 +191,7 @@ def main() -> int:
         # Driver messages can contain failing source rows. Report only the type.
         result = {'status': 'failed', 'mode': args.mode, 'error_type': type(exc).__name__}
         code = 1
-    args.evidence.parent.mkdir(parents=True, exist_ok=True)
-    args.evidence.write_text(json.dumps(result, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    _publish_evidence(args.evidence, result)
     print('Structured authority migration: ' + result['status'])
     return code
 

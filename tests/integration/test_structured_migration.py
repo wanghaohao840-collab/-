@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import tarfile
 
@@ -132,3 +133,62 @@ def test_cli_cannot_overwrite_frozen_backup_or_sidecar(tmp_path, monkeypatch):
             main()
     assert digest(archive) == before
     assert sorted(path.name for path in tmp_path.iterdir()) == ['pair.tar.gz']
+
+
+def test_cli_replaces_hardlink_evidence_without_truncating_backup(tmp_path, monkeypatch):
+    backup = tmp_path / 'backup'
+    backup.mkdir()
+    archive = backup / 'pair.tar.gz'
+    archive.write_bytes(b'frozen backup bytes')
+    output = tmp_path / 'evidence.json'
+    os.link(archive, output)
+    monkeypatch.setenv('CUTOVER_TEST_DATABASE_URL', 'unused-test')
+    monkeypatch.setattr('deploy.migrate_structured_isolated.migrate_structured', lambda *_args, **_kwargs: {'status': 'equal'})
+    monkeypatch.setattr('sys.argv', ['migration', str(archive), '--target-schema', 'cutover_test',
+                                  '--mode', 'verify', '--evidence', str(output)])
+    assert main() == 0
+    assert archive.read_bytes() == b'frozen backup bytes'
+    assert json.loads(output.read_text()) == {'status': 'equal'}
+    assert not os.path.samefile(archive, output)
+
+
+def test_initial_partial_authority_is_rejected_and_preserved(prepared):
+    _archive, schema, url = prepared
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        conn.execute('''insert into user_snapshots(user_id,kind,version,payload,updated_at)
+            values('u1','memory',1,%s::jsonb,clock_timestamp())''',
+            (json.dumps({'user_id': 'u1', 'memories': [{'id': 'm', 'memory_type': 'episodic', 'metadata': {'user_id': 'u1'}}]}),))
+    for mode in ('dry-run', 'apply', 'verify'):
+        with pytest.raises(StructuredMigrationError, match='authority'):
+            run(prepared, mode)
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        assert conn.execute('select kind,version from user_snapshots').fetchall() == [('memory', 1)]
+        assert conn.execute('select count(*) from memory_documents').fetchone() == (0,)
+        assert conn.execute('select position from note_tags').fetchall() == [(None,), (None,)]
+
+
+def test_cli_failed_evidence_replace_preserves_backup_and_cleans_owned_temp(tmp_path, monkeypatch):
+    backup = tmp_path / 'backup'
+    backup.mkdir()
+    archive = backup / 'pair.tar.gz'
+    archive.write_bytes(b'frozen backup bytes')
+    output = tmp_path / 'evidence.json'
+    os.link(archive, output)
+    unrelated = tmp_path / '.evidence.json.unrelated.tmp'
+    unrelated.write_bytes(b'leave this file alone')
+    monkeypatch.setenv('CUTOVER_TEST_DATABASE_URL', 'unused-test')
+    monkeypatch.setattr('deploy.migrate_structured_isolated.migrate_structured', lambda *_args, **_kwargs: {'status': 'equal'})
+    monkeypatch.setattr('sys.argv', ['migration', str(archive), '--target-schema', 'cutover_test',
+                                  '--mode', 'verify', '--evidence', str(output)])
+    def reject_replace(source, destination):
+        assert source.parent == output.parent
+        assert source != output and destination == output
+        assert json.loads(source.read_text()) == {'status': 'equal'}
+        raise OSError('injected replace failure')
+    monkeypatch.setattr('deploy.migrate_structured_isolated.os.replace', reject_replace)
+    with pytest.raises(OSError, match='injected replace failure'):
+        main()
+    assert archive.read_bytes() == output.read_bytes() == b'frozen backup bytes'
+    assert os.path.samefile(archive, output)
+    assert unrelated.read_bytes() == b'leave this file alone'
+    assert sorted(path.name for path in tmp_path.iterdir()) == [unrelated.name, 'backup', 'evidence.json']
