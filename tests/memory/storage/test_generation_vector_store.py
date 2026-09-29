@@ -76,6 +76,56 @@ def test_generation_isolates_tenants_and_pinned_heads(corpus):
             for record in p.records] == ["same-logical-id"]
 
 
+def test_pinned_view_rejects_rebinding_between_subreads(corpus):
+    raw, identity = corpus
+    current_scope = scope(identity)
+    old_id, new_id = uuid4(), uuid4()
+    for generation, marker in ((old_id, "old"), (new_id, "new")):
+        CandidateGenerationWriter(raw, current_scope, generation,
+                                  lambda _s, _g: "staging").upload([point("same", marker)])
+    old = GenerationVectorStore(raw, current_scope,
+                                VectorHead("published", 1, old_id, 1, None))
+    new = GenerationVectorStore(raw, current_scope,
+                                VectorHead("published", 2, new_id, 1, None))
+    collection = identity.physical_collection
+    assert old.count(collection) == 1
+    for name, replacement in (
+        ("head", new.head), ("scope", scope(identity, "user-b")),
+        ("raw", QdrantVectorStore(url=os.environ["GENERATION_QDRANT_TEST_URL"])),
+        ("collection_name", "other_collection"),
+    ):
+        with pytest.raises(AttributeError):
+            setattr(old, name, replacement)
+    assert old.count(collection) == 1
+    assert [item.payload["marker"] for item in old.scroll(collection)] == ["old"]
+
+
+def test_page_iterator_freezes_nested_document_and_id_filters(corpus):
+    raw, identity = corpus
+    current_scope = scope(identity)
+    generation = uuid4()
+    writer = CandidateGenerationWriter(raw, current_scope, generation,
+                                       lambda _s, _g: "staging")
+    writer.upload([
+        VectorPoint("one", [1.0, 0.0, 0.0, 0.0], {"document_id": "doc-a"}),
+        VectorPoint("two", [1.0, 0.0, 0.0, 0.0], {"document_id": "doc-a"}),
+        VectorPoint("three", [1.0, 0.0, 0.0, 0.0], {"document_id": "doc-b"}),
+    ])
+    view = GenerationVectorStore(raw, current_scope,
+                                 VectorHead("published", 1, generation, 1, None))
+    collection = identity.physical_collection
+    documents = ["doc-a"]
+    ids = ["one", "two"]
+    pages = view.iter_scroll_pages(collection,
+                                   {"document_id": documents, "_id": ids}, page_size=1)
+    first = next(pages)
+    assert len(first.records) == 1
+    documents[:] = ["doc-b"]
+    ids[:] = ["three"]
+    remaining = [record.logical_id for page in pages for record in page.records]
+    assert {first.records[0].logical_id, *remaining} == {"one", "two"}
+
+
 def test_bounded_pages_resume_at_native_cursor(corpus):
     raw, identity = corpus
     current_scope = scope(identity)

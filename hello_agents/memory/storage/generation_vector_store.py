@@ -5,6 +5,8 @@ publishes a head or treats an absent head as an empty corpus.
 """
 from __future__ import annotations
 
+import copy
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -81,25 +83,28 @@ def _check_caller_fields(scope: VectorScope, values: Mapping[str, Any]) -> None:
         raise GenerationVectorStoreError("Caller scope conflicts with pinned vector scope")
 
 
+@dataclass(frozen=True, slots=True)
 class GenerationVectorStore:
     """Read-only view of one PostgreSQL head, pinned for a public operation."""
 
-    def __init__(self, raw: QdrantVectorStore, scope: VectorScope, head: VectorHead):
-        if not isinstance(raw, QdrantVectorStore) or not isinstance(scope, VectorScope):
+    raw: QdrantVectorStore
+    scope: VectorScope
+    head: VectorHead
+    collection_name: str = field(init=False)
+
+    def __post_init__(self):
+        if not isinstance(self.raw, QdrantVectorStore) or not isinstance(self.scope, VectorScope):
             raise TypeError("Qdrant store and trusted vector scope are required")
-        if not isinstance(head, VectorHead) or head.state not in {"empty", "published"}:
+        if not isinstance(self.head, VectorHead) or self.head.state not in {"empty", "published"}:
             raise GenerationVectorStoreError("Missing or invalid published vector head")
-        if (type(head.revision) is not int or head.revision < 1
-                or type(head.index_revision) is not int or head.index_revision < 1
-                or (head.state == "published") != isinstance(head.generation_id, uuid.UUID)):
+        if (type(self.head.revision) is not int or self.head.revision < 1
+                or type(self.head.index_revision) is not int or self.head.index_revision < 1
+                or (self.head.state == "published") != isinstance(self.head.generation_id, uuid.UUID)):
             raise GenerationVectorStoreError("Invalid published vector head")
-        raw.require_collection(scope.identity.physical_collection,
-                               scope.identity.profile.dimension,
-                               scope.identity.profile.distance)
-        self.raw = raw
-        self.scope = scope
-        self.head = head
-        self.collection_name = scope.identity.physical_collection
+        self.raw.require_collection(self.scope.identity.physical_collection,
+                                    self.scope.identity.profile.dimension,
+                                    self.scope.identity.profile.distance)
+        object.__setattr__(self, "collection_name", self.scope.identity.physical_collection)
 
     def _collection(self, collection_name: str) -> None:
         if collection_name != self.collection_name:
@@ -209,7 +214,7 @@ class GenerationVectorStore:
                           page_size: int = 128,
                           max_pages: int = _MAX_SCAN_PAGES) -> Iterator[VectorScanPage]:
         self._collection(collection_name)
-        effective = dict(filters or {})
+        effective = copy.deepcopy(filters) if filters is not None else None
         yield from iter_qdrant_pages(
             lambda current: self.scroll_page(collection_name, effective,
                                              offset=current, page_size=page_size),
