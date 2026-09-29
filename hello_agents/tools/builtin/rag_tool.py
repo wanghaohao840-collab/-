@@ -81,6 +81,8 @@ class RAGTool(Tool):
         enable_graph: Optional[bool] = None,
         graph_state_path: Optional[str] = None,
         data_root: Path | str | None = None,
+        published_read_factory: Any = None,
+        authenticated_tenant_id: Optional[str] = None,
     ):
         super().__init__(
             name="rag",
@@ -97,6 +99,19 @@ class RAGTool(Tool):
         self.graph_service = graph_service
         self.graph_configuration_error: Optional[str] = None
 
+        if (published_read_factory is None) != (authenticated_tenant_id is None):
+            raise ValueError("Published reads require a factory and authenticated tenant")
+        if published_read_factory is not None:
+            if not str(authenticated_tenant_id).strip() or not callable(
+                getattr(published_read_factory, "open_operation", None)
+            ):
+                raise ValueError("Published reads require a trusted tenant-bound factory")
+            if graph_service is not None or enable_graph is True:
+                raise ValueError("Graph service is unavailable for published reads")
+        self._published_read_factory = published_read_factory
+        self._authenticated_tenant_id = authenticated_tenant_id
+        self._read_operations = ContextVar(f"rag_read_operations_{id(self)}", default=None)
+
         self._pipelines: Dict[str, Any] = {}
         self._document_summary_cache: Dict[str, Dict[str, Any]] = {}
         self._document_summary_cache_lock = RLock()
@@ -109,18 +124,19 @@ class RAGTool(Tool):
 
         self.llm = HelloAgentsLLM()
 
-        default_pipeline = create_rag_pipeline(
-            qdrant_url=self.qdrant_url,
-            qdrant_api_key=self.qdrant_api_key,
-            collection_name=self.collection_name,
-            rag_namespace=self.rag_namespace,
-            cache_path=self.cache_path,
-            data_root=self.data_root,
-        )
+        if self._published_read_factory is None:
+            default_pipeline = create_rag_pipeline(
+                qdrant_url=self.qdrant_url,
+                qdrant_api_key=self.qdrant_api_key,
+                collection_name=self.collection_name,
+                rag_namespace=self.rag_namespace,
+                cache_path=self.cache_path,
+                data_root=self.data_root,
+            )
+            self._pipelines[self.rag_namespace] = default_pipeline
 
-        self._pipelines[self.rag_namespace] = default_pipeline
-
-        if self.graph_service is None and enable_graph is not False:
+        if (self._published_read_factory is None and self.graph_service is None
+                and enable_graph is not False):
             self._configure_graph_service(
                 graph_state_path=graph_state_path,
                 required=enable_graph is True,
@@ -400,6 +416,21 @@ class RAGTool(Tool):
 
         action = action.lower().strip()
 
+        if getattr(self, "_published_read_factory", None) is not None:
+            if action not in {"search", "get_document_chunk", "citation", "cite",
+                              "format_citations", "ask", "stats"}:
+                self._last_action_error = RAGOperationError("read_only")
+                return "❌ Published RAG reads are read-only"
+            if action == "ask" and kwargs.get("graph_mode", "off") not in ("off", None):
+                self._last_action_error = RAGOperationError("graph_unavailable")
+                return "❌ Graph mode is unavailable for published RAG reads"
+            if action == "ask":
+                kwargs["graph_mode"] = "off"
+        operation_token = (
+            self._read_operations.set({})
+            if getattr(self, "_published_read_factory", None) is not None else None
+        )
+
         try:
             if action == "add_text":
                 return self._add_text(**kwargs)
@@ -446,6 +477,9 @@ class RAGTool(Tool):
             self._last_action_error = exc
             safe_error = self._safe_action_error(exc, kwargs.get("file_path"))
             return f"❌ RAG 操作失败: {safe_error}"
+        finally:
+            if operation_token is not None:
+                self._read_operations.reset(operation_token)
 
     def execute_result(self, action: Optional[str] = None, **kwargs) -> RAGActionResult:
         """Execute an action and return structured status plus the legacy message."""
@@ -600,6 +634,16 @@ class RAGTool(Tool):
         """获取指定 namespace 的 RAG 管道"""
 
         namespace = rag_namespace or self.rag_namespace
+
+        if getattr(self, "_published_read_factory", None) is not None:
+            operations = self._read_operations.get()
+            if operations is None:
+                raise RAGOperationError("Published reads require an active action")
+            if namespace not in operations:
+                operations[namespace] = self._published_read_factory.open_operation(
+                    self._authenticated_tenant_id, namespace
+                )
+            return operations[namespace]
 
         if namespace not in self._pipelines:
             self._pipelines[namespace] = create_rag_pipeline(
@@ -2384,7 +2428,8 @@ citations 可以使用向量资料的 S-* ID 或图谱资料的 G-* ID。
                 graph_mode=graph_mode,
                 graph_context=graph_context_by_document.get(doc_id),
             )
-            cached = self._get_cached_document_summary(cache_key)
+            cached = (None if getattr(self, "_published_read_factory", None) is not None
+                      else self._get_cached_document_summary(cache_key))
             if cached is not None:
                 cached["cache_hit"] = True
                 return cached
@@ -2446,7 +2491,8 @@ citations 可以使用向量资料的 S-* ID 或图谱资料的 G-* ID。
                 "error": None,
                 "cache_hit": False,
             }
-            self._put_cached_document_summary(cache_key, mapped_result)
+            if getattr(self, "_published_read_factory", None) is None:
+                self._put_cached_document_summary(cache_key, mapped_result)
             return mapped_result
 
         progress_lock = RLock()
