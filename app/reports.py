@@ -70,7 +70,7 @@ class ReportService:
         ]
 
     def read_report(self, user_id: str, report_id: str) -> str:
-        return self.read_report_bytes(user_id, report_id).decode("utf-8")
+        return self.report_file_path(user_id, report_id).read_text(encoding="utf-8")
 
     def read_report_bytes(self, user_id: str, report_id: str) -> bytes:
         with transaction(self.db_path) as conn:

@@ -54,13 +54,17 @@ def test_overview_stats_reports_and_user_isolation(tmp_path):
         )
         assert created.status_code == 201
         report_id = created.json()["id"]
+        token = client.cookies["zhiyan_session"]
+        session = services.session_registry.get_session(token)
+        saved_bytes = session.runtime.reports.report_file_path(session.user_id, report_id).read_bytes()
+        assert created.json()["content"] == saved_bytes.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         assert "不推断阅读时长" in created.json()["content"]
         assert client.get(f"/api/v1/insights/reports/{report_id}").status_code == 200
         download = client.get(f"/api/v1/insights/reports/{report_id}/download?format=md")
         assert download.status_code == 200
         assert download.headers["cache-control"] == "no-store"
         assert "zhiyan-learning-report" in download.headers["content-disposition"]
-        assert download.content == created.json()["content"].encode("utf-8")
+        assert download.content == saved_bytes
         assert download.headers["content-type"].startswith("text/markdown")
         word = client.get(f"/api/v1/insights/reports/{report_id}/download?format=docx")
         assert word.status_code == 200

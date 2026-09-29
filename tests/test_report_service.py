@@ -47,6 +47,20 @@ def test_report_bytes_reject_path_outside_owner_root(tmp_path):
         service.read_report_bytes(owner, record.id)
 
 
+def test_report_text_normalizes_newlines_while_bytes_remain_exact(tmp_path):
+    db_path = tmp_path / "app.db"
+    initialize_database(db_path)
+    storage = UserStorage(tmp_path / "data")
+    service = ReportService(db_path, storage)
+    owner = create_user(db_path)
+    record = service.create_markdown_snapshot(owner, "Weekly", "temporary")
+    saved = b"first\r\nsecond\rthird\n"
+    storage.report_path(owner, record.id).write_bytes(saved)
+
+    assert service.read_report_bytes(owner, record.id) == saved
+    assert service.read_report(owner, record.id) == "first\nsecond\nthird\n"
+
+
 def test_report_service_hides_missing_files(tmp_path):
     db_path = tmp_path / "app.db"
     data_root = tmp_path / "data"
