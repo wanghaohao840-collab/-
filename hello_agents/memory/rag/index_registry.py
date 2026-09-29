@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import re
 from threading import RLock
-from typing import Iterable
+from typing import Iterable, Protocol, runtime_checkable
 import uuid
 
 from hello_agents.memory.rag.errors import RAGConfigError
@@ -193,6 +193,15 @@ class IndexRecord:
 
 def registry_key(identity: IndexIdentity) -> str:
     return f"{identity.backend}:{identity.base_collection}"
+
+
+@runtime_checkable
+class ActiveIndexRegistry(Protocol):
+    """The managed Qdrant pipeline's narrow index authority contract."""
+
+    def require_active(self, expected: IndexIdentity) -> object: ...
+
+    def mark_failed_if_active(self, expected: IndexIdentity) -> bool: ...
 
 
 class IndexRegistry:

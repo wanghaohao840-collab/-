@@ -15,7 +15,7 @@ from hello_agents.memory.rag.errors import (
 from hello_agents.memory.rag.index_identity import (
     IndexIdentity, IndexIdentityError, require_point_identity,
 )
-from hello_agents.memory.rag.index_registry import IndexRegistry
+from hello_agents.memory.rag.index_registry import ActiveIndexRegistry
 from hello_agents.memory.rag.prepare import (
     contains_secret_metadata,
     prepare_document_chunks,
@@ -55,7 +55,7 @@ class RAGPipeline:
         retry_delays: Optional[tuple[float, ...]] = None,
         max_summary_chunks: int = MAX_SUMMARY_CHUNKS,
         embedding_runtime: RAGEmbeddingRuntime | None = None,
-        index_registry: IndexRegistry | None = None,
+        index_registry: ActiveIndexRegistry | None = None,
         **kwargs,
     ):
         collection_name = str(collection_name or "").strip()
@@ -80,7 +80,7 @@ class RAGPipeline:
             )
             or (
                 index_registry is not None
-                and not isinstance(index_registry, IndexRegistry)
+                and not isinstance(index_registry, ActiveIndexRegistry)
             )
         ):
             raise RAGConfigError(
