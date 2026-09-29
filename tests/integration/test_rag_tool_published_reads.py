@@ -38,7 +38,8 @@ def test_tool_pins_stats_and_resolves_canonical_source(rag_setup, monkeypatch):
         result = original_scroll(view, *args, **kwargs)
         if not published:
             published.append(_publish(service, db, identity, user, document_id,
-                                      runtime, "bravo", leases, extra_marker="bravo two"))
+                                      runtime, "bravo", leases, extra_marker="bravo two",
+                                      payload_id="conflicting-payload-id"))
         return result
 
     monkeypatch.setattr(GenerationVectorStore, "scroll", publish_between_stats_subreads)
