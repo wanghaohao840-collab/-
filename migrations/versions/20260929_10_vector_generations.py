@@ -50,10 +50,12 @@ def upgrade():
         check((task_id is null)=(task_lease_version is null)),
         check(task_lease_version is null or task_lease_version>0),
         check((expected_count is null and content_digest is null) or
-              (expected_count>=0 and content_digest ~ '^[a-f0-9]{64}$')),
+              (expected_count is not null and expected_count>=0
+               and content_digest is not null and content_digest ~ '^[a-f0-9]{64}$')),
         check((state='staging' and sealed_at is null and expected_count is null)
            or (state='abandoned')
-           or (state in ('sealed','published','retired') and sealed_at is not null and expected_count is not null))
+           or (state in ('sealed','published','retired') and sealed_at is not null
+               and expected_count is not null and content_digest is not null))
     )''')
     op.execute('''create table vector_heads (
         tenant_id text not null,
@@ -145,6 +147,33 @@ def upgrade():
     op.execute('''create constraint trigger vector_head_published_guard
         after insert or update on vector_heads deferrable initially deferred
         for each row execute function vector_head_published_guard()''')
+    op.execute('''create function vector_generation_publication_guard()
+      returns trigger language plpgsql as $$
+      declare final_state text;
+      declare final_count bigint;
+      begin
+        select state,expected_count into final_state,final_count
+          from vector_generations where generation_id=new.generation_id;
+        if final_state='published' then
+          if not exists (select 1 from vector_heads h
+            where h.last_generation_id=new.generation_id
+              and h.tenant_id=new.tenant_id and h.vector_kind=new.vector_kind
+              and h.namespace=new.namespace and h.index_key=new.index_key
+              and ((final_count=0 and h.generation_id is null)
+                or (final_count>0 and h.generation_id=new.generation_id))) then
+            raise exception 'published vector generation must be current head';
+          end if;
+        elsif exists (select 1 from vector_heads h
+          where h.last_generation_id=new.generation_id
+            and h.tenant_id=new.tenant_id and h.vector_kind=new.vector_kind
+            and h.namespace=new.namespace and h.index_key=new.index_key) then
+          raise exception 'vector head must reference a published generation';
+        end if;
+        return null;
+      end $$''')
+    op.execute('''create constraint trigger vector_generation_publication_guard
+        after insert or update on vector_generations deferrable initially deferred
+        for each row execute function vector_generation_publication_guard()''')
 
 
 def downgrade():

@@ -109,27 +109,36 @@ class PostgresVectorGenerationAuthority:
         """Resolve a pinned pointer. Missing authority never means an empty corpus."""
         with self.database.transaction() as cursor:
             self.coordinator._isolation(cursor)
-            index = cursor.execute('''select identity,index_revision from vector_indexes
-                where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''', scope.key).fetchone()
-            if index is None:
+            # One READ COMMITTED statement pins index, head and manifest to one
+            # database snapshot even when a concurrent publisher retires a head.
+            row = cursor.execute('''select i.identity,i.index_revision,
+                h.revision,h.generation_id,h.last_generation_id,
+                h.index_revision as head_index_revision,h.snapshot_version,
+                g.state as generation_state,g.expected_count
+                from vector_indexes i
+                left join vector_heads h on h.tenant_id=i.tenant_id
+                    and h.vector_kind=i.vector_kind and h.namespace=i.namespace
+                    and h.index_key=i.index_key
+                left join vector_generations g on g.generation_id=h.last_generation_id
+                    and g.tenant_id=i.tenant_id and g.vector_kind=i.vector_kind
+                    and g.namespace=i.namespace and g.index_key=i.index_key
+                where i.tenant_id=%s and i.vector_kind=%s
+                    and i.namespace=%s and i.index_key=%s''', scope.key).fetchone()
+            if row is None:
                 return VectorHead('missing', None, None, None, None)
-            if index['identity'] != scope.identity.to_dict():
+            if row['identity'] != scope.identity.to_dict():
                 raise VectorAuthorityError('Incompatible index identity')
-            head = self._head_row(cursor, scope)
-            if head is None:
-                return VectorHead('missing', None, None, index['index_revision'], None)
-            if head['index_revision'] != index['index_revision']:
+            if row['revision'] is None:
+                return VectorHead('missing', None, None, row['index_revision'], None)
+            if row['head_index_revision'] != row['index_revision']:
                 raise VectorAuthorityError('Head index revision differs')
-            generation = head['generation_id']
-            row = cursor.execute('''select state,expected_count from vector_generations where generation_id=%s
-                and tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''',
-                (head['last_generation_id'], *scope.key)).fetchone()
-            if (row is None or row['state'] != 'published'
+            generation = row['generation_id']
+            if (row['generation_state'] != 'published'
                     or (generation is None) != (row['expected_count'] == 0)
-                    or (generation is not None and generation != head['last_generation_id'])):
+                    or (generation is not None and generation != row['last_generation_id'])):
                 raise VectorAuthorityError('Published generation is invalid')
-            return VectorHead('empty' if generation is None else 'published', head['revision'],
-                              generation, head['index_revision'], head['snapshot_version'])
+            return VectorHead('empty' if generation is None else 'published', row['revision'],
+                              generation, row['head_index_revision'], row['snapshot_version'])
 
     def stage(self, scope, authority, *, expected_revision, generation_id=None):
         """Allocate a never-reused candidate, bound to the current complete head."""
@@ -262,13 +271,18 @@ class PostgresVectorGenerationAuthority:
         if not isinstance(generation_id, UUID):
             raise ValueError('generation_id must be UUID')
         with self.database.transaction() as cursor:
-            row = cursor.execute('''select state,expected_count,content_digest from vector_generations
-                where generation_id=%s and tenant_id=%s and vector_kind=%s
-                and namespace=%s and index_key=%s''', (generation_id, *scope.key)).fetchone()
+            row = cursor.execute('''select g.state,g.expected_count,g.content_digest,
+                h.last_generation_id,h.revision as head_revision
+                from vector_generations g
+                left join vector_heads h on h.tenant_id=g.tenant_id
+                    and h.vector_kind=g.vector_kind and h.namespace=g.namespace
+                    and h.index_key=g.index_key
+                where g.generation_id=%s and g.tenant_id=%s and g.vector_kind=%s
+                    and g.namespace=%s and g.index_key=%s''',
+                (generation_id, *scope.key)).fetchone()
             if row is None:
                 return None
-            head = self._head_row(cursor, scope)
             return {'state': row['state'], 'expected_count': row['expected_count'],
                     'content_digest': row['content_digest'],
-                    'is_head': head is not None and head['last_generation_id'] == generation_id,
-                    'head_revision': None if head is None else head['revision']}
+                    'is_head': row['last_generation_id'] == generation_id,
+                    'head_revision': row['head_revision']}
