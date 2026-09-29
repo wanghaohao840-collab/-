@@ -300,6 +300,89 @@ def test_import_commit_response_loss_reconciles_task_and_head(setup, monkeypatch
     assert reader.read_view(scope).scroll(scope.identity.physical_collection)[0].payload['marker'] == 'imported'
 
 
+@pytest.mark.parametrize('lost_response', [False, True])
+@pytest.mark.parametrize('interleave', ['before_receipt', 'after_receipt_query'])
+def test_historical_import_receipt_survives_later_head(
+        setup, monkeypatch, lost_response, interleave):
+    writer, reader, first, second, raw, scope, users = setup
+    a = import_attempt(first, users[0], 'worker-a')
+    original_complete = writer.authority.complete_import
+    original_receipt = writer.authority.publication_receipt
+    events = []
+    b_result = []
+
+    def publish_b():
+        assert not b_result
+        current = reader.authority.read_head(scope)
+        assert current.revision == 1
+        b_lease = lease(second, users[0], 'worker-b')
+        b_result.append(reader.publish_complete(scope, b_lease, current, [point('B')]))
+
+    def complete_a(*args, **kwargs):
+        result = original_complete(*args, **kwargs)
+        if interleave == 'before_receipt':
+            publish_b()
+        if lost_response:
+            raise ConnectionError('A commit response lost')
+        return result
+
+    def receipt_a(*args, **kwargs):
+        row = original_receipt(*args, **kwargs)
+        if interleave == 'after_receipt_query' and not b_result:
+            publish_b()  # B commits after A's coherent SQL read, before A returns.
+        return row
+
+    monkeypatch.setattr(writer.authority, 'complete_import', complete_a)
+    monkeypatch.setattr(writer.authority, 'publication_receipt', receipt_a)
+
+    def domain(cursor):
+        events.append('A')
+        cursor.execute("update users set updated_at='A-committed' where id=%s", (users[0],))
+
+    a_result = writer.publish_complete(scope, a, writer.authority.read_head(scope),
+                                       [point('A')], domain_publish=domain,
+                                       snapshot_version=7)
+    assert events == ['A'] and len(b_result) == 1
+    assert (a_result.head.revision, a_result.head.snapshot_version,
+            a_result.head.generation_id) == (1, 7, a_result.generation_id)
+    assert a_result.import_task.task_id == a.task.task_id
+    assert a_result.import_task.status == 'succeeded'
+    assert writer.authority.reconcile(scope, a_result.generation_id)['state'] == 'retired'
+    assert reader.authority.read_head(scope) == b_result[0].head
+    collection = scope.identity.physical_collection
+    assert raw.count(collection, {'_gv_generation': str(a_result.generation_id)}) == 1
+    assert raw.count(collection, {'_gv_generation': str(b_result[0].generation_id)}) == 1
+    assert reader.read_view(scope).scroll(collection)[0].payload['marker'] == 'B'
+    with first.transaction() as cursor:
+        user = cursor.execute('select updated_at from users where id=%s', (users[0],)).fetchone()
+    assert user['updated_at'] == 'A-committed'
+
+
+def test_database_receipt_cannot_be_inserted_retired_or_edited(setup):
+    writer, _, first, _, _, scope, users = setup
+    handle = lease(first, users[0])
+    result = writer.publish_complete(scope, handle, writer.authority.read_head(scope),
+                                     [point('committed')], snapshot_version=3)
+    with pytest.raises(Exception, match='vector publication receipt is immutable'):
+        with first.transaction() as cursor:
+            cursor.execute('''update vector_generations
+                set publication_snapshot_version=4 where generation_id=%s''',
+                (result.generation_id,))
+    with pytest.raises(Exception, match='vector publication requires a sealed transition'):
+        with first.transaction() as cursor:
+            cursor.execute('''insert into vector_generations
+                (generation_id,tenant_id,vector_kind,namespace,index_key,base_revision,
+                 index_revision,owner,user_lease_token,user_lease_version,state,
+                 sealed_at,expected_count,content_digest,published_at,
+                 publication_revision,publication_snapshot_version)
+                select %s,tenant_id,vector_kind,namespace,index_key,base_revision,
+                    index_revision,owner,user_lease_token,user_lease_version,'retired',
+                    sealed_at,expected_count,content_digest,published_at,
+                    publication_revision,publication_snapshot_version
+                from vector_generations where generation_id=%s''',
+                (uuid4(), result.generation_id))
+
+
 def test_late_import_upsert_after_exact_cleanup_and_task_reclaim_is_invisible(setup, monkeypatch):
     writer, reader, first, _, raw, scope, users = setup
     a = import_attempt(first, users[0], 'old-worker')

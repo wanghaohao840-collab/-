@@ -81,36 +81,52 @@ class VectorGenerationService:
     def _published(self, scope: VectorScope, generation_id: UUID,
                    expected_revision: int | None, expected_index_revision: int,
                    count: int, digest: str, owner: UserMutationLease | ImportAttempt,
-                   *, require_task: bool) -> VectorPublication | None:
-        record = self.authority.reconcile(scope, generation_id)
+                   snapshot_version: int | None) -> VectorPublication | None:
+        record = self.authority.publication_receipt(scope, generation_id)
         if not record or record['state'] == 'sealed':
             return None
-        if record['state'] != 'published' or not record['is_head']:
+        if record['state'] not in ('published', 'retired'):
             raise VectorPublicationUnknown(generation_id, 'publication')
         revision = 1 if expected_revision is None else expected_revision + 1
-        if (record['head_revision'] != revision or record['expected_count'] != count
-                or record['content_digest'] != digest):
+        if (record['base_revision'] != expected_revision
+                or record['publication_revision'] != revision
+                or record['index_revision'] != expected_index_revision
+                or record['publication_snapshot_version'] != snapshot_version
+                or record['expected_count'] != count
+                or record['content_digest'] != digest
+                or record['published_at'] is None):
             raise VectorPublicationUnknown(generation_id, 'publication')
-        head = self.authority.read_head(scope)
-        # Another subsequent publication may already have retired this candidate.
-        # In that case the durable result is historical, never a new permission to replay.
-        if head.revision != revision or head.index_revision != expected_index_revision:
-            raise VectorPublicationUnknown(generation_id, 'publication')
-        if head.state != ('published' if count else 'empty') \
-                or head.generation_id != (generation_id if count else None):
+        lease = owner.user_lease if isinstance(owner, ImportAttempt) else owner
+        if (record['owner'] != lease.owner
+                or record['user_lease_token'] != lease.lease_token
+                or record['user_lease_version'] != lease.lease_version):
             raise VectorPublicationUnknown(generation_id, 'publication')
         task = None
-        if require_task:
-            attempt = owner
-            with self.authority.database.transaction() as cursor:
-                row = cursor.execute('''select * from import_tasks
-                    where id=%s and user_id=%s''',
-                    (attempt.task.task_id, scope.tenant_id)).fetchone()
-            if (row is None or row['status'] != 'succeeded'
-                    or row['lease_token'] != attempt.lease_token
-                    or row['lease_version'] != attempt.lease_version):
+        if isinstance(owner, ImportAttempt):
+            if (record['task_id'] != owner.task.task_id
+                    or record['task_lease_token'] != owner.lease_token
+                    or record['task_lease_version'] != owner.lease_version
+                    or record['task_status'] != 'succeeded'
+                    or record['task_owner'] != owner.worker_id
+                    or record['current_task_token'] != owner.lease_token
+                    or record['current_task_version'] != owner.lease_version
+                    or record['task_user_token'] != lease.lease_token
+                    or record['task_user_version'] != lease.lease_version
+                    or record['attempt_ended_at'] is None
+                    or record['attempt_end_reason'] != 'succeeded'
+                    or record['attempt_owner'] != owner.worker_id
+                    or record['audit_task_token'] != owner.lease_token
+                    or record['audit_user_token'] != lease.lease_token
+                    or record['audit_user_version'] != lease.lease_version
+                    or record['task_record'] is None):
                 raise VectorPublicationUnknown(generation_id, 'import completion')
-            task = _task_from_row(row)
+            task = _task_from_row(record['task_record'])
+        elif any(record[key] is not None for key in
+                 ('task_id', 'task_lease_token', 'task_lease_version')):
+            raise VectorPublicationUnknown(generation_id, 'publication')
+        head = VectorHead('published' if count else 'empty', revision,
+                          generation_id if count else None,
+                          expected_index_revision, snapshot_version)
         return VectorPublication(generation_id, head, task)
 
     def publish_complete(
@@ -181,7 +197,7 @@ class VectorGenerationService:
                 if not self.authority.imports.try_begin_committing(owner):
                     self._abandon_or_quarantine(scope, owner, generation_id)
                     raise VectorCandidateRejected(generation_id)
-                task, _ = self.authority.complete_import(
+                self.authority.complete_import(
                     scope, owner, generation_id,
                     expected_revision=expected_head.revision,
                     expected_index_revision=expected_head.index_revision or 1,
@@ -192,7 +208,6 @@ class VectorGenerationService:
                     expected_revision=expected_head.revision,
                     expected_index_revision=expected_head.index_revision or 1,
                     snapshot_version=snapshot_version, domain_publish=publish_domain)
-                task = None
         except VectorCandidateRejected:
             raise
         except Exception as error:
@@ -200,7 +215,7 @@ class VectorGenerationService:
                 published = self._published(
                     scope, generation_id, expected_head.revision,
                     expected_head.index_revision or 1, count, digest, owner,
-                    require_task=is_import)
+                    snapshot_version)
             except VectorPublicationUnknown:
                 raise
             except Exception:
@@ -217,9 +232,9 @@ class VectorGenerationService:
             published = self._published(
                 scope, generation_id, expected_head.revision,
                 expected_head.index_revision or 1, count, digest, owner,
-                require_task=is_import)
+                snapshot_version)
         except Exception as error:
             raise VectorPublicationUnknown(generation_id, 'publication') from error
         if published is None:
             raise VectorPublicationUnknown(generation_id, 'publication')
-        return VectorPublication(generation_id, published.head, task)
+        return published

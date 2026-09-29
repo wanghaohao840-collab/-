@@ -233,7 +233,9 @@ class PostgresVectorGenerationAuthority:
             cursor.execute("update vector_generations set state='retired' where generation_id=%s and state='published'",
                            (head['last_generation_id'],))
         cursor.execute("""update vector_generations set state='published',
-            published_at=clock_timestamp() where generation_id=%s""", (generation_id,))
+            publication_revision=%s,publication_snapshot_version=%s,
+            published_at=clock_timestamp() where generation_id=%s""",
+            (revision, snapshot_version, generation_id))
         self._owner(cursor, authority, scope)
         return revision
 
@@ -286,3 +288,29 @@ class PostgresVectorGenerationAuthority:
                     'content_digest': row['content_digest'],
                     'is_head': row['last_generation_id'] == generation_id,
                     'head_revision': row['head_revision']}
+
+    def publication_receipt(self, scope, generation_id):
+        """One PG snapshot of immutable publication and exact import completion."""
+        if not isinstance(generation_id, UUID):
+            raise ValueError('generation_id must be UUID')
+        with self.database.transaction() as cursor:
+            return cursor.execute('''select g.state,g.base_revision,g.index_revision,
+                g.publication_revision,g.publication_snapshot_version,g.published_at,
+                g.expected_count,g.content_digest,g.owner,g.user_lease_token,
+                g.user_lease_version,g.task_id,g.task_lease_token,g.task_lease_version,
+                to_jsonb(t) as task_record,t.status as task_status,
+                t.claimed_by as task_owner,t.lease_token as current_task_token,
+                t.lease_version as current_task_version,
+                t.user_lease_token as task_user_token,
+                t.user_lease_version as task_user_version,
+                a.ended_at as attempt_ended_at,a.end_reason as attempt_end_reason,
+                a.worker_id as attempt_owner,a.lease_token as audit_task_token,
+                a.user_lease_token as audit_user_token,
+                a.user_lease_version as audit_user_version
+                from vector_generations g
+                left join import_tasks t on t.id=g.task_id and t.user_id=g.tenant_id
+                left join import_task_attempts a on a.task_id=g.task_id
+                    and a.user_id=g.tenant_id and a.lease_version=g.task_lease_version
+                where g.generation_id=%s and g.tenant_id=%s and g.vector_kind=%s
+                    and g.namespace=%s and g.index_key=%s''',
+                (generation_id, *scope.key)).fetchone()
