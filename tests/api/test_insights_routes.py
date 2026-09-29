@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from uuid import uuid4
+from io import BytesIO
+
+from docx import Document
 
 from fastapi.testclient import TestClient
 
@@ -57,6 +60,15 @@ def test_overview_stats_reports_and_user_isolation(tmp_path):
         assert download.status_code == 200
         assert download.headers["cache-control"] == "no-store"
         assert "zhiyan-learning-report" in download.headers["content-disposition"]
+        assert download.content == created.json()["content"].encode("utf-8")
+        assert download.headers["content-type"].startswith("text/markdown")
+        word = client.get(f"/api/v1/insights/reports/{report_id}/download?format=docx")
+        assert word.status_code == 200
+        assert word.headers["cache-control"] == "no-store"
+        assert word.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        assert "不推断阅读时长" in "\n".join(p.text for p in Document(BytesIO(word.content)).paragraphs)
+        assert len(client.get("/api/v1/insights/reports").json()) == 1
+        assert client.get(f"/api/v1/insights/reports/{report_id}/download?format=pdf").status_code == 422
 
         deleted = client.request(
             "DELETE", f"/api/v1/notes/{note.json()['id']}",
@@ -66,9 +78,12 @@ def test_overview_stats_reports_and_user_isolation(tmp_path):
         after_delete = client.get("/api/v1/insights/stats").json()
         assert after_delete["note_count"] == 0
         assert sum(day["notes"] for day in after_delete["activity"]) == 0
+        assert client.get(f"/api/v1/insights/reports/{report_id}/download").content == download.content
 
         register(client, "bob")
         assert client.get(f"/api/v1/insights/reports/{report_id}").status_code == 404
+        assert client.get(f"/api/v1/insights/reports/{report_id}/download?format=md").status_code == 404
+        assert client.get(f"/api/v1/insights/reports/{report_id}/download?format=docx").status_code == 404
         assert client.get("/api/v1/insights/reports").json() == []
         assert client.get("/api/v1/insights/stats").json()["note_count"] == 0
 
@@ -77,6 +92,7 @@ def test_insight_window_is_bounded_and_auth_is_required(tmp_path):
     services = ApplicationServices.create(tmp_path / "data")
     with TestClient(create_api_app(services), raise_server_exceptions=False) as client:
         assert client.get("/api/v1/overview").status_code == 401
+        assert client.get(f"/api/v1/insights/reports/{uuid4()}/download").status_code == 401
         register(client, "alice")
         assert client.get("/api/v1/insights/stats?days=6").status_code == 422
         assert client.get("/api/v1/insights/stats?days=91").status_code == 422

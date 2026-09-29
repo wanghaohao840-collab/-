@@ -70,6 +70,9 @@ class ReportService:
         ]
 
     def read_report(self, user_id: str, report_id: str) -> str:
+        return self.read_report_bytes(user_id, report_id).decode("utf-8")
+
+    def read_report_bytes(self, user_id: str, report_id: str) -> bytes:
         with transaction(self.db_path) as conn:
             row = conn.execute(
                 "select relative_path from report_records where user_id = ? and id = ?",
@@ -81,7 +84,7 @@ class ReportService:
             user_id,
             self.storage.user_paths(user_id).root / row["relative_path"],
         )
-        return path.read_text(encoding="utf-8")
+        return path.read_bytes()
 
     def report_file_path(self, user_id: str, report_id: str) -> Path:
         with transaction(self.db_path) as conn:

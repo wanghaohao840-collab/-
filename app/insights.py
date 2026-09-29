@@ -4,6 +4,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from app.report_docx import render_report_docx
+
 
 def _utc(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -117,3 +119,12 @@ class InsightsService:
         if format == "docx":
             return Path(session.assistant.export_report_docx(report_id=report_id))
         raise ValueError("format")
+
+    def download_bytes(self, token: str, report_id: str, format: str) -> bytes:
+        session = self.sessions.get_session(token)
+        if format not in ("md", "docx"):
+            raise ValueError("format")
+        content = session.runtime.reports.read_report_bytes(session.user_id, report_id)
+        if format == "md":
+            return content
+        return render_report_docx(content.decode("utf-8"), session.user_id)

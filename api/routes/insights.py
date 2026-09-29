@@ -4,7 +4,6 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from fastapi.responses import FileResponse
 
 from api.dependencies import get_csrf_validated_session, get_current_session, get_session_token
 from api.errors import error_response
@@ -84,13 +83,13 @@ def download_report(
     format: Literal["md", "docx"] = "md",
 ):
     try:
-        path = service(request).download_path(get_session_token(request), str(report_id), format)
-        if not path.is_file():
-            raise FileNotFoundError(str(report_id))
+        content = service(request).download_bytes(get_session_token(request), str(report_id), format)
     except FileNotFoundError:
         return error_response(404, "REPORT_NOT_FOUND", "学习报告不存在")
     media = "text/markdown; charset=utf-8" if format == "md" else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    return FileResponse(
-        path, filename=f"zhiyan-learning-report-{report_id}.{format}",
-        media_type=media, headers={"Cache-Control": "no-store"},
+    return Response(
+        content=content, media_type=media, headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="zhiyan-learning-report-{report_id}.{format}"',
+        },
     )
