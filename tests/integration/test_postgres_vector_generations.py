@@ -312,6 +312,10 @@ def test_import_task_expiry_after_head_lock_wait_rejects_publication(setup):
     attempt = import_attempt(first, owner, lease_seconds=3)
     replacement = authority.stage(scope, attempt, expected_revision=1)
     authority.seal(scope, attempt, replacement, expected_count=1, content_digest=DIGEST)
+    coordinator = PostgresUserMutationCoordinator(first)
+    renewed_user = coordinator.heartbeat(attempt.user_lease, lease_seconds=30)
+    assert (renewed_user.lease_token, renewed_user.lease_version) == (
+        attempt.user_lease.lease_token, attempt.user_lease.lease_version)
     app_name = 'vector_import_wait_' + uuid4().hex
     waiter_db = PostgresDatabase(url.replace('postgresql+psycopg://', 'postgresql://')
                                  + '&application_name=' + app_name, min_size=1, max_size=1)
@@ -340,12 +344,19 @@ def test_import_task_expiry_after_head_lock_wait_rejects_publication(setup):
     assert authority.read_head(scope).generation_id == original
     assert authority.reconcile(scope, replacement)['state'] == 'sealed'
     with first.transaction() as cursor:
-        task = cursor.execute('select status,stage from import_tasks where id=%s',
+        cursor.execute('begin')
+        coordinator.require_live_in_transaction(cursor, attempt.user_lease)
+        task = cursor.execute('''select status,stage,
+            lease_expires_at<=clock_timestamp() as expired
+            from import_tasks where id=%s''',
                               (attempt.task.task_id,)).fetchone()
         audit = cursor.execute('select ended_at from import_task_attempts where task_id=%s',
                                (attempt.task.task_id,)).fetchone()
-    assert task == {'status': 'running', 'stage': 'committing'}
+        user_live = cursor.execute('''select lease_expires_at>clock_timestamp() as live
+            from user_mutation_leases where user_id=%s''', (owner,)).fetchone()
+    assert (task['status'], task['stage']) == ('running', 'committing')
     assert audit['ended_at'] is None
+    assert task['expired'] and user_live['live']
 
 
 def test_expired_user_lease_rejects_seal_and_disabled_user_rejects_stage(setup):
