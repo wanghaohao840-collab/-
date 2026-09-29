@@ -638,7 +638,7 @@ class RAGPipeline:
             filters=self._scope_filter(document_id=document_id),
         ):
             payload = dict(point.payload)
-            payload.setdefault("id", point.id)
+            payload["id"] = point.id
             self._validate_managed_metadata(
                 self._result_metadata(payload),
                 document_id=document_id,

@@ -45,32 +45,42 @@ def rag_setup(shared_database):
         raw.client.delete_collection(identity.physical_collection)
 
 
-def _point(runtime, document_id, marker):
+def _point(runtime, document_id, marker, *, chunk_id="same-chunk-id",
+           chunk_index=0, payload_id=None):
     text = f"{marker} shared search terms"
-    return VectorPoint("same-chunk-id", runtime.embed_documents([text])[0], {
+    payload = {
         "content": text,
         "document_id": document_id,
         "rag_namespace": "documents",
-        "chunk_index": 0,
+        "chunk_index": chunk_index,
         "metadata": {
             "embedding_fingerprint": runtime.profile.fingerprint,
             "file_name": "sample.txt",
             "page_number": 1,
+            "id": "nested-user-metadata-id",
         },
-    })
+    }
+    if payload_id is not None:
+        payload["id"] = payload_id
+    return VectorPoint(chunk_id, runtime.embed_documents([text])[0], payload)
 
 
-def _publish(service, db, identity, user, document_id, runtime, marker, leases):
+def _publish(service, db, identity, user, document_id, runtime, marker, leases,
+             *, extra_marker=None, payload_id=None):
     scope = VectorScope(user, "rag", "documents", identity)
     lease = leases.get(user)
     if lease is None:
         lease = PostgresUserMutationCoordinator(db).acquire(user, "rag-test", lease_seconds=60)
         leases[user] = lease
     assert lease is not None
-    return service.publish_complete(
-        scope, lease, service.authority.read_head(scope),
-        [] if marker is None else [_point(runtime, document_id, marker)],
-    )
+    points = [] if marker is None else [
+        _point(runtime, document_id, marker, payload_id=payload_id),
+    ]
+    if extra_marker is not None:
+        points.append(_point(runtime, document_id, extra_marker,
+                             chunk_id="second-chunk-id", chunk_index=1))
+    return service.publish_complete(scope, lease,
+                                    service.authority.read_head(scope), points)
 
 
 def test_each_rag_operation_keeps_one_head_across_subreads(rag_setup, monkeypatch):
@@ -89,7 +99,8 @@ def test_each_rag_operation_keeps_one_head_across_subreads(rag_setup, monkeypatc
         result = original_scroll(view, *args, **kwargs)
         if view is pinned_a.view and not published_b:
             published_b.append(_publish(service, db, identity, user, document_id,
-                                        runtime, "bravo", leases))
+                                        runtime, "bravo", leases,
+                                        extra_marker="bravo second"))
         return result
 
     monkeypatch.setattr(GenerationVectorStore, "scroll", swap_after_scroll)
@@ -100,6 +111,7 @@ def test_each_rag_operation_keeps_one_head_across_subreads(rag_setup, monkeypatc
     monkeypatch.setattr(GenerationVectorStore, "scroll", original_scroll)
 
     pinned_b = factory.open_operation(user, "documents")
+    assert pinned_b.stats()["chunk_count"] == 2
     original_search = GenerationVectorStore.search
     published_c = []
 
@@ -113,7 +125,7 @@ def test_each_rag_operation_keeps_one_head_across_subreads(rag_setup, monkeypatc
     monkeypatch.setattr(GenerationVectorStore, "search", swap_after_search)
     hits = pinned_b.search("shared search terms", retrieval_mode="hybrid")
     assert hits and all(hit["content"].startswith("bravo") for hit in hits)
-    assert all(hit["id"] == "same-chunk-id" for hit in hits)
+    assert {hit["id"] for hit in hits} == {"same-chunk-id", "second-chunk-id"}
     monkeypatch.setattr(GenerationVectorStore, "search", original_search)
 
     pinned_c = factory.open_operation(user, "documents")
@@ -140,13 +152,20 @@ def test_each_rag_operation_keeps_one_head_across_subreads(rag_setup, monkeypatc
 def test_empty_tenant_scope_and_logical_identity_fail_closed(rag_setup):
     service, factory, db, raw, identity, runtime, users, document_id, leases = rag_setup
     first, second = users
-    _publish(service, db, identity, first, document_id, runtime, "first", leases)
+    _publish(service, db, identity, first, document_id, runtime, "first", leases,
+             payload_id="conflicting-payload-id")
     _publish(service, db, identity, second, document_id, runtime, "second", leases)
     first_read = factory.open_operation(first, "documents")
     second_read = factory.open_operation(second, "documents")
     assert first_read.search("shared")[0]["content"].startswith("first")
     assert second_read.search("shared")[0]["content"].startswith("second")
-    assert first_read.get_document_chunk(document_id, "same-chunk-id", 0)["id"] == "same-chunk-id"
+    assert first_read.search("shared")[0]["id"] == "same-chunk-id"
+    assert first_read.get_document_summary_context(document_id)[0]["id"] == "same-chunk-id"
+    assert first_read.get_document_chunks(document_id)[0]["id"] == "same-chunk-id"
+    assert first_read.scroll_payloads()[0]["id"] == "same-chunk-id"
+    chunk = first_read.get_document_chunk(document_id, "same-chunk-id", 0)
+    assert chunk["id"] == "same-chunk-id"
+    assert chunk["metadata"]["id"] == "nested-user-metadata-id"
     assert first_read.list_document_ids() == [document_id]
     assert raw.count(identity.physical_collection) == 2
     assert all(not key.startswith("_gv_") for key in first_read.scroll_payloads()[0])
