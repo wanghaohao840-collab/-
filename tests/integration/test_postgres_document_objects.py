@@ -56,7 +56,7 @@ def test_history_and_reference_commit_or_roll_back_together(documents):
     with db.transaction() as cursor:
         repo.publish_in_transaction(cursor, verified)
     forged = VerifiedDocumentRef(user, doc, store.bucket, verified.ref)
-    with pytest.raises(DocumentPublicationError, match='not verified'):
+    with pytest.raises(DocumentPublicationError, match='verification'):
         with db.transaction() as cursor:
             repo.publish_in_transaction(cursor, forged)
     changed = _stage(repo, store, user, doc, b'replacement bytes')
@@ -90,6 +90,30 @@ def test_changed_latest_history_record_blocks_stale_reference(documents):
     snapshots.compare_and_swap(user, 'history', replacement, expected_version=1)
     with pytest.raises(DocumentPublicationError, match='History changed'):
         repo.read_document_bytes(user, doc)
+
+
+@pytest.mark.parametrize('mutation', ('nested_version', 'substitute_ref'))
+def test_verified_token_mutation_rolls_back_history_and_reference(documents, mutation):
+    repo, snapshots, (user, _), db, store = documents
+    doc = str(uuid4())
+    verified = _stage(repo, store, user, doc)
+    if mutation == 'nested_version':
+        later = store.client.put_object(Bucket=store.bucket, Key=verified.ref.key,
+                                        Body=b'original bytes')
+        verified.ref.__dict__['version_id'] = later['VersionId']
+    else:
+        raw = b'other valid bytes'
+        key = artifact_key(user, 'documents', doc, '.pdf', hashlib.sha256(raw).hexdigest())
+        unverified = store.put_immutable(user, key, raw).ref
+        verified.__dict__['ref'] = unverified
+    with pytest.raises(DocumentPublicationError, match='verification'):
+        with db.transaction() as cursor:
+            snapshots.compare_and_swap_in_transaction(cursor, user, 'history',
+                                                      _history(user, doc), expected_version=0)
+            repo.publish_in_transaction(cursor, verified)
+    assert snapshots.read(user, 'history') is None
+    with db.transaction() as cursor:
+        assert cursor.execute('select count(*) as n from document_objects').fetchone()['n'] == 0
 
 
 def test_pinned_version_cross_tenant_and_integrity(documents):

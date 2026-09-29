@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from weakref import WeakSet
+from weakref import WeakKeyDictionary
 from psycopg.pq import TransactionStatus
 
 from app.object_store import ObjectRef, S3ObjectStore, artifact_key
@@ -40,16 +40,25 @@ class PostgresDocumentObjectRepository:
     def __init__(self, database: PostgresDatabase, store: S3ObjectStore):
         self.database = database
         self.store = store
-        self._verified: WeakSet[VerifiedDocumentRef] = WeakSet()
+        # Values are copied scalars, independent of the caller's mutable
+        # dataclass dictionaries. Weak keys do not retain abandoned tokens.
+        self._verified: WeakKeyDictionary[VerifiedDocumentRef, tuple] = WeakKeyDictionary()
 
     def verify_for_publication(self, user_id: str, document_id: str,
                                ref: ObjectRef) -> VerifiedDocumentRef:
         """Verify exact retained bytes before entering the short PG transaction."""
-        _identity(user_id, document_id, ref)
-        self.store.read_verified(user_id, ref)
-        verified = VerifiedDocumentRef(user_id, document_id, self.store.bucket, ref)
-        self._verified.add(verified)
+        retained = ObjectRef(ref.key, ref.sha256, ref.size_bytes, ref.version_id)
+        _identity(user_id, document_id, retained)
+        self.store.read_verified(user_id, retained)
+        verified = VerifiedDocumentRef(user_id, document_id, self.store.bucket, retained)
+        self._verified[verified] = self._issuance_values(verified)
         return verified
+
+    @staticmethod
+    def _issuance_values(token: VerifiedDocumentRef) -> tuple:
+        ref = token.ref
+        return (token.user_id, token.document_id, token.bucket,
+                ref.key, ref.version_id, ref.sha256, ref.size_bytes)
 
     def publish_in_transaction(self, cursor, verified: VerifiedDocumentRef) -> None:
         """Insert once in the same transaction that makes History visible.
@@ -60,8 +69,14 @@ class PostgresDocumentObjectRepository:
         if (cursor.connection.autocommit
                 and cursor.connection.info.transaction_status != TransactionStatus.INTRANS):
             raise ValueError('Caller-owned transaction required')
-        if verified not in self._verified:
-            raise DocumentPublicationError('Document reference was not verified by this repository')
+        issued = self._verified.get(verified)
+        if issued is None or issued != self._issuance_values(verified):
+            raise DocumentPublicationError('Document reference differs from verification')
+        # Use the repository's independent copy for every subsequent check
+        # and SQL argument, even if a caller mutates the token concurrently.
+        user_id, document_id, bucket, key, version_id, sha256, size_bytes = issued
+        verified = VerifiedDocumentRef(
+            user_id, document_id, bucket, ObjectRef(key, sha256, size_bytes, version_id))
         if verified.bucket != self.store.bucket:
             raise DocumentPublicationError('Document object bucket differs from configured storage')
         _identity(verified.user_id, verified.document_id, verified.ref)
