@@ -82,10 +82,14 @@ class _SearchDocuments:
     def list_documents(self, token: str) -> tuple[DocumentLibraryItem, ...]:
         user_id = self._sessions.get(token).user_id
         try:
-            snapshot = self._snapshots.read(user_id, "history")
-            records = snapshot.data.get("documents", []) if snapshot else []
-            projected = self._projection.project_history_documents(user_id, records)
             with self._snapshots.database.transaction() as cursor:
+                # History removal precedes fence completion. Both reads must
+                # observe one commit boundary, including during a final scope
+                # recheck that races the deleting worker.
+                cursor.execute("set transaction isolation level repeatable read read only")
+                snapshot = self._snapshots._read(cursor, user_id, "history")
+                records = snapshot.data.get("documents", []) if snapshot else []
+                projected = self._projection.project_history_documents(user_id, records)
                 fenced = {row["target_id"] for row in cursor.execute(
                     "select target_id from qa_deletion_fences "
                     "where user_id=%s and target_type='document' and "

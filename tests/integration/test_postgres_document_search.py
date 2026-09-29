@@ -8,7 +8,8 @@ from uuid import uuid4
 import pytest
 
 from app.document_search import (
-    DocumentSearchRequest, DocumentSearchScopeError, DocumentSearchSourceStaleError,
+    DocumentSearchRequest, DocumentSearchScopeChangedError, DocumentSearchScopeError,
+    DocumentSearchSourceStaleError,
 )
 from app.history import EMPTY_HISTORY
 from app.postgres_document_search import create_postgres_document_search
@@ -123,3 +124,62 @@ def test_two_bridges_authenticate_scope_fence_and_resolve_published_source(
     PostgresSessionRepository(db_a).delete(owner_session.token)
     with pytest.raises(InvalidSessionError):
         bridge_b.search(owner_session.token, request)
+
+
+@pytest.mark.parametrize("operation", ("search", "resolve"))
+def test_final_scope_check_cannot_join_old_history_to_completed_fence(
+    rag_setup, shared_database, monkeypatch, operation,
+):
+    service, factory, db_reader, _, identity, runtime, users, document_id, leases = rag_setup
+    owner = users[0]
+    db_writer = shared_database[0]()
+    snapshots = PostgresSnapshotRepository(db_reader)
+    snapshots.compare_and_swap(owner, "history", _history(document_id, owner), expected_version=0)
+    _publish(service, db_reader, identity, owner, document_id, runtime, "deleted", leases)
+    token = PostgresSessionRepository(db_reader).create(owner).token
+    bridge = create_postgres_document_search(
+        PostgresSessionRepository(db_reader), snapshots, factory,
+    )
+    request = DocumentSearchRequest("shared search terms", (document_id,))
+    locator = bridge.search(token, request).results[0].locator
+    fence_id = str(uuid4())
+    real_execute = bridge._execute
+
+    def fence_during_backend(session, action, **kwargs):
+        with db_writer.transaction() as cursor:
+            cursor.execute("""insert into qa_deletion_fences
+                (id,user_id,target_type,target_id,status,stage,created_at,updated_at)
+                values (%s,%s,'document',%s,'queued','fenced','now','now')""",
+                (fence_id, owner, document_id))
+        return real_execute(session, action, **kwargs)
+
+    monkeypatch.setattr(bridge, "_execute", fence_during_backend)
+    projector = bridge.documents._projection
+    real_project = projector.project_history_documents
+    calls = []
+
+    def delete_after_history_read(user_id, records):
+        calls.append(1)
+        if len(calls) == 2:
+            with db_writer.transaction() as cursor:
+                PostgresSnapshotRepository(db_writer).compare_and_swap_in_transaction(
+                    cursor, owner, "history", _history(document_id, owner)
+                    | {"documents": []}, expected_version=1,
+                )
+                assert cursor.execute("""select status from qa_deletion_fences
+                    where id=%s""", (fence_id,)).fetchone()["status"] == "queued"
+                cursor.execute("""update qa_deletion_fences set status='completed',
+                    stage='completed' where id=%s""", (fence_id,))
+        return real_project(user_id, records)
+
+    monkeypatch.setattr(projector, "project_history_documents", delete_after_history_read)
+    with pytest.raises(DocumentSearchScopeChangedError):
+        if operation == "search":
+            bridge.search(token, request)
+        else:
+            bridge.resolve_chunk(token, locator)
+    assert len(calls) == 2
+    assert PostgresSnapshotRepository(db_writer).read(owner, "history").data["documents"] == []
+    with db_writer.transaction() as cursor:
+        assert cursor.execute("select status from qa_deletion_fences where id=%s",
+                              (fence_id,)).fetchone()["status"] == "completed"
