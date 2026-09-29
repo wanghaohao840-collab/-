@@ -25,6 +25,7 @@ def upgrade():
             and publication_snapshot_version is null
             and published_at is null)
           or (state in ('published','retired')
+            and publication_revision is not null
             and publication_revision=coalesce(base_revision,0)+1
             and published_at is not null
             and (publication_snapshot_version is null

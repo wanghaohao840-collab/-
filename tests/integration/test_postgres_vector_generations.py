@@ -8,6 +8,8 @@ import time
 from uuid import uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from psycopg import errors as pgerrors
 
 from app.import_models import ImportTaskCreate
@@ -121,6 +123,108 @@ def test_missing_staged_published_empty_and_reconciliation(setup):
     authority.seal(scope, handle, after_empty, expected_count=1, content_digest=DIGEST)
     authority.publish_user(scope, handle, after_empty, expected_revision=2)
     assert observer.reconcile(scope, empty)['state'] == 'retired'
+
+
+def test_legacy_publish_without_receipt_rolls_back_head_and_generation(setup):
+    first, _, owner, _, scope, _ = setup
+    authority = PostgresVectorGenerationAuthority(first)
+    handle = lease(first, owner)
+    generation = authority.stage(scope, handle, expected_revision=None)
+    authority.seal(scope, handle, generation, expected_count=1, content_digest=DIGEST)
+
+    # This is the pre-011 writer's complete first-publication transaction.
+    # The deferred head guard is satisfied, so only the receipt constraint
+    # can reject the missing revision at the database boundary.
+    with pytest.raises(pgerrors.CheckViolation, match='vector_publication_receipt_state'):
+        with first.transaction() as cursor:
+            cursor.execute('''insert into vector_heads
+                (tenant_id,vector_kind,namespace,index_key,revision,generation_id,
+                 last_generation_id,index_revision,snapshot_version)
+                select tenant_id,vector_kind,namespace,index_key,1,generation_id,
+                    generation_id,index_revision,null
+                from vector_generations where generation_id=%s''', (generation,))
+            cursor.execute('''update vector_generations
+                set state='published',published_at=clock_timestamp()
+                where generation_id=%s''', (generation,))
+
+    assert authority.read_head(scope).state == 'missing'
+    assert authority.reconcile(scope, generation)['state'] == 'sealed'
+
+
+@pytest.mark.parametrize('shared_database', ['20260929_10'], indirect=True)
+def test_receipt_migration_upgrades_unpublished_candidate(shared_database):
+    open_pool, _ = shared_database
+    first = open_pool()
+    owner = str(uuid4())
+    with first.transaction() as cursor:
+        cursor.execute('insert into users values (%s,%s,%s,%s,%s,%s,%s)',
+                       (owner, owner, owner, 'hash', 'active', 'now', 'now'))
+    identity = IndexIdentity('qdrant', 'docs',
+                             EmbeddingProfile('simple', '', 'SimpleEmbedding', 'v1', 4))
+    scope = VectorScope(owner, 'rag', 'documents', identity)
+    authority = PostgresVectorGenerationAuthority(first)
+    generation = authority.stage(scope, lease(first, owner), expected_revision=None)
+    command.upgrade(Config('alembic.ini'), 'head')
+    with first.transaction() as cursor:
+        row = cursor.execute('''select state,publication_revision,
+            publication_snapshot_version from vector_generations
+            where generation_id=%s''', (generation,)).fetchone()
+        version = cursor.execute('select version_num from alembic_version').fetchone()['version_num']
+    assert row == {'state': 'staging', 'publication_revision': None,
+                   'publication_snapshot_version': None}
+    assert version == '20260929_11'
+
+
+@pytest.mark.parametrize('historical_state', ['published', 'retired'])
+@pytest.mark.parametrize('shared_database', ['20260929_10'], indirect=True)
+def test_receipt_migration_rejects_existing_publication(shared_database, historical_state):
+    open_pool, _ = shared_database
+    first = open_pool()
+    owner = str(uuid4())
+    with first.transaction() as cursor:
+        cursor.execute('insert into users values (%s,%s,%s,%s,%s,%s,%s)',
+                       (owner, owner, owner, 'hash', 'active', 'now', 'now'))
+    identity = IndexIdentity('qdrant', 'docs',
+                             EmbeddingProfile('simple', '', 'SimpleEmbedding', 'v1', 4))
+    scope = VectorScope(owner, 'rag', 'documents', identity)
+    authority = PostgresVectorGenerationAuthority(first)
+    handle = lease(first, owner)
+    old = authority.stage(scope, handle, expected_revision=None)
+    authority.seal(scope, handle, old, expected_count=1, content_digest=DIGEST)
+    with first.transaction() as cursor:
+        cursor.execute('''insert into vector_heads
+            (tenant_id,vector_kind,namespace,index_key,revision,generation_id,
+             last_generation_id,index_revision,snapshot_version)
+            select tenant_id,vector_kind,namespace,index_key,1,generation_id,
+                generation_id,index_revision,null from vector_generations
+            where generation_id=%s''', (old,))
+        cursor.execute('''update vector_generations
+            set state='published',published_at=clock_timestamp()
+            where generation_id=%s''', (old,))
+    if historical_state == 'retired':
+        new = authority.stage(scope, handle, expected_revision=1)
+        authority.seal(scope, handle, new, expected_count=1, content_digest=DIGEST)
+        with first.transaction() as cursor:
+            cursor.execute('''update vector_heads set revision=2,generation_id=%s,
+                last_generation_id=%s,updated_at=clock_timestamp()
+                where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''',
+                (new, new, *scope.key))
+            cursor.execute("update vector_generations set state='retired' where generation_id=%s", (old,))
+            cursor.execute('''update vector_generations
+                set state='published',published_at=clock_timestamp()
+                where generation_id=%s''', (new,))
+    with pytest.raises(Exception, match='existing vector publications require an explicit receipt migration'):
+        command.upgrade(Config('alembic.ini'), 'head')
+    with first.transaction() as cursor:
+        version = cursor.execute('select version_num from alembic_version').fetchone()['version_num']
+        columns = cursor.execute('''select column_name from information_schema.columns
+            where table_schema=current_schema() and table_name='vector_generations'
+            and column_name='publication_revision' ''').fetchall()
+        state = cursor.execute('select state from vector_generations where generation_id=%s',
+                               (old,)).fetchone()['state']
+    assert version == '20260929_10'
+    assert columns == []
+    assert state == historical_state
 
 
 def test_scope_fingerprint_cas_abandon_and_no_reuse(setup):
