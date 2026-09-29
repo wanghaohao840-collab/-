@@ -1,0 +1,274 @@
+"""PostgreSQL authority for whole-corpus immutable vector generations.
+
+No vector I/O occurs here. This is a foundation: readers and writers must use a
+generation-aware storage adapter before the pointer can fence external bytes.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import re
+from uuid import UUID, uuid4
+
+from app.postgres_coordination import PostgresUserMutationCoordinator, UserMutationLease
+from app.postgres_import_leases import ImportAttempt, PostgresImportLeaseRepository
+from hello_agents.memory.rag.index_identity import IndexIdentity
+
+_DIGEST = re.compile(r"[a-f0-9]{64}\Z")
+
+
+class VectorAuthorityError(RuntimeError):
+    """The requested generation transition or scope is not authorized."""
+
+
+@dataclass(frozen=True)
+class VectorScope:
+    tenant_id: str
+    vector_kind: str
+    namespace: str
+    identity: IndexIdentity
+
+    def __post_init__(self):
+        if (not isinstance(self.tenant_id, str) or not self.tenant_id.strip()
+                or self.vector_kind not in ('rag', 'episode')
+                or not isinstance(self.namespace, str) or not self.namespace.strip()
+                or not isinstance(self.identity, IndexIdentity)
+                or self.identity.backend != 'qdrant'):
+            raise ValueError('Invalid vector scope or index identity')
+
+    @property
+    def index_key(self):
+        return hashlib.sha256(_canonical(self.identity.to_dict()).encode()).hexdigest()
+
+    @property
+    def key(self):
+        return (self.tenant_id, self.vector_kind, self.namespace, self.index_key)
+
+
+@dataclass(frozen=True)
+class VectorHead:
+    state: str  # missing, empty, or published
+    revision: int | None
+    generation_id: UUID | None
+    index_revision: int | None
+    snapshot_version: int | None
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def _check_revision(value):
+    if value is not None and (type(value) is not int or value < 1):
+        raise ValueError('Expected head revision must be positive or None')
+
+
+class PostgresVectorGenerationAuthority:
+    def __init__(self, database):
+        self.database = database
+        self.coordinator = PostgresUserMutationCoordinator(database)
+        self.imports = PostgresImportLeaseRepository(database)
+
+    def _owner(self, cursor, authority, scope):
+        self.coordinator._isolation(cursor)
+        if isinstance(authority, ImportAttempt):
+            self.imports._live(cursor, authority)
+            lease = authority.user_lease
+            task = (authority.task.task_id, authority.lease_token, authority.lease_version)
+        elif isinstance(authority, UserMutationLease):
+            self.coordinator.require_live_in_transaction(cursor, authority)
+            lease = authority
+            task = (None, None, None)
+        else:
+            raise VectorAuthorityError('A live user lease or import attempt is required')
+        if lease.user_id != scope.tenant_id:
+            raise VectorAuthorityError('Wrong tenant')
+        return lease, task
+
+    @staticmethod
+    def _index(cursor, scope, *, create=False):
+        row = cursor.execute('''select identity,index_revision from vector_indexes
+            where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''', scope.key).fetchone()
+        if row is None and create:
+            cursor.execute('''insert into vector_indexes
+                (tenant_id,vector_kind,namespace,index_key,identity)
+                values (%s,%s,%s,%s,%s::jsonb)''', (*scope.key, _canonical(scope.identity.to_dict())))
+            return 1
+        if row is None or row['identity'] != scope.identity.to_dict():
+            raise VectorAuthorityError('Missing or incompatible index identity')
+        return row['index_revision']
+
+    @staticmethod
+    def _head_row(cursor, scope, *, lock=False):
+        return cursor.execute('''select * from vector_heads where tenant_id=%s
+            and vector_kind=%s and namespace=%s and index_key=%s'''
+            + (' for update' if lock else ''), scope.key).fetchone()
+
+    def read_head(self, scope):
+        """Resolve a pinned pointer. Missing authority never means an empty corpus."""
+        with self.database.transaction() as cursor:
+            self.coordinator._isolation(cursor)
+            index = cursor.execute('''select identity,index_revision from vector_indexes
+                where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''', scope.key).fetchone()
+            if index is None:
+                return VectorHead('missing', None, None, None, None)
+            if index['identity'] != scope.identity.to_dict():
+                raise VectorAuthorityError('Incompatible index identity')
+            head = self._head_row(cursor, scope)
+            if head is None:
+                return VectorHead('missing', None, None, index['index_revision'], None)
+            if head['index_revision'] != index['index_revision']:
+                raise VectorAuthorityError('Head index revision differs')
+            generation = head['generation_id']
+            row = cursor.execute('''select state,expected_count from vector_generations where generation_id=%s
+                and tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''',
+                (head['last_generation_id'], *scope.key)).fetchone()
+            if (row is None or row['state'] != 'published'
+                    or (generation is None) != (row['expected_count'] == 0)
+                    or (generation is not None and generation != head['last_generation_id'])):
+                raise VectorAuthorityError('Published generation is invalid')
+            return VectorHead('empty' if generation is None else 'published', head['revision'],
+                              generation, head['index_revision'], head['snapshot_version'])
+
+    def stage(self, scope, authority, *, expected_revision, generation_id=None):
+        """Allocate a never-reused candidate, bound to the current complete head."""
+        _check_revision(expected_revision)
+        generation_id = uuid4() if generation_id is None else generation_id
+        if not isinstance(generation_id, UUID):
+            raise ValueError('generation_id must be UUID')
+        with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            lease, task = self._owner(cursor, authority, scope)
+            index_revision = self._index(cursor, scope, create=True)
+            head = self._head_row(cursor, scope, lock=True)
+            if (None if head is None else head['revision']) != expected_revision:
+                raise VectorAuthorityError('Head revision changed')
+            cursor.execute('''insert into vector_generations
+                (generation_id,tenant_id,vector_kind,namespace,index_key,base_revision,
+                 index_revision,owner,user_lease_token,user_lease_version,
+                 task_id,task_lease_token,task_lease_version,state)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'staging')''',
+                (generation_id, *scope.key, expected_revision, index_revision,
+                 lease.owner, lease.lease_token, lease.lease_version, *task))
+            self._owner(cursor, authority, scope)
+        return generation_id
+
+    def _candidate(self, cursor, scope, authority, generation_id, *, states):
+        lease, task = self._owner(cursor, authority, scope)
+        row = cursor.execute('''select * from vector_generations where generation_id=%s
+            and tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s
+            for update''', (generation_id, *scope.key)).fetchone()
+        if (row is None or row['state'] not in states or row['owner'] != lease.owner
+                or row['user_lease_token'] != lease.lease_token
+                or row['user_lease_version'] != lease.lease_version
+                or (row['task_id'], row['task_lease_token'], row['task_lease_version']) != task):
+            raise VectorAuthorityError('Candidate ownership or state changed')
+        self._owner(cursor, authority, scope)  # fresh clock after candidate lock
+        return row
+
+    def seal(self, scope, authority, generation_id, *, expected_count, content_digest):
+        if (type(expected_count) is not int or expected_count < 0
+                or not isinstance(content_digest, str) or not _DIGEST.fullmatch(content_digest)):
+            raise ValueError('Verified count and SHA-256 digest are required')
+        with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            self._candidate(cursor, scope, authority, generation_id, states=('staging',))
+            cursor.execute('''update vector_generations set state='sealed', expected_count=%s,
+                content_digest=%s,sealed_at=clock_timestamp() where generation_id=%s''',
+                (expected_count, content_digest, generation_id))
+            self._owner(cursor, authority, scope)
+
+    def abandon(self, scope, authority, generation_id):
+        """Permanently revoke a candidate after failed or ambiguous external I/O."""
+        with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            self._candidate(cursor, scope, authority, generation_id, states=('staging', 'sealed'))
+            cursor.execute("""update vector_generations set state='abandoned',
+                abandoned_at=clock_timestamp() where generation_id=%s""", (generation_id,))
+            self._owner(cursor, authority, scope)
+
+    def _publish(self, cursor, scope, authority, generation_id, *, expected_revision,
+                 expected_index_revision, snapshot_version):
+        _check_revision(expected_revision)
+        if type(expected_index_revision) is not int or expected_index_revision < 1:
+            raise ValueError('Expected index revision is required')
+        if snapshot_version is not None and (type(snapshot_version) is not int or snapshot_version < 0):
+            raise ValueError('Invalid snapshot version')
+        self._owner(cursor, authority, scope)
+        index_revision = self._index(cursor, scope)
+        if index_revision != expected_index_revision:
+            raise VectorAuthorityError('Index revision changed')
+        head = self._head_row(cursor, scope, lock=True)
+        if (None if head is None else head['revision']) != expected_revision:
+            raise VectorAuthorityError('Head revision changed')
+        candidate = self._candidate(cursor, scope, authority, generation_id, states=('sealed',))
+        if (candidate['base_revision'] != expected_revision
+                or candidate['index_revision'] != expected_index_revision):
+            raise VectorAuthorityError('Candidate base/index revision changed')
+        # The zero-point corpus has an explicit head row but no visible generation.
+        new_generation = None if candidate['expected_count'] == 0 else generation_id
+        revision = 1 if expected_revision is None else expected_revision + 1
+        if head is None:
+            cursor.execute('''insert into vector_heads
+                (tenant_id,vector_kind,namespace,index_key,revision,generation_id,
+                 last_generation_id,index_revision,snapshot_version)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                (*scope.key, revision, new_generation, generation_id, index_revision, snapshot_version))
+        else:
+            cursor.execute('''update vector_heads set revision=%s,generation_id=%s,
+                last_generation_id=%s,index_revision=%s,snapshot_version=%s,
+                updated_at=clock_timestamp()
+                where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''',
+                (revision, new_generation, generation_id, index_revision, snapshot_version, *scope.key))
+            cursor.execute("update vector_generations set state='retired' where generation_id=%s and state='published'",
+                           (head['last_generation_id'],))
+        cursor.execute("""update vector_generations set state='published',
+            published_at=clock_timestamp() where generation_id=%s""", (generation_id,))
+        self._owner(cursor, authority, scope)
+        return revision
+
+    def publish_user(self, scope, lease, generation_id, *, expected_revision,
+                     expected_index_revision=1, snapshot_version=None, domain_publish=None):
+        """Publish a synchronous mutation under the user lease in one transaction."""
+        if not isinstance(lease, UserMutationLease):
+            raise VectorAuthorityError('Direct publication requires a user lease')
+        with self.coordinator.publication(lease) as cursor:
+            revision = self._publish(cursor, scope, lease, generation_id,
+                expected_revision=expected_revision, expected_index_revision=expected_index_revision,
+                snapshot_version=snapshot_version)
+            if domain_publish is not None:
+                domain_publish(cursor)
+            self._owner(cursor, lease, scope)
+            return revision
+
+    def complete_import(self, scope, attempt, generation_id, *, expected_revision,
+                        expected_index_revision=1, snapshot_version=None, domain_publish=None):
+        """Publish only through import completion's caller-owned PG transaction."""
+        if not isinstance(attempt, ImportAttempt):
+            raise VectorAuthorityError('Import publication requires an attempt')
+        result = []
+        def publish(cursor):
+            result.append(self._publish(cursor, scope, attempt, generation_id,
+                expected_revision=expected_revision, expected_index_revision=expected_index_revision,
+                snapshot_version=snapshot_version))
+            if domain_publish is not None:
+                domain_publish(cursor)
+        task = self.imports.complete(attempt, publish)
+        return task, result[0]
+
+    def reconcile(self, scope, generation_id):
+        """Read durable outcome after an ambiguous PG commit response; never replay."""
+        if not isinstance(generation_id, UUID):
+            raise ValueError('generation_id must be UUID')
+        with self.database.transaction() as cursor:
+            row = cursor.execute('''select state,expected_count,content_digest from vector_generations
+                where generation_id=%s and tenant_id=%s and vector_kind=%s
+                and namespace=%s and index_key=%s''', (generation_id, *scope.key)).fetchone()
+            if row is None:
+                return None
+            head = self._head_row(cursor, scope)
+            return {'state': row['state'], 'expected_count': row['expected_count'],
+                    'content_digest': row['content_digest'],
+                    'is_head': head is not None and head['last_generation_id'] == generation_id,
+                    'head_revision': None if head is None else head['revision']}
