@@ -223,14 +223,27 @@ class GenerationVectorStore:
 
     def scroll(self, collection_name: str, filters: VectorFilter | None = None,
                with_vectors: bool = False,
-               payload_fields: list[str] | None = None) -> list[VectorPoint]:
+               payload_fields: list[str] | None = None, *,
+               expected_manifest: tuple[int, str] | None = None) -> list[VectorPoint]:
+        """Optionally verify the full pinned manifest in this same bounded scan.
+
+        The digest authenticates point membership, public payload and each
+        declared vector digest. It cannot detect out-of-band vector writes that
+        leave the stored digest untouched.
+        """
         self._collection(collection_name)
+        if expected_manifest is not None and filters is not None:
+            raise GenerationVectorStoreError("Manifest requires a full corpus scan")
         effective = self._filters(filters)
         if self.head.state == "empty":
+            if expected_manifest is not None and expected_manifest != (
+                    0, hashlib.sha256(_canonical([]).encode()).hexdigest()):
+                raise GenerationVectorStoreError("Published vector manifest differs")
             return []
-        fields = True if payload_fields is None else list(dict.fromkeys(
+        fields = True if expected_manifest is not None or payload_fields is None else list(dict.fromkeys(
             [*payload_fields, *_RESERVED]))
         result = []
+        manifest_rows = []
         offset = None
         seen_offsets = set()
         seen_points = set()
@@ -250,11 +263,23 @@ class GenerationVectorStore:
                 seen_points.add(physical)
                 logical_id, payload = self._record(
                     physical, getattr(point, "payload", None), physical)
+                if expected_manifest is not None:
+                    declared = point.payload.get(_VECTOR_DIGEST)
+                    if (not isinstance(declared, str) or len(declared) != 64
+                            or any(char not in '0123456789abcdef' for char in declared)):
+                        raise GenerationVectorStoreError("Published vector digest is invalid")
+                    manifest_rows.append([logical_id, payload.copy(), declared])
                 if payload_fields is not None:
                     payload = {field: payload[field] for field in payload_fields if field in payload}
                 vector = getattr(point, "vector", None) if with_vectors else []
                 result.append(VectorPoint(logical_id, list(vector or []), payload))
             if next_offset is None:
+                if expected_manifest is not None:
+                    expected_count, expected_digest = expected_manifest
+                    digest = hashlib.sha256(_canonical(sorted(manifest_rows,
+                        key=lambda item: item[0])).encode()).hexdigest()
+                    if len(result) != expected_count or digest != expected_digest:
+                        raise GenerationVectorStoreError("Published vector manifest differs")
                 return result
             native = native_point_id(next_offset)
             key = cursor_key(native)

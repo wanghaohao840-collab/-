@@ -1,3 +1,4 @@
+import hashlib
 import os
 from uuid import uuid4
 from types import SimpleNamespace
@@ -74,6 +75,30 @@ def test_generation_isolates_tenants_and_pinned_heads(corpus):
     assert page.records[0].payload == {"marker": "new"}
     assert [record.logical_id for p in new.iter_scroll_pages(collection, page_size=1)
             for record in p.records] == ["same-logical-id"]
+
+
+def test_manifest_verification_preserves_projection_and_checks_empty_head(corpus):
+    raw, identity = corpus
+    current_scope = scope(identity)
+    generation = uuid4()
+    writer = CandidateGenerationWriter(raw, current_scope, generation,
+                                       lambda _s, _g: "staging")
+    writer.upload([VectorPoint("one", [1., 0., 0., 0.],
+                               {"marker": "one", "extra": "included in digest"})])
+    manifest = writer.verify()
+    view = GenerationVectorStore(raw, current_scope,
+        VectorHead("published", 1, generation, 1, None))
+    assert view.scroll(identity.physical_collection, payload_fields=["marker"],
+                       expected_manifest=manifest) == [VectorPoint("one", [], {"marker": "one"})]
+    with pytest.raises(GenerationVectorStoreError, match="full corpus"):
+        view.scroll(identity.physical_collection, filters={"marker": "one"},
+                    expected_manifest=manifest)
+    empty = GenerationVectorStore(raw, current_scope,
+        VectorHead("empty", 2, None, 1, None))
+    empty_manifest = 0, hashlib.sha256(b'[]').hexdigest()
+    assert empty.scroll(identity.physical_collection, expected_manifest=empty_manifest) == []
+    with pytest.raises(GenerationVectorStoreError, match="manifest"):
+        empty.scroll(identity.physical_collection, expected_manifest=manifest)
 
 
 def test_pinned_view_rejects_rebinding_between_subreads(corpus):
