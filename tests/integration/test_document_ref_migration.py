@@ -10,14 +10,19 @@ import psycopg
 import pytest
 from alembic import command
 from alembic.config import Config
+from botocore.exceptions import ClientError
 from psycopg.conninfo import make_conninfo
 
 from app.postgres import PostgresDatabase
 from app.postgres_document_objects import PostgresDocumentObjectRepository
+from app.postgres_reports import PostgresReportService
+
+import deploy.migrate_document_refs_isolated as document_migration
 from deploy.migrate_document_refs_isolated import migrate_document_refs
 from deploy.migrate_document_refs_isolated import _desired
 from deploy.migrate_files_isolated import migrate_files
 from deploy.migrate_relational_isolated import migrate_relational
+from deploy.migrate_report_refs_isolated import migrate_report_refs
 from deploy.migrate_structured_isolated import migrate_structured
 from deploy.migrate_structured_isolated import _source
 from tests.integration.test_relational_migration import source, target
@@ -34,12 +39,13 @@ def add(archive, name, content):
     archive.addfile(entry, io.BytesIO(content))
 
 
-@pytest.fixture
-def prepared(source, target, store, tmp_path):
+def prepare(source, target, store, tmp_path, *, include_reports=False):
     schema, url = target
     owner, doc_a, doc_b, stale = (str(uuid4()) for _ in range(4))
     files = {doc_a: b'first document', doc_b: b'second document'}
     archived_files = {**files, stale: b'old deleted document'}
+    reports = ({str(uuid4()): b'# report one', str(uuid4()): b'# report two'}
+               if include_reports else {})
     root = tmp_path / 'source-files'
     folder = root / 'users' / owner / 'documents'
     folder.mkdir(parents=True)
@@ -55,6 +61,9 @@ def prepared(source, target, store, tmp_path):
             values(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (task_id, batch_id, owner, str(uuid4()), 'queued.pdf', '.pdf', 1,
              'staging/queued.pdf', 'queued', 'queued', 0, 't', 't'))
+        for report_id in reports:
+            conn.execute('insert into report_records values(?,?,?,?,?)',
+                         (report_id, owner, 'title', f'reports/{report_id}.md', '2026-09-28'))
     def record(document_id, name):
         return {'document_id': document_id, 'user_id': owner, 'document_name': name,
                 'document_path': str(folder / f'{document_id}.pdf'), 'file_suffix': '.pdf'}
@@ -70,6 +79,12 @@ def prepared(source, target, store, tmp_path):
         for document_id, content in archived_files.items():
             (folder / f'{document_id}.pdf').write_bytes(content)
             add(archive, f'app/users/{owner}/documents/{document_id}.pdf', content)
+        if reports:
+            report_folder = root / 'users' / owner / 'reports'
+            report_folder.mkdir()
+            for report_id, content in reports.items():
+                (report_folder / f'{report_id}.md').write_bytes(content)
+                add(archive, f'app/users/{owner}/reports/{report_id}.md', content)
     qdrant = tmp_path / 'pair.qdrant.tar.gz'
     with tarfile.open(qdrant, 'w:gz') as archive:
         add(archive, 'collections/test/config.json', b'{}')
@@ -83,8 +98,21 @@ def prepared(source, target, store, tmp_path):
                        target_schema=schema, mode='apply')
     command.upgrade(Config('alembic.ini'), '20260927_06')
     migrate_structured(app, database_url=url, target_schema=schema, mode='apply')
+    if reports:
+        migrate_report_refs(app, manifest, store, database_url=url,
+                            target_schema=schema, mode='apply')
     command.upgrade(Config('alembic.ini'), '20260929_12')
     return app, manifest, schema, url, store, owner, files, stale
+
+
+@pytest.fixture
+def prepared(source, target, store, tmp_path):
+    return prepare(source, target, store, tmp_path)
+
+
+@pytest.fixture
+def combined(source, target, store, tmp_path):
+    return prepare(source, target, store, tmp_path, include_reports=True)
 
 
 def run(prepared, mode):
@@ -216,3 +244,108 @@ def test_wrong_revision_or_live_session_is_rejected(prepared):
         conn.execute("update alembic_version set version_num='20260929_11'")
     with pytest.raises(ValueError, match='revision012'):
         run(prepared, 'apply')
+
+
+def test_combined_report_and_document_references_are_pinned_and_idempotent(combined):
+    app, _manifest, schema, url, store, owner, documents, _stale = combined
+    before = digest(app)
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        reports = dict(conn.execute('select report_id,object_key from report_objects').fetchall())
+        assert len(reports) == 2
+    assert run(combined, 'dry-run')['status'] == 'ready'
+    assert run(combined, 'apply')['status'] == 'applied'
+    assert run(combined, 'apply')['status'] == 'unchanged'
+    assert run(combined, 'verify')['status'] == 'equal'
+    db = PostgresDatabase(make_conninfo(url, options=f'-csearch_path={schema}'))
+    db.open()
+    try:
+        document_repo = PostgresDocumentObjectRepository(db, store)
+        report_service = PostgresReportService(db, store)
+        for document_id, content in documents.items():
+            assert document_repo.read_document_bytes(owner, document_id) == content
+        assert {report_service.read_report_bytes(owner, report_id) for report_id in reports} == {
+            b'# report one', b'# report two'}
+    finally:
+        db.close()
+    assert digest(app) == before
+
+
+@pytest.mark.parametrize('change', ['partial', 'wrong_version', 'missing'])
+def test_combined_partial_or_conflicting_report_references_fail_closed(combined, change):
+    _app, _manifest, schema, url, _store, *_ = combined
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        if change == 'partial':
+            conn.execute('delete from report_objects where report_id=(select min(report_id) from report_objects)')
+        elif change == 'wrong_version':
+            conn.execute("update report_objects set version_id='different'")
+        else:
+            conn.execute('delete from report_objects')
+    for mode in ('dry-run', 'apply', 'verify'):
+        with pytest.raises(ValueError, match='report references'):
+            run(combined, mode)
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
+
+
+@pytest.mark.parametrize('change', ['source', 'manifest', 'same_bytes_new_version',
+                                    'corrupt_new_version', 'relational', 'structured', 'lease'])
+def test_combined_mutation_rejects_document_publication(combined, change):
+    app, manifest, schema, url, store, owner, *_ = combined
+    if change == 'source':
+        metadata = Path(str(app) + '.meta')
+        data = json.loads(metadata.read_text())
+        data['sha256'] = '0' * 64
+        metadata.write_text(json.dumps(data))
+    elif change in {'manifest', 'same_bytes_new_version', 'corrupt_new_version'}:
+        data = json.loads(manifest.read_text())
+        key = next(key for key in data['completed'] if '/reports/' in key)
+        if change == 'manifest':
+            data['completed'][key]['version_id'] = 'missing-version'
+        else:
+            pinned = data['completed'][key]
+            body = store.client.get_object(Bucket=store.bucket, Key=key,
+                                           VersionId=pinned['version_id'])['Body'].read()
+            if change == 'corrupt_new_version':
+                body = b'corrupt report bytes'
+            version = store.client.put_object(Bucket=store.bucket, Key=key, Body=body)
+            data['completed'][key]['version_id'] = version['VersionId']
+        manifest.write_text(json.dumps(data))
+    else:
+        with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+            if change == 'relational':
+                conn.execute("update report_records set title='changed'")
+            elif change == 'structured':
+                conn.execute("update user_snapshots set payload=jsonb_set(payload, '{documents,0,document_name}', '\"changed\"')")
+            else:
+                conn.execute('''insert into user_mutation_leases
+                    (user_id,owner,lease_token,lease_version,heartbeat_at,lease_expires_at)
+                    values(%s,%s,%s,1,now(),now())''', (owner, 'test', str(uuid4())))
+    with pytest.raises((ValueError, ClientError)):
+        run(combined, 'apply')
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
+        assert conn.execute('select count(*) from report_objects').fetchone() == (2,)
+
+
+@pytest.mark.parametrize('change', ['source', 'manifest'])
+def test_combined_frozen_inputs_changed_during_copy_roll_back(combined, monkeypatch, change):
+    app, manifest, schema, url, _store, *_ = combined
+    original_read = document_migration._read
+    calls = 0
+
+    def change_after_insert(cursor):
+        nonlocal calls
+        rows = original_read(cursor)
+        calls += 1
+        if calls == 2:
+            path = app if change == 'source' else manifest
+            with path.open('ab') as stream:
+                stream.write(b'changed during publication')
+        return rows
+
+    monkeypatch.setattr(document_migration, '_read', change_after_insert)
+    with pytest.raises(ValueError, match='changed during publication'):
+        run(combined, 'apply')
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
+        assert conn.execute('select count(*) from report_objects').fetchone() == (2,)

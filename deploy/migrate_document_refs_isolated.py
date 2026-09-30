@@ -13,11 +13,12 @@ from app.postgres_document_objects import PostgresDocumentObjectRepository
 from deploy.inventory_paired_backup import _sha256
 from deploy.migrate_files_isolated import _load_manifest, _target_identity
 from deploy.migrate_relational_isolated import TABLES, _fingerprint
+from deploy.migrate_report_refs_isolated import _read as _read_report_refs, _references as _report_references
 from deploy.migrate_structured_isolated import _comparison, _read_auxiliary, _source, KNOWN
 
 
 REVISION = '20260929_12'
-EMPTY_TABLES = ('report_objects', 'user_mutation_leases', 'import_objects', 'import_task_attempts',
+EMPTY_TABLES = ('user_mutation_leases', 'import_objects', 'import_task_attempts',
                 'import_user_schedule', 'vector_indexes', 'vector_generations', 'vector_heads')
 TABLES_012 = KNOWN | set(EMPTY_TABLES) | {'document_objects'}
 
@@ -137,7 +138,9 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
         raise ValueError('Target must be an explicit isolated cutover_ schema')
     archive_path = Path(archive_path).resolve()
     inventory, columns, baseline, structured = _source(archive_path)
+    manifest_sha256 = _sha256(Path(manifest_path))
     desired, extra_files = _desired(inventory, columns, baseline, structured, manifest_path, store)
+    desired_reports = _report_references(inventory, columns, baseline, manifest_path, store)
     expected_hash = _fingerprint(desired)
     if _sha256(archive_path) != inventory['source_sha256'] or _sha256(archive_path.parent / inventory['qdrant_archive']) != inventory['qdrant_sha256']:
         raise ValueError('Frozen source changed before publication')
@@ -170,6 +173,8 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
             _, differences = _comparison(structured, _read_auxiliary(cursor))
             if differences:
                 raise ValueError('Target structured authority differs: ' + ','.join(differences))
+            if _fingerprint(_read_report_refs(cursor)) != _fingerprint(desired_reports):
+                raise ValueError('Target report references differ from verified source')
             actual = _read(cursor)
             equal = _fingerprint(actual) == expected_hash
             if not equal and (actual or mode == 'verify'):
@@ -185,6 +190,8 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
                 status = 'applied'
             if _sha256(archive_path) != inventory['source_sha256'] or _sha256(archive_path.parent / inventory['qdrant_archive']) != inventory['qdrant_sha256']:
                 raise ValueError('Frozen source changed during publication')
+            if _sha256(Path(manifest_path)) != manifest_sha256:
+                raise ValueError('File migration manifest changed during publication')
     return {'status': status, 'mode': mode, 'source_sha256': inventory['source_sha256'],
             'qdrant_sha256': inventory['qdrant_sha256'], 'target_schema': target_schema,
             'source_count': len(desired), 'target_count': len(actual),
