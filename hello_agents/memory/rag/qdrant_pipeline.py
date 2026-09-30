@@ -36,6 +36,27 @@ from hello_agents.memory.storage.vector_store import (
     VectorPoint,
     VectorStore,
 )
+
+
+def split_qdrant_text(text: str, chunk_size: int = 800,
+                      chunk_overlap: int = 120) -> List[str]:
+    """The character window used by the existing Qdrant document pipeline."""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= chunk_size:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end].strip())
+        if end >= len(text):
+            break
+        start = max(0, end - chunk_overlap)
+    return [chunk for chunk in chunks if chunk]
+
+
 class RAGPipeline:
     """Document/chunk business semantics backed by a VectorStore."""
 
@@ -521,20 +542,7 @@ class RAGPipeline:
             report_progress(progress_callback, "persisting", 1, 1, "persisting")
 
     def _split_text(self, text: str, chunk_size: int = 800, chunk_overlap: int = 120) -> List[str]:
-        text = text.strip()
-        if not text:
-            return []
-        if len(text) <= chunk_size:
-            return [text]
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = start + chunk_size
-            chunks.append(text[start:end].strip())
-            if end >= len(text):
-                break
-            start = max(0, end - chunk_overlap)
-        return [chunk for chunk in chunks if chunk]
+        return split_qdrant_text(text, chunk_size, chunk_overlap)
 
     def _to_vector(self, text: str) -> List[float]:
         if self._managed:
