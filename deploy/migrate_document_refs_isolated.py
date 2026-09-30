@@ -1,4 +1,7 @@
-"""Publish frozen History document references into an isolated revision012 copy."""
+"""Publish frozen History document references into an isolated revision012 copy.
+
+Set require_report_refs for a declared combined report/document target.
+"""
 from __future__ import annotations
 
 import json
@@ -130,7 +133,8 @@ def _read(cursor):
         sha256,size_bytes,history_record_sha256 from document_objects''').fetchall()
 
 
-def migrate_document_refs(archive_path, manifest_path, store, *, database_url, target_schema, mode):
+def migrate_document_refs(archive_path, manifest_path, store, *, database_url, target_schema, mode,
+                          require_report_refs=False):
     if mode not in {'dry-run', 'apply', 'verify'}:
         raise ValueError('Invalid migration mode')
     if (not target_schema.startswith('cutover_') or len(target_schema) <= 8
@@ -140,7 +144,6 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
     inventory, columns, baseline, structured = _source(archive_path)
     manifest_sha256 = _sha256(Path(manifest_path))
     desired, extra_files = _desired(inventory, columns, baseline, structured, manifest_path, store)
-    desired_reports = _report_references(inventory, columns, baseline, manifest_path, store)
     expected_hash = _fingerprint(desired)
     if _sha256(archive_path) != inventory['source_sha256'] or _sha256(archive_path.parent / inventory['qdrant_archive']) != inventory['qdrant_sha256']:
         raise ValueError('Frozen source changed before publication')
@@ -173,8 +176,12 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
             _, differences = _comparison(structured, _read_auxiliary(cursor))
             if differences:
                 raise ValueError('Target structured authority differs: ' + ','.join(differences))
-            if _fingerprint(_read_report_refs(cursor)) != _fingerprint(desired_reports):
-                raise ValueError('Target report references differ from verified source')
+            actual_reports = _read_report_refs(cursor)
+            if actual_reports or require_report_refs:
+                desired_reports = _report_references(inventory, columns, baseline, manifest_path, store)
+                if ((require_report_refs and not desired_reports) or
+                        _fingerprint(actual_reports) != _fingerprint(desired_reports)):
+                    raise ValueError('Target report references differ from verified source')
             actual = _read(cursor)
             equal = _fingerprint(actual) == expected_hash
             if not equal and (actual or mode == 'verify'):
@@ -195,5 +202,7 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
     return {'status': status, 'mode': mode, 'source_sha256': inventory['source_sha256'],
             'qdrant_sha256': inventory['qdrant_sha256'], 'target_schema': target_schema,
             'source_count': len(desired), 'target_count': len(actual),
+            'report_references_required': require_report_refs,
+            'target_report_reference_count': len(actual_reports),
             'extra_archived_document_files': extra_files,
             'source_references_sha256': expected_hash, 'target_references_sha256': _fingerprint(actual)}

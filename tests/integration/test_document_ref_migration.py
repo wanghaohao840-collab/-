@@ -39,7 +39,7 @@ def add(archive, name, content):
     archive.addfile(entry, io.BytesIO(content))
 
 
-def prepare(source, target, store, tmp_path, *, include_reports=False):
+def prepare(source, target, store, tmp_path, *, include_reports=False, publish_reports=False):
     schema, url = target
     owner, doc_a, doc_b, stale = (str(uuid4()) for _ in range(4))
     files = {doc_a: b'first document', doc_b: b'second document'}
@@ -98,7 +98,7 @@ def prepare(source, target, store, tmp_path, *, include_reports=False):
                        target_schema=schema, mode='apply')
     command.upgrade(Config('alembic.ini'), '20260927_06')
     migrate_structured(app, database_url=url, target_schema=schema, mode='apply')
-    if reports:
+    if publish_reports:
         migrate_report_refs(app, manifest, store, database_url=url,
                             target_schema=schema, mode='apply')
     command.upgrade(Config('alembic.ini'), '20260929_12')
@@ -112,13 +112,19 @@ def prepared(source, target, store, tmp_path):
 
 @pytest.fixture
 def combined(source, target, store, tmp_path):
+    return prepare(source, target, store, tmp_path, include_reports=True, publish_reports=True)
+
+
+@pytest.fixture
+def standalone_with_reports(source, target, store, tmp_path):
     return prepare(source, target, store, tmp_path, include_reports=True)
 
 
-def run(prepared, mode):
+def run(prepared, mode, *, require_report_refs=False):
     app, manifest, schema, url, store, *_ = prepared
     return migrate_document_refs(app, manifest, store, database_url=url,
-                                 target_schema=schema, mode=mode)
+                                 target_schema=schema, mode=mode,
+                                 require_report_refs=require_report_refs)
 
 
 def test_latest_visible_records_publish_exact_pinned_bytes(prepared):
@@ -253,9 +259,9 @@ def test_combined_report_and_document_references_are_pinned_and_idempotent(combi
         reports = dict(conn.execute('select report_id,object_key from report_objects').fetchall())
         assert len(reports) == 2
     assert run(combined, 'dry-run')['status'] == 'ready'
-    assert run(combined, 'apply')['status'] == 'applied'
-    assert run(combined, 'apply')['status'] == 'unchanged'
-    assert run(combined, 'verify')['status'] == 'equal'
+    assert run(combined, 'apply', require_report_refs=True)['status'] == 'applied'
+    assert run(combined, 'apply', require_report_refs=True)['status'] == 'unchanged'
+    assert run(combined, 'verify', require_report_refs=True)['status'] == 'equal'
     db = PostgresDatabase(make_conninfo(url, options=f'-csearch_path={schema}'))
     db.open()
     try:
@@ -270,6 +276,20 @@ def test_combined_report_and_document_references_are_pinned_and_idempotent(combi
     assert digest(app) == before
 
 
+def test_standalone_document_refs_allow_unpublished_frozen_reports(standalone_with_reports):
+    _app, _manifest, schema, url, _store, *_ = standalone_with_reports
+    with pytest.raises(ValueError, match='report references'):
+        run(standalone_with_reports, 'apply', require_report_refs=True)
+    assert run(standalone_with_reports, 'dry-run')['status'] == 'ready'
+    assert run(standalone_with_reports, 'apply')['status'] == 'applied'
+    assert run(standalone_with_reports, 'apply')['status'] == 'unchanged'
+    assert run(standalone_with_reports, 'verify')['status'] == 'equal'
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        assert conn.execute('select count(*) from report_records').fetchone() == (2,)
+        assert conn.execute('select count(*) from report_objects').fetchone() == (0,)
+        assert conn.execute('select count(*) from document_objects').fetchone() == (2,)
+
+
 @pytest.mark.parametrize('change', ['partial', 'wrong_version', 'missing'])
 def test_combined_partial_or_conflicting_report_references_fail_closed(combined, change):
     _app, _manifest, schema, url, _store, *_ = combined
@@ -282,7 +302,12 @@ def test_combined_partial_or_conflicting_report_references_fail_closed(combined,
             conn.execute('delete from report_objects')
     for mode in ('dry-run', 'apply', 'verify'):
         with pytest.raises(ValueError, match='report references'):
-            run(combined, mode)
+            run(combined, mode, require_report_refs=True)
+    if change == 'missing':
+        assert run(combined, 'dry-run')['status'] == 'ready'
+    else:
+        with pytest.raises(ValueError, match='report references'):
+            run(combined, 'apply')
     with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
         assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
 
@@ -321,7 +346,7 @@ def test_combined_mutation_rejects_document_publication(combined, change):
                     (user_id,owner,lease_token,lease_version,heartbeat_at,lease_expires_at)
                     values(%s,%s,%s,1,now(),now())''', (owner, 'test', str(uuid4())))
     with pytest.raises((ValueError, ClientError)):
-        run(combined, 'apply')
+        run(combined, 'apply', require_report_refs=True)
     with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
         assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
         assert conn.execute('select count(*) from report_objects').fetchone() == (2,)
@@ -345,7 +370,7 @@ def test_combined_frozen_inputs_changed_during_copy_roll_back(combined, monkeypa
 
     monkeypatch.setattr(document_migration, '_read', change_after_insert)
     with pytest.raises(ValueError, match='changed during publication'):
-        run(combined, 'apply')
+        run(combined, 'apply', require_report_refs=True)
     with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
         assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
         assert conn.execute('select count(*) from report_objects').fetchone() == (2,)
