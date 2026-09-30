@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 from io import BytesIO
+import json
 from uuid import uuid4
 
+import httpx
 import pytest
 from docx import Document
 
@@ -169,6 +171,79 @@ def test_runtime_mutation_during_embedding_rejects_result():
     with pytest.raises(ImportDocumentPreparationError, match="embedding_identity"):
         prepare_import_document(source_bytes=b"hello", original_name="note.txt",
                                 suffix=".txt", **kwargs)
+
+
+@pytest.mark.parametrize("changed_field", ["profile", "settings"])
+def test_remote_engine_mutation_during_embedding_rejects_result(changed_field):
+    values = {"RAG_EMBEDDING_PROVIDER": "siliconflow",
+              "RAG_EMBEDDING_API_KEY": "private-test-token"}
+    engine = None
+
+    def handler(request):
+        nonlocal engine
+        requested_model = json.loads(request.content)["model"]
+        if changed_field == "profile":
+            engine.profile = replace(engine.profile, model="changed-model")
+            response_model = "changed-model"
+        else:
+            engine.settings = replace(engine.settings, api_key="changed-private-token")
+            response_model = requested_model
+        return httpx.Response(200, json={
+            "model": response_model,
+            "data": [{"index": 0, "embedding": [1.0] + [0.0] * 1023}],
+        })
+
+    runtime = build_rag_embedding(values, backend="qdrant",
+                                  transport=httpx.MockTransport(handler))
+    engine = runtime._engine
+    user_id = str(uuid4())
+    scope = VectorScope(user_id, "rag", f"pdf_{user_id}",
+                        IndexIdentity("qdrant", "documents", runtime.profile))
+    with pytest.raises(ImportDocumentPreparationError, match="embedding_identity"):
+        prepare_import_document(
+            source_bytes=b"hello", task_id=str(uuid4()), user_id=user_id,
+            document_id=str(uuid4()), original_name="note.txt", suffix=".txt",
+            scope=scope, embedding_runtime=runtime,
+        )
+
+
+def test_remote_preparation_keeps_original_configuration_across_batches():
+    requests = []
+    engine = None
+    original_profile = None
+
+    def handler(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        # A caller changes and then restores its engine while computation runs.
+        # The independent request/decode client must keep the pinned model.
+        engine.profile = (replace(original_profile, model="changed-model")
+                          if len(requests) == 1 else original_profile)
+        return httpx.Response(200, json={
+            "model": body["model"],
+            "data": [{"index": index, "embedding": [1.0] + [0.0] * 1023}
+                     for index in range(len(body["input"]))],
+        })
+
+    runtime = build_rag_embedding(
+        {"RAG_EMBEDDING_PROVIDER": "siliconflow",
+         "RAG_EMBEDDING_API_KEY": "private-test-token"},
+        backend="qdrant", transport=httpx.MockTransport(handler),
+    )
+    engine, original_profile = runtime._engine, runtime.profile
+    user_id = str(uuid4())
+    points = prepare_import_document(
+        source_bytes=b"x" * 6000, task_id=str(uuid4()), user_id=user_id,
+        document_id=str(uuid4()), original_name="note.txt", suffix=".txt",
+        scope=VectorScope(user_id, "rag", f"pdf_{user_id}",
+                          IndexIdentity("qdrant", "documents", runtime.profile)),
+        embedding_runtime=runtime,
+    )
+    assert len(requests) == 2
+    assert all(body["model"] == original_profile.model for body in requests)
+    assert len(points) == sum(len(body["input"]) for body in requests)
+    assert all(point.payload["metadata"]["embedding_fingerprint"]
+               == original_profile.fingerprint for point in points)
 
 
 def test_wrong_scope_profile_and_size_fail_before_embedding():

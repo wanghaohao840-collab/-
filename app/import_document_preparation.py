@@ -5,7 +5,7 @@ claim a task, write vectors, or publish a document.
 """
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from io import BytesIO
 from pathlib import PurePosixPath
 from uuid import UUID
@@ -14,6 +14,7 @@ from app.import_models import ImportLimits
 from app.postgres_vector_generations import VectorScope
 from app.storage import SUPPORTED_DOCUMENT_SUFFIXES
 from hello_agents.memory.rag.contracts import DocumentSegment
+from hello_agents.memory.rag.embedding_client import SiliconFlowEmbedding
 from hello_agents.memory.rag.embedding_runtime import (
     CHUNKING_BY_BACKEND, RAGEmbeddingRuntime,
 )
@@ -113,21 +114,45 @@ def prepare_import_document(
     scope = deepcopy(scope)
     file_name = str(file_name)
     suffix = str(suffix.lower())
-    runtime = RAGEmbeddingRuntime(deepcopy(embedding_runtime.profile),
-                                  embedding_runtime._engine,
-                                  embedding_runtime.batch_size)
+    source_engine = embedding_runtime._engine
+    profile = deepcopy(embedding_runtime.profile)
+    if isinstance(source_engine, SiliconFlowEmbedding):
+        settings = deepcopy(source_engine.settings)
+        if source_engine.profile != profile or settings.profile != profile:
+            raise ImportDocumentPreparationError("embedding_identity")
+        # Keep the transport handle, but own all request/decode configuration.
+        engine = SiliconFlowEmbedding(settings, transport=source_engine._transport)
+    else:
+        # SimpleEmbedding owns only its dimension; preserve injected test engines.
+        engine = copy(source_engine)
+    runtime = RAGEmbeddingRuntime(profile, engine, embedding_runtime.batch_size)
+
+    def require_unchanged_embedding():
+        changed = (embedding_runtime.profile != runtime.profile
+                   or embedding_runtime.batch_size != runtime.batch_size
+                   or embedding_runtime._engine is not source_engine)
+        if isinstance(source_engine, SiliconFlowEmbedding):
+            changed = (changed or source_engine.profile != profile
+                       or source_engine.settings != settings
+                       or source_engine.settings.api_key != settings.api_key
+                       or source_engine._transport is not engine._transport)
+        else:
+            changed = changed or source_engine.dimension != profile.dimension
+        if changed:
+            raise ImportDocumentPreparationError("embedding_identity")
+
     segments = _segments(source, document_id, file_name, suffix)
     if not segments:
         raise ImportDocumentPreparationError("empty_document")
-    chunks = prepare_document_chunks(
-        document_id=document_id, segments=segments,
-        rag_namespace=scope.namespace, split_text=split_qdrant_text,
-        embed_text=None, embedding_runtime=runtime,
-    )
-    if (embedding_runtime.profile != runtime.profile
-            or embedding_runtime.batch_size != runtime.batch_size
-            or embedding_runtime._engine is not runtime._engine):
-        raise ImportDocumentPreparationError("embedding_identity")
+    require_unchanged_embedding()
+    try:
+        chunks = prepare_document_chunks(
+            document_id=document_id, segments=segments,
+            rag_namespace=scope.namespace, split_text=split_qdrant_text,
+            embed_text=None, embedding_runtime=runtime,
+        )
+    finally:
+        require_unchanged_embedding()
     if not chunks:
         raise ImportDocumentPreparationError("empty_document")
 
