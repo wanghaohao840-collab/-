@@ -13,6 +13,10 @@ from uuid import UUID
 from app.import_repository import _task_from_row
 from app.object_store import ObjectRef, S3ObjectStore, artifact_key
 from app.postgres_document_objects import PostgresDocumentObjectRepository
+from app.postgres_history_document_witnesses import (
+    HistoryDocumentWitnessError, PostgresHistoryDocumentWitnessRepository,
+    document_evidence,
+)
 from app.postgres_import_artifacts import PostgresImportArtifactService
 from app.postgres_import_leases import ImportAttempt, PostgresImportLeaseRepository
 from app.postgres_snapshots import PostgresSnapshotRepository, SnapshotConflict
@@ -57,6 +61,7 @@ class ImportDocumentPublicationService:
         self.sources = PostgresImportArtifactService(database, store)
         self.snapshots = PostgresSnapshotRepository(database)
         self.documents = PostgresDocumentObjectRepository(database, store)
+        self.witnesses = PostgresHistoryDocumentWitnessRepository(database, store)
 
     @staticmethod
     def _canonical_uuid(value: str) -> bool:
@@ -90,18 +95,6 @@ class ImportDocumentPublicationService:
         return _PreparedTask(task.task_id, task.user_id, task.document_id,
                              task.original_name, task.file_suffix, task.size_bytes,
                              task.created_at, ref, source['bucket'])
-
-    @staticmethod
-    def _document_ids(history: dict, user_id: str) -> set[str]:
-        documents = history['documents']
-        ids = set()
-        for item in documents:
-            if (not isinstance(item, dict) or not isinstance(item.get('document_id'), str)
-                    or item.get('user_id', user_id) != user_id
-                    or item['document_id'] in ids):
-                raise ImportDocumentPublicationError('History document identity is invalid')
-            ids.add(item['document_id'])
-        return ids
 
     @staticmethod
     def _check_fences(cursor, user_id: str, document_ids: set[str]) -> None:
@@ -188,11 +181,17 @@ class ImportDocumentPublicationService:
                                                          prepared_task.document_id, object_ref)
 
         history = self.snapshots.read(prepared_task.user_id, 'history')
-        head = self.vectors.authority.read_head(scope)
-        if (history is None or head.state not in ('empty', 'published')
-                or head.snapshot_version != history.version):
+        if history is None:
             raise ImportDocumentPublicationError('History and vector head are not paired')
-        original_ids = self._document_ids(history.data, prepared_task.user_id)
+        try:
+            old_pairing = self.witnesses.read_current(scope)
+            old_evidence = document_evidence(prepared_task.user_id, history.data)
+            self.witnesses.check_document_pairing(old_pairing, old_evidence, history.version)
+            fixed_refs = self.witnesses.verify_retained_references(scope, old_evidence)
+        except HistoryDocumentWitnessError as exc:
+            raise ImportDocumentPublicationError(str(exc)) from exc
+        head = old_pairing.head
+        original_ids = set(old_evidence.ids)
         if prepared_task.document_id in original_ids:
             raise ImportDocumentPublicationError('Document already exists in History')
         existing: list[VectorPoint] = []
@@ -229,8 +228,18 @@ class ImportDocumentPublicationService:
             current = self.snapshots._read(cursor, prepared_task.user_id, 'history')
             if current is None or current.version != history.version:
                 raise SnapshotConflict('History version changed')
-            if self._document_ids(current.data, prepared_task.user_id) != original_ids:
-                raise ImportDocumentPublicationError('History document set changed')
+            try:
+                current_evidence = document_evidence(prepared_task.user_id, current.data)
+                if current_evidence != old_evidence:
+                    raise HistoryDocumentWitnessError('History documents changed during import')
+                # _publish has retired the captured generation in this same
+                # transaction. Its immutable receipt remains the old authority.
+                self.witnesses.check_old_receipt(cursor, scope, old_pairing)
+                self.witnesses.check_retained_references(cursor, scope, fixed_refs)
+                if not old_pairing.has_witness:
+                    self.witnesses.insert(cursor, scope, old_pairing, old_evidence)
+            except HistoryDocumentWitnessError as exc:
+                raise ImportDocumentPublicationError(str(exc)) from exc
             self._check_fences(cursor, prepared_task.user_id,
                                original_ids | {prepared_task.document_id})
             next_history = deepcopy(current.data)
@@ -239,6 +248,14 @@ class ImportDocumentPublicationService:
                 cursor, prepared_task.user_id, 'history', next_history,
                 expected_version=history.version)
             self.documents.publish_in_transaction(cursor, verified)
+            try:
+                new_pairing = self.witnesses.read_current(scope, cursor=cursor)
+                if new_pairing.has_witness or new_pairing.head.snapshot_version != history.version + 1:
+                    raise HistoryDocumentWitnessError('New RAG publication receipt differs from History')
+                self.witnesses.insert(cursor, scope, new_pairing,
+                                      document_evidence(prepared_task.user_id, next_history))
+            except HistoryDocumentWitnessError as exc:
+                raise ImportDocumentPublicationError(str(exc)) from exc
 
         return self.vectors.publish_complete(
             scope, attempt, head, [*existing, *points],

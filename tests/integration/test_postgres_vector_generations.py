@@ -164,7 +164,7 @@ def test_receipt_migration_upgrades_unpublished_candidate(shared_database):
     scope = VectorScope(owner, 'rag', 'documents', identity)
     authority = PostgresVectorGenerationAuthority(first)
     generation = authority.stage(scope, lease(first, owner), expected_revision=None)
-    command.upgrade(Config('alembic.ini'), 'head')
+    command.upgrade(Config('alembic.ini'), '20260929_11')
     with first.transaction() as cursor:
         row = cursor.execute('''select state,publication_revision,
             publication_snapshot_version from vector_generations
@@ -214,7 +214,7 @@ def test_receipt_migration_rejects_existing_publication(shared_database, histori
                 set state='published',published_at=clock_timestamp()
                 where generation_id=%s''', (new,))
     with pytest.raises(Exception, match='existing vector publications require an explicit receipt migration'):
-        command.upgrade(Config('alembic.ini'), 'head')
+        command.upgrade(Config('alembic.ini'), '20260929_11')
     with first.transaction() as cursor:
         version = cursor.execute('select version_num from alembic_version').fetchone()['version_num']
         columns = cursor.execute('''select column_name from information_schema.columns

@@ -8,6 +8,8 @@ import os
 from uuid import uuid4
 
 import pytest
+from alembic import command
+from alembic.config import Config
 
 from app.history import EMPTY_HISTORY
 from app.import_document_publication import (
@@ -18,6 +20,7 @@ from app.import_repository import PostgresImportTaskRepository
 from app.object_store import artifact_key
 from app.postgres_coordination import PostgresUserMutationCoordinator
 from app.postgres_document_objects import DocumentPublicationError
+from app.postgres_history_document_witnesses import document_evidence
 from app.postgres_import_leases import PostgresImportLeaseRepository
 from app.postgres_snapshots import PostgresSnapshotRepository, SnapshotConflict
 from app.postgres_vector_generations import PostgresVectorGenerationAuthority, VectorScope
@@ -110,6 +113,293 @@ def _state(db, snapshots, vectors, scope, user, task_id):
     return snapshots.read(user, 'history'), vectors.authority.read_head(scope), task, ended, refs, lease
 
 
+def _witnesses(db, scope):
+    with db.transaction() as cursor:
+        return cursor.execute('''select head_revision,last_generation_id,index_revision,
+            publication_snapshot_version,document_count,documents_sha256
+            from history_document_witnesses where tenant_id=%s and vector_kind=%s
+            and namespace=%s and index_key=%s order by head_revision''', scope.key).fetchall()
+
+
+def _publish_strict_legacy_document(publication, *, with_ref=True):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    document_id = str(uuid4())
+    content = b'legacy retained bytes'
+    digest = hashlib.sha256(content).hexdigest()
+    ref = store.put_immutable(user, artifact_key(user, 'documents', document_id,
+                                                '.txt', digest), content).ref
+    verified = service.documents.verify_for_publication(user, document_id, ref)
+    record = {'user_id': user, 'document_id': document_id, 'document_name': 'legacy.txt',
+              'file_suffix': '.txt', 'document_path': f'object://{store.bucket}/{ref.key}',
+              'loaded_at': '2026-09-30T00:00:00+00:00'}
+    history = snapshots.read(user, 'history')
+    changed = deepcopy(history.data)
+    changed['documents'].append(record)
+    lease = PostgresUserMutationCoordinator(db).acquire(user, 'legacy-publisher', lease_seconds=120)
+    assert lease is not None
+
+    def domain(cursor):
+        snapshots.compare_and_swap_in_transaction(cursor, user, 'history', changed,
+                                                  expected_version=history.version)
+        if with_ref:
+            service.documents.publish_in_transaction(cursor, verified)
+
+    try:
+        vectors.publish_complete(scope, lease, vectors.authority.read_head(scope),
+                                 [_point(scope, document_id, 'legacy')],
+                                 domain_publish=domain, snapshot_version=history.version + 1)
+    finally:
+        PostgresUserMutationCoordinator(db).release(lease)
+    assert _witnesses(db, scope) == []
+    return document_id
+
+
+def test_strict_paired_nonempty_head_bootstraps_both_witnesses(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    old_id = _publish_strict_legacy_document(publication)
+    old_head = vectors.authority.read_head(scope)
+    second = _task(db, store, user, b'next')
+    service.publish(scope, second, [_point(scope, second.task.document_id, 'new')])
+    rows = _witnesses(db, scope)
+    assert len(rows) == 2
+    assert rows[0]['head_revision'] == old_head.revision
+    assert rows[0]['last_generation_id'] == old_head.generation_id
+    assert rows[0]['document_count'] == 1
+    assert rows[1]['document_count'] == 2
+    assert rows[0]['documents_sha256'] == document_evidence(
+        user, {'documents': [snapshots.read(user, 'history').data['documents'][0]],
+               'questions': [], 'notes': [], 'sessions': []}).digest
+    assert service.documents.read_document_bytes(user, old_id) == b'legacy retained bytes'
+
+
+def test_strict_paired_legacy_head_with_missing_ref_rejects_bootstrap(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    _publish_strict_legacy_document(publication, with_ref=False)
+    second = _task(db, store, user, b'next')
+    before = snapshots.read(user, 'history'), vectors.authority.read_head(scope)
+    with pytest.raises(ImportDocumentPublicationError, match='retained document reference'):
+        service.publish(scope, second, [_point(scope, second.task.document_id, 'new')])
+    assert (snapshots.read(user, 'history'), vectors.authority.read_head(scope)) == before
+    assert _witnesses(db, scope) == []
+
+
+def test_callback_failure_after_inline_old_witness_rolls_everything_back(publication, monkeypatch):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    old_id = _publish_strict_legacy_document(publication)
+    second = _task(db, store, user, b'next')
+    before = snapshots.read(user, 'history'), vectors.authority.read_head(scope)
+
+    def reject(*args, **kwargs):
+        raise DocumentPublicationError('forced new reference failure')
+
+    monkeypatch.setattr(service.documents, 'publish_in_transaction', reject)
+    with pytest.raises(DocumentPublicationError, match='forced'):
+        service.publish(scope, second, [_point(scope, second.task.document_id, 'new')])
+    assert (snapshots.read(user, 'history'), vectors.authority.read_head(scope)) == before
+    assert _witnesses(db, scope) == []
+    with db.transaction() as cursor:
+        assert cursor.execute('select count(*) as n from document_objects where user_id=%s',
+                              (user,)).fetchone()['n'] == 1
+    assert service.documents.read_document_bytes(user, old_id) == b'legacy retained bytes'
+
+
+@pytest.mark.parametrize('mutation', (
+    'metadata', 'remove', 'add', 'duplicate', 'cross_tenant', 'missing_user'))
+def test_complete_history_document_record_or_set_change_rejects(publication, mutation):
+    service, db, store, vectors, snapshots, scope, user, other = publication
+    first = _task(db, store, user)
+    service.publish(scope, first, [_point(scope, first.task.document_id, 'old')])
+    previous = snapshots.read(user, 'history')
+    changed = deepcopy(previous.data)
+    if mutation == 'metadata':
+        changed['documents'][0]['document_name'] = 'changed.txt'
+    elif mutation == 'remove':
+        changed['documents'].clear()
+    elif mutation == 'add':
+        changed['documents'].append({'user_id': user, 'document_id': str(uuid4())})
+    elif mutation == 'duplicate':
+        changed['documents'].append(deepcopy(changed['documents'][0]))
+    elif mutation == 'cross_tenant':
+        changed['documents'][0]['user_id'] = other
+    else:
+        changed['documents'][0].pop('user_id')
+    snapshots.compare_and_swap(user, 'history', changed, expected_version=previous.version)
+    second = _task(db, store, user, b'next')
+    with pytest.raises(ImportDocumentPublicationError, match='Prior corpus|identity'):
+        service.publish(scope, second, [_point(scope, second.task.document_id, 'new')])
+    assert vectors.authority.read_head(scope).revision == 2
+    assert len(_witnesses(db, scope)) == 2
+
+
+def test_reordered_document_records_reject_even_with_identical_id_set(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    for marker in ('first', 'second'):
+        attempt = _task(db, store, user, marker.encode())
+        service.publish(scope, attempt, [_point(scope, attempt.task.document_id, marker)])
+    previous = snapshots.read(user, 'history')
+    changed = deepcopy(previous.data)
+    changed['documents'].reverse()
+    snapshots.compare_and_swap(user, 'history', changed, expected_version=previous.version)
+    third = _task(db, store, user, b'third')
+    with pytest.raises(ImportDocumentPublicationError, match='Prior corpus'):
+        service.publish(scope, third, [_point(scope, third.task.document_id, 'third')])
+
+
+def test_staging_non_document_write_rolls_back_head_history_refs_witness(publication, monkeypatch):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    first = _task(db, store, user)
+    service.publish(scope, first, [_point(scope, first.task.document_id, 'old')])
+    second = _task(db, store, user, b'next')
+    old_head = vectors.authority.read_head(scope)
+    old_witnesses = _witnesses(db, scope)
+    original = vectors.authority.complete_import
+
+    def notes_then_complete(*args, **kwargs):
+        previous = snapshots.read(user, 'history')
+        changed = deepcopy(previous.data)
+        changed['notes'].append({'content': 'arrived during staging'})
+        snapshots.compare_and_swap(user, 'history', changed, expected_version=previous.version)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(vectors.authority, 'complete_import', notes_then_complete)
+    with pytest.raises(SnapshotConflict, match='History version changed'):
+        service.publish(scope, second, [_point(scope, second.task.document_id, 'new')])
+    history, head, task, ended, refs, lease = _state(
+        db, snapshots, vectors, scope, user, second.task.task_id)
+    assert head == old_head and history.version == 3
+    assert history.data['notes'] == [{'content': 'arrived during staging'}]
+    assert len(history.data['documents']) == 1
+    assert task['status'] == 'running' and ended is None and refs == 1 and lease['live']
+    assert _witnesses(db, scope) == old_witnesses
+
+
+def test_history_version_behind_witness_receipt_is_rejected(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    first = _task(db, store, user)
+    service.publish(scope, first, [_point(scope, first.task.document_id, 'old')])
+    pairing = service.witnesses.read_current(scope)
+    evidence = document_evidence(user, snapshots.read(user, 'history').data)
+    with pytest.raises(Exception, match='precedes'):
+        service.witnesses.check_document_pairing(pairing, evidence,
+                                                 pairing.receipt_snapshot_version - 1)
+
+
+def test_retained_pinned_document_version_missing_rejects(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    first = _task(db, store, user)
+    service.publish(scope, first, [_point(scope, first.task.document_id, 'old')])
+    with db.transaction() as cursor:
+        ref = cursor.execute('''select object_key,version_id from document_objects
+            where user_id=%s and document_id=%s''',
+            (user, first.task.document_id)).fetchone()
+    store.client.delete_object(Bucket=store.bucket, Key=ref['object_key'],
+                               VersionId=ref['version_id'])
+    second = _task(db, store, user, b'next')
+    with pytest.raises(Exception, match='Retained document pinned bytes'):
+        service.publish(scope, second, [_point(scope, second.task.document_id, 'new')])
+    assert vectors.authority.read_head(scope).revision == 2
+
+
+@pytest.mark.parametrize('shared_database', ['20260929_12'], indirect=True)
+def test_013_upgrade_leaves_existing_strict_paired_head_without_witness(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    old = vectors.authority.read_head(scope)
+    assert old.state == 'empty' and old.snapshot_version == 1
+    with db.transaction() as cursor:
+        old_generation_id = cursor.execute('''select last_generation_id from vector_heads
+            where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''',
+            scope.key).fetchone()['last_generation_id']
+    command.upgrade(Config('alembic.ini'), 'head')
+    assert _witnesses(db, scope) == []
+    assert vectors.authority.read_head(scope) == old
+    attempt = _task(db, store, user)
+    service.publish(scope, attempt, [_point(scope, attempt.task.document_id, 'new')])
+    rows = _witnesses(db, scope)
+    assert len(rows) == 2 and rows[0]['document_count'] == 0
+    assert rows[0]['last_generation_id'] == old_generation_id
+    with db.transaction() as cursor:
+        empty = cursor.execute('''select generation_id,last_generation_id
+            from vector_heads where tenant_id=%s and vector_kind=%s
+            and namespace=%s and index_key=%s''', scope.key).fetchone()
+    assert empty['last_generation_id'] == rows[1]['last_generation_id']
+
+
+def test_witness_sql_rejects_mismatched_receipts_and_mutation(publication):
+    service, db, store, vectors, snapshots, scope, user, other = publication
+    attempt = _task(db, store, user)
+    service.publish(scope, attempt, [_point(scope, attempt.task.document_id, 'new')])
+    row = _witnesses(db, scope)[-1]
+    columns = '''(tenant_id,vector_kind,namespace,index_key,head_revision,
+        last_generation_id,index_revision,publication_snapshot_version,
+        document_count,documents_sha256)'''
+    insert = 'insert into history_document_witnesses ' + columns + ' values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'
+    values = [*scope.key, row['head_revision'] + 1, row['last_generation_id'],
+              row['index_revision'], row['publication_snapshot_version'],
+              row['document_count'], row['documents_sha256']]
+    for index, bad in ((4, row['head_revision'] + 20),
+                       (6, row['index_revision'] + 1),
+                       (7, row['publication_snapshot_version'] + 1)):
+        candidate = values.copy()
+        candidate[index] = bad
+        with pytest.raises(Exception, match='matching publication receipt'):
+            with db.transaction() as cursor:
+                cursor.execute(insert, candidate)
+    candidate = values.copy()
+    candidate[0] = other
+    with pytest.raises(Exception):
+        with db.transaction() as cursor:
+            cursor.execute(insert, candidate)
+    with pytest.raises(Exception, match='immutable'):
+        with db.transaction() as cursor:
+            cursor.execute('''update history_document_witnesses set document_count=9
+                where tenant_id=%s and vector_kind=%s and namespace=%s
+                and index_key=%s and head_revision=%s''', (*scope.key, row['head_revision']))
+    with pytest.raises(Exception, match='immutable'):
+        with db.transaction() as cursor:
+            cursor.execute('''delete from history_document_witnesses where tenant_id=%s
+                and vector_kind=%s and namespace=%s and index_key=%s
+                and head_revision=%s''', (*scope.key, row['head_revision']))
+    with pytest.raises(Exception, match='immutable'):
+        with db.transaction() as cursor:
+            cursor.execute(insert + ''' on conflict(tenant_id,vector_kind,namespace,index_key,
+                head_revision) do update set document_count=excluded.document_count''',
+                [*scope.key, row['head_revision'], row['last_generation_id'],
+                 row['index_revision'], row['publication_snapshot_version'],
+                 row['document_count'], row['documents_sha256']])
+
+
+def test_witness_sql_rejects_null_receipt_and_unpublished_generation(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    null_scope = replace(scope, namespace='null_receipt_' + uuid4().hex)
+    lease = PostgresUserMutationCoordinator(db).acquire(user, 'null-receipt', lease_seconds=120)
+    assert lease is not None
+    try:
+        vectors.publish_complete(null_scope, lease, vectors.authority.read_head(null_scope),
+                                 [], snapshot_version=None)
+    finally:
+        PostgresUserMutationCoordinator(db).release(lease)
+    with db.transaction() as cursor:
+        null_head = cursor.execute('''select revision,last_generation_id,index_revision
+            from vector_heads where tenant_id=%s and vector_kind=%s
+            and namespace=%s and index_key=%s''', null_scope.key).fetchone()
+    insert = '''insert into history_document_witnesses
+        (tenant_id,vector_kind,namespace,index_key,head_revision,last_generation_id,
+         index_revision,publication_snapshot_version,document_count,documents_sha256)
+        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'''
+    empty_digest = document_evidence(user, EMPTY_HISTORY).digest
+    with pytest.raises(Exception, match='matching publication receipt'):
+        with db.transaction() as cursor:
+            cursor.execute(insert, (*null_scope.key, null_head['revision'],
+                null_head['last_generation_id'], null_head['index_revision'],
+                1, 0, empty_digest))
+    attempt = _task(db, store, user)
+    candidate_id = vectors.authority.stage(scope, attempt,
+                                            expected_revision=vectors.authority.read_head(scope).revision)
+    with pytest.raises(Exception, match='matching publication receipt'):
+        with db.transaction() as cursor:
+            cursor.execute(insert, (*scope.key, 2, candidate_id, 1, 2, 0, empty_digest))
+
+
 def test_two_imports_commit_all_authorities_and_preserve_pinned_bytes(publication):
     service, db, store, vectors, snapshots, scope, user, _ = publication
     first = _task(db, store, user)
@@ -138,6 +428,29 @@ def test_two_imports_commit_all_authorities_and_preserve_pinned_bytes(publicatio
     from app.postgres_document_search import _SnapshotDocumentProjection
     assert len(_SnapshotDocumentProjection().project_history_documents(
         user, history.data['documents'])) == 2
+
+
+@pytest.mark.parametrize('field', ('questions', 'notes', 'sessions'))
+def test_non_document_history_change_between_imports_preserves_pairing(publication, field):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    first = _task(db, store, user)
+    service.publish(scope, first, [_point(scope, first.task.document_id, 'first')])
+    history = snapshots.read(user, 'history')
+    changed = deepcopy(history.data)
+    changed[field].append({'content': 'independent entry'})
+    snapshots.compare_and_swap(user, 'history', changed, expected_version=history.version)
+
+    second = _task(db, store, user, b'second bytes')
+    result = service.publish(scope, second, [_point(scope, second.task.document_id, 'second')])
+    assert result.import_task.status == 'succeeded'
+    current = snapshots.read(user, 'history')
+    assert current.version == history.version + 2
+    assert current.data[field] == [{'content': 'independent entry'}]
+    assert len(current.data['documents']) == 2
+    witness_rows = _witnesses(db, scope)
+    assert len(witness_rows) == 3
+    assert witness_rows[-1]['publication_snapshot_version'] == current.version
+    assert witness_rows[-1]['documents_sha256'] == document_evidence(user, current.data).digest
 
 
 @pytest.mark.parametrize('failure', ('history', 'reference', 'fence'))
@@ -295,6 +608,16 @@ def test_lost_pg_commit_response_uses_receipt_without_replay(publication, monkey
     assert task['status'] == 'succeeded' and ended is not None and refs == 1
     assert not lease['live']
     assert service.documents.read_document_bytes(user, attempt.task.document_id) == b'accepted bytes'
+    assert len(_witnesses(db, scope)) == 2
+    next_attempt = _task(db, store, user, b'after lost response')
+    service.publish(scope, next_attempt,
+                    [_point(scope, next_attempt.task.document_id, 'after')])
+    receipt = vectors.authority.publication_receipt(scope, result.generation_id)
+    assert receipt['state'] == 'retired'
+    assert vectors._published(scope, result.generation_id, 1, 1,
+                              receipt['expected_count'], receipt['content_digest'],
+                              attempt, 2).generation_id == result.generation_id
+    assert len(_witnesses(db, scope)) == 3
 
 
 def test_old_document_without_points_and_logical_id_reuse_fail_closed(publication):
