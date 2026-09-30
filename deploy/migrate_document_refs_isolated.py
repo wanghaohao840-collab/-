@@ -156,6 +156,12 @@ def migrate_document_refs(archive_path, manifest_path, store, *, database_url, t
             for table in EMPTY_TABLES:
                 if cursor.execute(sql.SQL('select 1 from {} limit 1').format(sql.Identifier(table))).fetchone():
                     raise ValueError('Target has post-baseline authority: ' + table)
+            if cursor.execute('''select 1 from import_tasks where lease_version <> 0
+                or claimed_by is not null or lease_token is not null
+                or heartbeat_at is not null or lease_expires_at is not null
+                or user_lease_token is not null or user_lease_version is not null
+                limit 1''').fetchone():
+                raise ValueError('Target has post-baseline authority: import_tasks lease state')
             for table in TABLES:
                 query = sql.SQL('select {} from {}').format(
                     sql.SQL(',').join(map(sql.Identifier, columns[table])), sql.Identifier(table))

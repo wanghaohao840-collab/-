@@ -46,6 +46,15 @@ def prepared(source, target, store, tmp_path):
     with sqlite3.connect(source) as conn:
         conn.execute('insert into users values(?,?,?,?,?,?,?)',
                      (owner, owner, owner, 'hash', 'active', 't', 't'))
+        batch_id, task_id = str(uuid4()), str(uuid4())
+        conn.execute('insert into import_batches values(?,?,?,?)',
+                     (batch_id, owner, 't', 't'))
+        conn.execute('''insert into import_tasks
+            (id,batch_id,user_id,document_id,original_name,file_suffix,size_bytes,
+             staged_relative_path,status,stage,progress,created_at,updated_at)
+            values(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (task_id, batch_id, owner, str(uuid4()), 'queued.pdf', '.pdf', 1,
+             'staging/queued.pdf', 'queued', 'queued', 0, 't', 't'))
     def record(document_id, name):
         return {'document_id': document_id, 'user_id': owner, 'document_name': name,
                 'document_path': str(folder / f'{document_id}.pdf'), 'file_suffix': '.pdf'}
@@ -125,6 +134,25 @@ def test_changed_frozen_source_and_target_authority_fail_closed(prepared):
         run(prepared, 'apply')
 
 
+@pytest.mark.parametrize('column,value', [
+    ('claimed_by', 'worker'),
+    ('lease_token', str(uuid4())),
+    ('lease_version', 1),
+    ('heartbeat_at', '2026-09-30T00:00:00Z'),
+    ('lease_expires_at', '2026-09-30T00:01:00Z'),
+    ('user_lease_token', str(uuid4())),
+    ('user_lease_version', 1),
+])
+def test_import_task_lease_authority_rejects_publication(prepared, column, value):
+    _app, _manifest, schema, url, _store, *_ = prepared
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        conn.execute(f'update import_tasks set {column}=%s', (value,))
+    with pytest.raises(ValueError, match='post-baseline authority: import_tasks lease state'):
+        run(prepared, 'apply')
+    with psycopg.connect(make_conninfo(url, options=f'-csearch_path={schema}')) as conn:
+        assert conn.execute('select count(*) from document_objects').fetchone() == (0,)
+
+
 @pytest.mark.parametrize('change', ['path', 'suffix', 'owner'])
 def test_history_path_suffix_owner_must_match_archive(prepared, change):
     app, manifest, _schema, _url, store, owner, *_ = prepared
@@ -147,12 +175,16 @@ def test_history_path_suffix_owner_must_match_archive(prepared, change):
 
 @pytest.mark.parametrize('change', ['bucket', 'version', 'incomplete'])
 def test_manifest_or_version_mismatch_rejects_publication(prepared, change):
-    _app, path, schema, url, _store, *_ = prepared
+    _app, path, schema, url, _store, owner, files, _stale = prepared
     data = json.loads(path.read_text())
     if change == 'bucket':
         data['target']['bucket'] = 'wrong'
     elif change == 'version':
-        next(iter(data['completed'].values()))['version_id'] = 'missing'
+        visible_document_id = next(iter(files))
+        visible_key = next(key for key, entry in data['completed'].items()
+                           if entry['key'].split('/')[:4] ==
+                           ['users', owner, 'documents', visible_document_id])
+        data['completed'][visible_key]['version_id'] = 'missing'
     else:
         data['completed'].pop(next(iter(data['completed'])))
     path.write_text(json.dumps(data))
