@@ -119,6 +119,51 @@ def _episode(item, user):
     return dict(metadata) | derived
 
 
+class _VerifiedEpisodeBundle:
+    """Copied publication evidence for an internal import preparation step."""
+
+    __slots__ = ("_scope", "_head", "_receipt", "_publication_receipt",
+                 "_snapshot", "_documents", "_points")
+
+    def __init__(self, scope, head, receipt, publication_receipt, snapshot,
+                 documents, points):
+        self._scope = deepcopy(scope)
+        self._head = deepcopy(head)
+        self._receipt = deepcopy(receipt)
+        self._publication_receipt = deepcopy(publication_receipt)
+        self._snapshot = deepcopy(snapshot)
+        self._documents = deepcopy(documents)
+        self._points = deepcopy(points)
+
+    @property
+    def scope(self):
+        return deepcopy(self._scope)
+
+    @property
+    def head(self):
+        return deepcopy(self._head)
+
+    @property
+    def receipt(self):
+        return deepcopy(self._receipt)
+
+    @property
+    def publication_receipt(self):
+        return deepcopy(self._publication_receipt)
+
+    @property
+    def snapshot(self):
+        return deepcopy(self._snapshot)
+
+    @property
+    def documents(self):
+        return deepcopy(self._documents)
+
+    @property
+    def points(self):
+        return deepcopy(self._points)
+
+
 class PublishedEpisodeReadOperation:
     """A validated, immutable generation with narrow scoped read methods."""
 
@@ -248,7 +293,7 @@ class PublishedEpisodeReadFactory:
                                   trusted_scope.namespace, identity)
         self._service = service
 
-    def open_operation(self, authenticated_user_id: str):
+    def _capture_bundle(self, authenticated_user_id: str):
         scope = self._scope
         if authenticated_user_id != scope.tenant_id:
             raise EpisodeReadError("Authenticated user differs from trusted scope")
@@ -260,7 +305,7 @@ class PublishedEpisodeReadFactory:
                 g.namespace as receipt_namespace,g.index_key as receipt_index_key,
                 g.state as receipt_state,g.base_revision,g.index_revision as receipt_index_revision,
                 g.publication_revision,g.publication_snapshot_version,g.expected_count,
-                g.content_digest,g.published_at,
+                g.content_digest,g.published_at,to_jsonb(g) as receipt_row,
                 s.user_id as snapshot_user,s.version as snapshot_version_actual,s.payload as snapshot_payload,
                 (select coalesce(jsonb_agg(to_jsonb(d)), '[]'::jsonb)
                    from memory_documents d where d.user_id=i.tenant_id) as documents
@@ -325,8 +370,13 @@ class PublishedEpisodeReadFactory:
                 if logical_id in payloads:
                     raise EpisodeReadError("Duplicate snapshot episode ID")
                 payloads[logical_id] = projected
+        documents = row["documents"]
+        if not isinstance(documents, list):
+            raise EpisodeReadError("Document rows differ")
         rows = {}
-        for document in row["documents"]:
+        for document in documents:
+            if not isinstance(document, dict):
+                raise EpisodeReadError("Malformed document row")
             if document.get("user_id") != scope.tenant_id:
                 raise EpisodeReadError("Document row owner differs")
             metadata = _metadata(document.get("metadata"))
@@ -362,5 +412,14 @@ class PublishedEpisodeReadFactory:
         receipt = {"generation_id": receipt_id, "revision": revision,
                    "snapshot_version": version, "expected_count": count,
                    "content_digest": digest, "published_at": row["published_at"]}
-        return PublishedEpisodeReadOperation(head, receipt, view, payloads,
+        return _VerifiedEpisodeBundle(scope, head, receipt, row["receipt_row"],
+                                      snapshot, documents, points)
+
+    def open_operation(self, authenticated_user_id: str):
+        bundle = self._capture_bundle(authenticated_user_id)
+        scope = bundle.scope
+        head = bundle.head
+        view = GenerationVectorStore(self._service.raw, scope, head)
+        payloads = {point.id: point.payload for point in bundle.points}
+        return PublishedEpisodeReadOperation(head, bundle.receipt, view, payloads,
                                              scope.identity.profile)

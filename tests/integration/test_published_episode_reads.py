@@ -215,6 +215,8 @@ def test_wrong_metadata_and_mutation_of_outputs_fail_closed(episode_setup):
                         (altered, scope.tenant_id))
         with pytest.raises(EpisodeReadError):
             factory.open_operation(scope.tenant_id)
+        with pytest.raises(EpisodeReadError):
+            factory._capture_bundle(scope.tenant_id)
     with db.transaction() as cur:
         cur.execute("update memory_documents set metadata=%s where user_id=%s",
                     (original, scope.tenant_id))
@@ -311,9 +313,83 @@ def test_negative_importance_item_lookup_still_reads_pinned_vector(episode_setup
     item = _item(scope.tenant_id, "below default threshold")
     item["importance"] = -0.25
     _publish(db, service, scope, [item])
-    operation = PublishedEpisodeReadFactory(service, scope).open_operation(scope.tenant_id)
+    factory = PublishedEpisodeReadFactory(service, scope)
+    bundle = factory._capture_bundle(scope.tenant_id)
+    assert bundle.points[0].id == "shared-episode"
+    operation = factory.open_operation(scope.tenant_id)
     assert operation.count() == 0
     assert operation.get_item(item["id"]).payload["content"] == "below default threshold"
+
+
+def test_private_bundle_preserves_whole_memory_rows_and_negative_vector(episode_setup):
+    db, raw, service, scopes, profile = episode_setup
+    scope = scopes[0]
+    item = _item(scope.tenant_id, "negative", logical_id="negative-episode")
+    item["importance"] = -0.25
+    item["extra"] = {"keep": [True, {"number": 2}]}
+    published = _publish(db, service, scope, [item])
+    semantic = {"id": "semantic-1", "content": "fact", "memory_type": "semantic",
+                "metadata": {"user_id": scope.tenant_id, "source": {"nested": [1, False]}}}
+    snapshot = {"user_id": scope.tenant_id, "memories": [item, semantic],
+                "unrelated": {"retain": ["as", "JSON"]}}
+    raw_metadata = ' { "user_id": "' + scope.tenant_id + '", "memory_type": "semantic", "note": [true, 3] } '
+    with db.transaction() as cur:
+        cur.execute("update user_snapshots set payload=%s::jsonb where user_id=%s and kind='memory'",
+                    (json.dumps(snapshot), scope.tenant_id))
+        cur.execute("""insert into memory_documents(user_id,document_id,content,metadata)
+            values (%s,%s,%s,%s)""", (scope.tenant_id, "semantic-1", "fact", raw_metadata))
+    factory = PublishedEpisodeReadFactory(service, scope)
+    bundle = factory._capture_bundle(scope.tenant_id)
+    assert bundle.snapshot == snapshot
+    assert bundle.head == published.head
+    assert bundle.scope == scope
+    assert bundle.publication_receipt["generation_id"] == str(published.generation_id)
+    assert bundle.publication_receipt["index_revision"] == published.head.index_revision
+    assert len(bundle.documents) == 2
+    assert next(row for row in bundle.documents if row["document_id"] == "semantic-1")["metadata"] == raw_metadata
+    assert [(point.id, point.vector, point.payload["importance"])
+            for point in bundle.points] == [("negative-episode", [1.0, 0.0, 0.0, 0.0], -0.25)]
+    bundle.snapshot["memories"][0]["extra"]["keep"].clear()
+    bundle.documents[0]["metadata"] = "changed"
+    bundle.points[0].vector[0] = 7
+    bundle.points[0].payload["content"] = "changed"
+    bundle.publication_receipt["expected_count"] = 999
+    assert bundle.snapshot == snapshot
+    assert {row["document_id"] for row in bundle.documents} == {"negative-episode", "semantic-1"}
+    assert bundle.points[0].vector == [1.0, 0.0, 0.0, 0.0]
+    assert bundle.points[0].payload["content"] == "negative"
+    assert bundle.publication_receipt["expected_count"] == 1
+    assert factory.open_operation(scope.tenant_id).count() == 0
+
+
+def test_private_bundle_keeps_pg_capture_across_publication(episode_setup, monkeypatch):
+    db, raw, service, scopes, profile = episode_setup
+    scope = scopes[0]
+    first = _item(scope.tenant_id, "before")
+    _publish(db, service, scope, [first])
+    captured = threading.Event()
+    released = threading.Event()
+    original = GenerationVectorStore.scroll
+
+    def gated(view, *args, **kwargs):
+        if kwargs.get("expected_manifest") is not None and not captured.is_set():
+            captured.set()
+            assert released.wait(15)
+        return original(view, *args, **kwargs)
+
+    monkeypatch.setattr(GenerationVectorStore, "scroll", gated)
+    factory = PublishedEpisodeReadFactory(service, scope)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(factory._capture_bundle, scope.tenant_id)
+        assert captured.wait(15)
+        _publish(db, service, scope, [_item(scope.tenant_id, "after")])
+        released.set()
+        old = future.result(timeout=15)
+    assert old.head.revision == 1
+    assert old.snapshot["memories"] == [first]
+    assert old.documents[0]["content"] == "before"
+    assert old.points[0].payload["content"] == "before"
+    assert factory._capture_bundle(scope.tenant_id).head.revision == 2
 
 
 def test_manifest_and_returned_material_corruption_fail_closed(episode_setup, monkeypatch):
@@ -418,7 +494,9 @@ def test_read_paths_do_not_write_or_fallback(episode_setup, monkeypatch):
             original_client_methods[method] = getattr(raw.client, method)
             monkeypatch.setattr(raw.client, method, prohibited)
     monkeypatch.setattr(PostgresUserMutationCoordinator, "acquire", prohibited)
-    operation = PublishedEpisodeReadFactory(service, scope).open_operation(scope.tenant_id)
+    factory = PublishedEpisodeReadFactory(service, scope)
+    assert factory._capture_bundle(scope.tenant_id).points[0].payload["content"] == "stable"
+    operation = factory.open_operation(scope.tenant_id)
     assert operation.count(start_time="2026-10-01T00:30:00Z") == 1
     assert operation.search_vector([1, 0, 0, 0], query_profile=profile,
                                    start_time="2026-10-01T00:30:00Z")
