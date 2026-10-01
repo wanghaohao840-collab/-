@@ -198,7 +198,8 @@ class PostgresVectorGenerationAuthority:
             self._owner(cursor, authority, scope)
 
     def _publish(self, cursor, scope, authority, generation_id, *, expected_revision,
-                 expected_index_revision, snapshot_version):
+                 expected_index_revision, snapshot_version, expected_count=None,
+                 content_digest=None):
         _check_revision(expected_revision)
         if type(expected_index_revision) is not int or expected_index_revision < 1:
             raise ValueError('Expected index revision is required')
@@ -213,7 +214,9 @@ class PostgresVectorGenerationAuthority:
             raise VectorAuthorityError('Head revision changed')
         candidate = self._candidate(cursor, scope, authority, generation_id, states=('sealed',))
         if (candidate['base_revision'] != expected_revision
-                or candidate['index_revision'] != expected_index_revision):
+                or candidate['index_revision'] != expected_index_revision
+                or (expected_count is not None and candidate['expected_count'] != expected_count)
+                or (content_digest is not None and candidate['content_digest'] != content_digest)):
             raise VectorAuthorityError('Candidate base/index revision changed')
         # The zero-point corpus has an explicit head row but no visible generation.
         new_generation = None if candidate['expected_count'] == 0 else generation_id
@@ -294,23 +297,51 @@ class PostgresVectorGenerationAuthority:
         if not isinstance(generation_id, UUID):
             raise ValueError('generation_id must be UUID')
         with self.database.transaction() as cursor:
-            return cursor.execute('''select g.state,g.base_revision,g.index_revision,
+            return self._receipts_in_cursor(cursor, ((scope, generation_id),))[0]
+
+    @staticmethod
+    def _receipts_in_cursor(cursor, requests):
+        """Pure SELECT; callers may supply a read-only repeatable-read cursor.
+
+        A pair is projected by one statement and therefore one MVCC snapshot.
+        The caller checks every field; absent rows remain absent.
+        """
+        if len(requests) not in (1, 2) or any(
+                not isinstance(scope, VectorScope) or not isinstance(generation_id, UUID)
+                for scope, generation_id in requests):
+            raise ValueError('One or two exact scope/generation selectors are required')
+        selectors = ' or '.join(
+            '(g.generation_id=%s and g.tenant_id=%s and g.vector_kind=%s '
+            'and g.namespace=%s and g.index_key=%s)' for _ in requests)
+        parameters = tuple(value for scope, generation_id in requests
+                           for value in (generation_id, *scope.key))
+        rows = cursor.execute(f'''select g.generation_id,g.tenant_id,g.vector_kind,
+                g.namespace,g.index_key,i.identity,g.sealed_at,
+                g.state,g.base_revision,g.index_revision,
                 g.publication_revision,g.publication_snapshot_version,g.published_at,
                 g.expected_count,g.content_digest,g.owner,g.user_lease_token,
                 g.user_lease_version,g.task_id,g.task_lease_token,g.task_lease_version,
-                to_jsonb(t) as task_record,t.status as task_status,
+                to_jsonb(t) as task_record,t.user_id as task_user_id,
+                t.status as task_status,
                 t.claimed_by as task_owner,t.lease_token as current_task_token,
                 t.lease_version as current_task_version,
                 t.user_lease_token as task_user_token,
                 t.user_lease_version as task_user_version,
+                a.task_id as audit_task_id,a.user_id as audit_user_id,
+                a.lease_version as audit_task_version,
                 a.ended_at as attempt_ended_at,a.end_reason as attempt_end_reason,
                 a.worker_id as attempt_owner,a.lease_token as audit_task_token,
                 a.user_lease_token as audit_user_token,
                 a.user_lease_version as audit_user_version
                 from vector_generations g
+                left join vector_indexes i on i.tenant_id=g.tenant_id
+                    and i.vector_kind=g.vector_kind and i.namespace=g.namespace
+                    and i.index_key=g.index_key
                 left join import_tasks t on t.id=g.task_id and t.user_id=g.tenant_id
                 left join import_task_attempts a on a.task_id=g.task_id
                     and a.user_id=g.tenant_id and a.lease_version=g.task_lease_version
-                where g.generation_id=%s and g.tenant_id=%s and g.vector_kind=%s
-                    and g.namespace=%s and g.index_key=%s''',
-                (generation_id, *scope.key)).fetchone()
+                where {selectors}''', parameters).fetchall()
+        return tuple(next((row for row in rows if row['generation_id'] == generation_id
+                           and (row['tenant_id'], row['vector_kind'], row['namespace'],
+                                row['index_key']) == scope.key), None)
+                     for scope, generation_id in requests)

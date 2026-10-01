@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.postgres_coordination import PostgresUserMutationCoordinator
+from app.postgres_coordination import MutationLeaseLost, PostgresUserMutationCoordinator
 from app.postgres_import_leases import PostgresImportLeaseRepository
 from app.postgres_vector_generations import PostgresVectorGenerationAuthority, VectorScope
 from app.import_models import ImportTaskCreate
@@ -430,3 +430,62 @@ def test_late_import_upsert_after_exact_cleanup_and_task_reclaim_is_invisible(se
     assert view.count(collection) == 1
     assert view.scroll(collection)[0].payload['marker'] == 'current'
     assert view.search(collection, [1.0, 0.0, 0.0, 0.0])[0].payload['marker'] == 'current'
+
+
+def test_ambiguous_seal_requires_complete_owner_and_scope_receipt(setup, monkeypatch):
+    writer, _, first, _, _, scope, users = setup
+    handle = lease(first, users[0])
+    original_seal = writer.authority.seal
+    original_receipt = writer.authority.publication_receipt
+
+    def sealed_then_lost(*args, **kwargs):
+        original_seal(*args, **kwargs)
+        raise ConnectionError('seal response lost')
+
+    def wrong_owner(*args, **kwargs):
+        return original_receipt(*args, **kwargs) | {'owner': 'wrong-owner'}
+
+    monkeypatch.setattr(writer.authority, 'seal', sealed_then_lost)
+    monkeypatch.setattr(writer.authority, 'publication_receipt', wrong_owner)
+    with pytest.raises(VectorPublicationUnknown) as captured:
+        writer.publish_complete(scope, handle, writer.authority.read_head(scope),
+                                [point('candidate')])
+    assert captured.value.phase == 'seal'
+    assert writer.authority.reconcile(scope, captured.value.generation_id)['state'] == 'sealed'
+    assert writer.authority.read_head(scope).state == 'missing'
+
+
+def test_stale_expected_head_is_rejected_before_stage_without_abandonment(setup, monkeypatch):
+    writer, _, first, _, _, scope, users = setup
+    handle = lease(first, users[0])
+    stale = writer.authority.read_head(scope)
+    writer.publish_complete(scope, handle, stale, [point('current')])
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append('called')
+        raise AssertionError('No candidate may be staged or abandoned')
+
+    monkeypatch.setattr(writer.authority, 'stage', forbidden)
+    monkeypatch.setattr(writer.authority, 'abandon', forbidden)
+    with pytest.raises(Exception, match='Expected vector head changed'):
+        writer.publish_complete(scope, handle, stale, [point('stale')])
+    assert calls == []
+
+
+def test_expired_direct_user_lease_stage_keeps_original_exception_and_no_candidate(setup):
+    writer, _, first, _, _, scope, users = setup
+    handle = lease(first, users[0])
+    with first.transaction() as cursor:
+        cursor.execute("""update user_mutation_leases set
+            lease_expires_at=clock_timestamp()-interval '1 second' where user_id=%s""",
+                       (users[0],))
+    with pytest.raises(MutationLeaseLost):
+        writer.publish_complete(scope, handle, writer.authority.read_head(scope),
+                                [point('never-staged')])
+    assert writer.authority.read_head(scope).state == 'missing'
+    with first.transaction() as cursor:
+        count = cursor.execute('''select count(*) as n from vector_generations
+            where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''',
+                               scope.key).fetchone()['n']
+    assert count == 0
