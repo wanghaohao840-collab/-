@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import json
 from uuid import UUID
 
 from app.import_repository import _task_from_row
@@ -33,6 +34,7 @@ class ImportDocumentPublicationError(RuntimeError):
 @dataclass(frozen=True)
 class _PreparedTask:
     task_id: str
+    batch_id: str
     user_id: str
     document_id: str
     original_name: str
@@ -41,6 +43,21 @@ class _PreparedTask:
     created_at: str
     source: ObjectRef
     bucket: str
+
+
+@dataclass(frozen=True)
+class _PreparedDocument:
+    task: _PreparedTask
+    history: object
+    old_pairing: object
+    old_evidence: object
+    fixed_refs: tuple
+    verified: object
+    issued_ref: tuple
+    record: dict
+    next_history: dict
+    points: tuple[VectorPoint, ...]
+    original_ids: frozenset[str]
 
 
 class ImportDocumentPublicationService:
@@ -92,7 +109,7 @@ class ImportDocumentPublicationService:
         if artifact_key(task.user_id, 'imports', task.task_id,
                         task.file_suffix, ref.sha256) != ref.key:
             raise ImportDocumentPublicationError('Import source identity differs from task')
-        return _PreparedTask(task.task_id, task.user_id, task.document_id,
+        return _PreparedTask(task.task_id, task.batch_id, task.user_id, task.document_id,
                              task.original_name, task.file_suffix, task.size_bytes,
                              task.created_at, ref, source['bucket'])
 
@@ -158,9 +175,19 @@ class ImportDocumentPublicationService:
                 or not isinstance(attempt, ImportAttempt)
                 or scope.tenant_id != attempt.task.user_id):
             raise ImportDocumentPublicationError('Import requires a matching RAG tenant')
+        prepared = self._prepare_document(scope, attempt, new_points)
+        return self.vectors.publish_complete(
+            scope, attempt, prepared.old_pairing.head, prepared.points,
+            domain_publish=lambda cursor: self._publish_document_domain(
+                cursor, prepared, scope, attempt),
+            snapshot_version=prepared.history.version + 1)
+
+    def _prepare_document(self, scope, attempt, new_points, *, task=None):
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             prepared_task = self._task_and_source(cursor, attempt)
+        if task is not None and prepared_task != task:
+            raise ImportDocumentPublicationError('Import task or source changed')
         if scope.namespace != f'pdf_{prepared_task.user_id}':
             raise ImportDocumentPublicationError('RAG namespace differs from user document scope')
         points = self._new_points(new_points, scope, prepared_task.document_id)
@@ -192,7 +219,9 @@ class ImportDocumentPublicationService:
             raise ImportDocumentPublicationError(str(exc)) from exc
         head = old_pairing.head
         original_ids = set(old_evidence.ids)
-        if prepared_task.document_id in original_ids:
+        if (prepared_task.document_id in original_ids or any(
+                item.get('import_task_id') == prepared_task.task_id
+                for item in history.data['documents'])):
             raise ImportDocumentPublicationError('Document already exists in History')
         existing: list[VectorPoint] = []
         if head.state == 'published':
@@ -221,42 +250,61 @@ class ImportDocumentPublicationService:
             'loaded_at': prepared_task.created_at,
             'import_task_id': prepared_task.task_id,
         }
+        next_history = deepcopy(history.data)
+        next_history['documents'].append(deepcopy(record))
+        return _PreparedDocument(prepared_task, history, old_pairing, old_evidence,
+                                 fixed_refs, verified,
+                                 self.documents._issuance_values(verified),
+                                 deepcopy(record), next_history,
+                                 tuple(deepcopy([*existing, *points])),
+                                 frozenset(original_ids))
 
-        def publish_domain(cursor):
-            if self._task_and_source(cursor, attempt) != prepared_task:
-                raise ImportDocumentPublicationError('Import task or source changed before commit')
-            current = self.snapshots._read(cursor, prepared_task.user_id, 'history')
-            if current is None or current.version != history.version:
-                raise SnapshotConflict('History version changed')
-            try:
-                current_evidence = document_evidence(prepared_task.user_id, current.data)
-                if current_evidence != old_evidence:
-                    raise HistoryDocumentWitnessError('History documents changed during import')
-                # _publish has retired the captured generation in this same
-                # transaction. Its immutable receipt remains the old authority.
-                self.witnesses.check_old_receipt(cursor, scope, old_pairing)
-                self.witnesses.check_retained_references(cursor, scope, fixed_refs)
-                if not old_pairing.has_witness:
-                    self.witnesses.insert(cursor, scope, old_pairing, old_evidence)
-            except HistoryDocumentWitnessError as exc:
-                raise ImportDocumentPublicationError(str(exc)) from exc
-            self._check_fences(cursor, prepared_task.user_id,
-                               original_ids | {prepared_task.document_id})
-            next_history = deepcopy(current.data)
-            next_history['documents'].append(record)
-            self.snapshots.compare_and_swap_in_transaction(
-                cursor, prepared_task.user_id, 'history', next_history,
-                expected_version=history.version)
-            self.documents.publish_in_transaction(cursor, verified)
-            try:
-                new_pairing = self.witnesses.read_current(scope, cursor=cursor)
-                if new_pairing.has_witness or new_pairing.head.snapshot_version != history.version + 1:
-                    raise HistoryDocumentWitnessError('New RAG publication receipt differs from History')
-                self.witnesses.insert(cursor, scope, new_pairing,
-                                      document_evidence(prepared_task.user_id, next_history))
-            except HistoryDocumentWitnessError as exc:
-                raise ImportDocumentPublicationError(str(exc)) from exc
+    def _publish_document_domain(self, cursor, prepared, scope, attempt):
+        prepared_task = prepared.task
+        history = prepared.history
+        old_pairing = prepared.old_pairing
+        old_evidence = prepared.old_evidence
+        fixed_refs = prepared.fixed_refs
+        if self._task_and_source(cursor, attempt) != prepared_task:
+            raise ImportDocumentPublicationError('Import task or source changed before commit')
+        current = self.snapshots._read(cursor, prepared_task.user_id, 'history')
+        if (current is None or current.version != history.version
+                or self._canonical_json(current.data) != self._canonical_json(history.data)):
+            raise SnapshotConflict('History version changed')
+        try:
+            current_evidence = document_evidence(prepared_task.user_id, current.data)
+            if current_evidence != old_evidence:
+                raise HistoryDocumentWitnessError('History documents changed during import')
+            # _publish has retired the captured generation in this same
+            # transaction. Its immutable receipt remains the old authority.
+            self.witnesses.check_old_receipt(cursor, scope, old_pairing)
+            self.witnesses.check_retained_references(cursor, scope, fixed_refs)
+            if not old_pairing.has_witness:
+                self.witnesses.insert(cursor, scope, old_pairing, old_evidence)
+        except HistoryDocumentWitnessError as exc:
+            raise ImportDocumentPublicationError(str(exc)) from exc
+        if any(item.get('import_task_id') == prepared_task.task_id or
+               item.get('document_id') == prepared_task.document_id
+               for item in current.data['documents']):
+            raise ImportDocumentPublicationError('Document or task already exists in History')
+        self._check_fences(cursor, prepared_task.user_id,
+                           set(prepared.original_ids) | {prepared_task.document_id})
+        changed = self.snapshots.compare_and_swap_in_transaction(
+            cursor, prepared_task.user_id, 'history', deepcopy(prepared.next_history),
+            expected_version=history.version)
+        if changed.version != history.version + 1:
+            raise SnapshotConflict('History version changed')
+        self.documents.publish_in_transaction(cursor, prepared.verified)
+        try:
+            new_pairing = self.witnesses.read_current(scope, cursor=cursor)
+            if new_pairing.has_witness or new_pairing.head.snapshot_version != history.version + 1:
+                raise HistoryDocumentWitnessError('New RAG publication receipt differs from History')
+            self.witnesses.insert(cursor, scope, new_pairing,
+                                  document_evidence(prepared_task.user_id, prepared.next_history))
+        except HistoryDocumentWitnessError as exc:
+            raise ImportDocumentPublicationError(str(exc)) from exc
 
-        return self.vectors.publish_complete(
-            scope, attempt, head, [*existing, *points],
-            domain_publish=publish_domain, snapshot_version=history.version + 1)
+    @staticmethod
+    def _canonical_json(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'),
+                          ensure_ascii=False, allow_nan=False)
