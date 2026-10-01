@@ -52,7 +52,8 @@ def document_evidence(user_id: str, history: dict) -> DocumentEvidence:
     ids = set()
     for item in documents:
         if (not isinstance(item, dict) or not isinstance(item.get('document_id'), str)
-                or not item['document_id'] or item.get('user_id') != user_id
+                or not item['document_id']
+                or ('user_id' in item and item['user_id'] != user_id)
                 or item['document_id'] in ids):
             raise HistoryDocumentWitnessError('History document identity is invalid')
         ids.add(item['document_id'])

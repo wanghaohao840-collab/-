@@ -121,7 +121,7 @@ def _witnesses(db, scope):
             and namespace=%s and index_key=%s order by head_revision''', scope.key).fetchall()
 
 
-def _publish_strict_legacy_document(publication, *, with_ref=True):
+def _publish_strict_legacy_document(publication, *, with_ref=True, omit_user_id=False):
     service, db, store, vectors, snapshots, scope, user, _ = publication
     document_id = str(uuid4())
     content = b'legacy retained bytes'
@@ -132,6 +132,8 @@ def _publish_strict_legacy_document(publication, *, with_ref=True):
     record = {'user_id': user, 'document_id': document_id, 'document_name': 'legacy.txt',
               'file_suffix': '.txt', 'document_path': f'object://{store.bucket}/{ref.key}',
               'loaded_at': '2026-09-30T00:00:00+00:00'}
+    if omit_user_id:
+        del record['user_id']
     history = snapshots.read(user, 'history')
     changed = deepcopy(history.data)
     changed['documents'].append(record)
@@ -172,6 +174,39 @@ def test_strict_paired_nonempty_head_bootstraps_both_witnesses(publication):
     assert service.documents.read_document_bytes(user, old_id) == b'legacy retained bytes'
 
 
+def test_legacy_document_without_owner_bootstraps_and_survives_later_notes(publication):
+    service, db, store, vectors, snapshots, scope, user, _ = publication
+    old_id = _publish_strict_legacy_document(publication, omit_user_id=True)
+    legacy = snapshots.read(user, 'history').data['documents'][0]
+    assert 'user_id' not in legacy
+    with db.transaction() as cursor:
+        pinned_hash = cursor.execute('''select history_record_sha256 from document_objects
+            where user_id=%s and document_id=%s''', (user, old_id)).fetchone()['history_record_sha256']
+    assert pinned_hash == service.documents._record_hash(legacy)
+
+    second = _task(db, store, user, b'second bytes')
+    service.publish(scope, second, [_point(scope, second.task.document_id, 'second')])
+    rows = _witnesses(db, scope)
+    assert len(rows) == 2
+    history = snapshots.read(user, 'history')
+    assert history.data['documents'][0] == legacy
+    before_notes_digest = document_evidence(user, history.data).digest
+
+    changed = deepcopy(history.data)
+    changed['notes'].append({'content': 'independent entry'})
+    snapshots.compare_and_swap(user, 'history', changed, expected_version=history.version)
+    assert document_evidence(user, changed).digest == before_notes_digest
+    third = _task(db, store, user, b'third bytes')
+    result = service.publish(scope, third, [_point(scope, third.task.document_id, 'third')])
+
+    current = snapshots.read(user, 'history')
+    assert result.import_task.status == 'succeeded'
+    assert current.data['documents'][0] == legacy
+    assert current.data['notes'] == [{'content': 'independent entry'}]
+    assert len(_witnesses(db, scope)) == 3
+    assert service.documents.read_document_bytes(user, old_id) == b'legacy retained bytes'
+
+
 def test_strict_paired_legacy_head_with_missing_ref_rejects_bootstrap(publication):
     service, db, store, vectors, snapshots, scope, user, _ = publication
     _publish_strict_legacy_document(publication, with_ref=False)
@@ -204,7 +239,7 @@ def test_callback_failure_after_inline_old_witness_rolls_everything_back(publica
 
 
 @pytest.mark.parametrize('mutation', (
-    'metadata', 'remove', 'add', 'duplicate', 'cross_tenant', 'missing_user'))
+    'metadata', 'remove', 'add', 'duplicate', 'cross_tenant', 'null_user', 'missing_user'))
 def test_complete_history_document_record_or_set_change_rejects(publication, mutation):
     service, db, store, vectors, snapshots, scope, user, other = publication
     first = _task(db, store, user)
@@ -221,6 +256,8 @@ def test_complete_history_document_record_or_set_change_rejects(publication, mut
         changed['documents'].append(deepcopy(changed['documents'][0]))
     elif mutation == 'cross_tenant':
         changed['documents'][0]['user_id'] = other
+    elif mutation == 'null_user':
+        changed['documents'][0]['user_id'] = None
     else:
         changed['documents'][0].pop('user_id')
     snapshots.compare_and_swap(user, 'history', changed, expected_version=previous.version)
@@ -333,7 +370,7 @@ def test_witness_sql_rejects_mismatched_receipts_and_mutation(publication):
         last_generation_id,index_revision,publication_snapshot_version,
         document_count,documents_sha256)'''
     insert = 'insert into history_document_witnesses ' + columns + ' values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'
-    values = [*scope.key, row['head_revision'] + 1, row['last_generation_id'],
+    values = [*scope.key, row['head_revision'], row['last_generation_id'],
               row['index_revision'], row['publication_snapshot_version'],
               row['document_count'], row['documents_sha256']]
     for index, bad in ((4, row['head_revision'] + 20),
@@ -346,7 +383,7 @@ def test_witness_sql_rejects_mismatched_receipts_and_mutation(publication):
                 cursor.execute(insert, candidate)
     candidate = values.copy()
     candidate[0] = other
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match='matching publication receipt'):
         with db.transaction() as cursor:
             cursor.execute(insert, candidate)
     with pytest.raises(Exception, match='immutable'):
