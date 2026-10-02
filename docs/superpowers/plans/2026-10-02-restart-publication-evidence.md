@@ -172,6 +172,3 @@ class PostgresImportPublicationEvidenceRepository:
 - [ ] Run targeted disposable tests: `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_recovery.py tests/integration/test_import_memory_fault_matrix.py tests/integration/test_postgres_snapshots.py tests/integration/test_postgres_memory_documents.py tests/integration/test_postgres_vector_generations.py -q --basetemp=.pytest-tmp-evidence-final`; expect pass. Run the repository's relevant offline unit suite, `git diff --check`, and migration upgrade on a fresh disposable schema. Commit this final guarded slice.
 
 **Packet 3 final review:** Independently verify the two SQL schedules, all crash cases, recovery lease scope, queue fairness, after-lock clocks, every direct mutator, permanent tombstones, retention and disabled runtime/API/bootstrap. Record test URLs only as service types, redact credentials, and report any untested live-service gates. This implementation is not production cutover or authenticated restart acceptance; those have separate approved gates.
-
-
-
