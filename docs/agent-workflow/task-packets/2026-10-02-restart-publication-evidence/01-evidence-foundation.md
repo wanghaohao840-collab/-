@@ -1,11 +1,11 @@
 ---
 id: "restart-publication-evidence-01"
 title: "Bounded durable evidence foundation and read-only planner"
-status: "ready"
+status: "in_progress"
 parallel-safe: false
 depends-on: []
 base-commit: "bc3176387ec4e41d452c5cac6e07bce1ba5fbc20"
-owner: "unassigned"
+owner: "restart_foundation_sol_implementation (GPT-6 Sol High)"
 ---
 
 # Task Packet: Durable evidence foundation
@@ -15,6 +15,8 @@ owner: "unassigned"
 Provide an independently testable PostgreSQL intent/evidence repository, permanent two-generation reservations, durable user gate, bounded canonical codec and complete read-only Import-Memory planner. The new durable publication entry remains closed until packets 2 and 3 finish independent review.
 
 The user approved the structural design on 2026-10-02 by replying “可以”, then requested continued implementation. Sol High implements, Astra High independently reviews concurrency/consistency, and Luna High records progress. These model roles replace the older workflow's Claude implementer role for this task.
+
+Implementation dispatched from documentation-only descendant `fa1c25169b4547e7db7d2875595afafb5662a2d4`; its product source is unchanged from the recorded source base. The implementer owns the sole pytest lane. Packet 2 and Packet 3 remain draft until their preceding implementation passes exact-source review.
 
 ## Non-goals
 
