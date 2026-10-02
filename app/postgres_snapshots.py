@@ -17,6 +17,7 @@ from psycopg.types.json import Jsonb
 
 from app.history import EMPTY_HISTORY, HistoryRepository
 from app.postgres import PostgresDatabase
+from app.import_publication_evidence import require_no_gate_in_transaction
 
 
 class SnapshotConflict(ValueError):
@@ -110,6 +111,7 @@ class PostgresSnapshotRepository:
         # The surrounding publication transaction must lock this user before
         # any other domain rows, then check its Worker attempt if applicable.
         self._lock_user(cursor, user_id)
+        require_no_gate_in_transaction(cursor, user_id)
         if expected_version == 0:
             row = cursor.execute(
                 'insert into user_snapshots(user_id,kind,version,payload,updated_at) '
@@ -131,6 +133,7 @@ class PostgresSnapshotRepository:
         _kind(kind)
         with self.database.transaction() as cursor:
             self._lock_user(cursor, user_id)
+            require_no_gate_in_transaction(cursor, user_id)
             previous = self._read(cursor, user_id, kind)
             data = previous.data if previous else (
                 deepcopy(EMPTY_HISTORY) if kind == 'history' else {'user_id': user_id, 'memories': []}

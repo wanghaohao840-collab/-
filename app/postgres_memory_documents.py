@@ -9,6 +9,7 @@ import json
 from psycopg.pq import TransactionStatus
 
 from app.postgres import PostgresDatabase
+from app.import_publication_evidence import require_no_gate_in_transaction
 
 
 def _identifier(value):
@@ -63,6 +64,7 @@ class PostgresMemoryDocumentStore:
             raise ValueError('Document content must be text')
         self._metadata(metadata)
         self._lock_user(cursor)
+        require_no_gate_in_transaction(cursor, self.user_id)
         cursor.execute('''insert into memory_documents(user_id,document_id,content,metadata,created_at)
             values(%s,%s,%s,%s,to_char(clock_timestamp() at time zone 'UTC','YYYY-MM-DD HH24:MI:SS.US'))
             on conflict(user_id,document_id) do update set content=excluded.content,metadata=excluded.metadata''',
@@ -85,6 +87,7 @@ class PostgresMemoryDocumentStore:
     def delete_document_in_transaction(self, cursor, doc_id: str) -> None:
         _identifier(doc_id)
         self._lock_user(cursor)
+        require_no_gate_in_transaction(cursor, self.user_id)
         cursor.execute('delete from memory_documents where user_id=%s and document_id=%s', (self.user_id, doc_id))
 
     def close(self) -> None:

@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
+from psycopg.types.json import Jsonb
 
 from app.history import EMPTY_HISTORY
 from app.import_document_publication import (
@@ -58,9 +59,22 @@ def publication(shared_database, store):
     coordinator = PostgresUserMutationCoordinator(db)
     lease = coordinator.acquire(user, 'bootstrap', lease_seconds=120)
     assert lease is not None
+    with db.transaction() as cursor:
+        legacy_revision = cursor.execute(
+            'select version_num from alembic_version').fetchone()['version_num']
+    def bootstrap_history(cursor):
+        if legacy_revision == '20260929_12':
+            # This test deliberately creates a rev-12 business row before
+            # upgrading. The current writer requires the rev-14 gate table.
+            cursor.execute('''insert into user_snapshots
+                (user_id,kind,version,payload,updated_at)
+                values(%s,'history',1,%s,clock_timestamp())''',
+                (user, Jsonb(dict(EMPTY_HISTORY))))
+        else:
+            snapshots.compare_and_swap_in_transaction(
+                cursor, user, 'history', dict(EMPTY_HISTORY), expected_version=0)
     vectors.publish_complete(scope, lease, vectors.authority.read_head(scope), [],
-        domain_publish=lambda cursor: snapshots.compare_and_swap_in_transaction(
-            cursor, user, 'history', dict(EMPTY_HISTORY), expected_version=0),
+        domain_publish=bootstrap_history,
         snapshot_version=1)
     coordinator.release(lease)
     service = ImportDocumentPublicationService(db, store, vectors)

@@ -4,13 +4,15 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import math
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 from app.import_document_publication import (
     ImportDocumentPublicationError, ImportDocumentPublicationService,
 )
+from app.import_publication_evidence import encode_intent
 from app.import_vector_publication import (
     ImportPairUnknown, ImportVectorPairPublicationService, PairScopePlan,
 )
@@ -75,6 +77,27 @@ class _Expected:
     old_rag_id: UUID
     old_episode_id: UUID
     new_receipts: tuple | None = None
+
+
+@dataclass(frozen=True)
+class _FrozenMemoryPlan:
+    rag_scope: VectorScope
+    attempt: object
+    task: object
+    bundle: object = field(repr=False)
+    event_id: str
+    vector: tuple = field(repr=False)
+    old_rows: tuple = field(repr=False)
+    document: object = field(repr=False)
+    old_rag_pairing: object = field(repr=False)
+    old_rag_receipt: tuple = field(repr=False)
+    old_episode_receipt: tuple = field(repr=False)
+    item: dict = field(repr=False)
+    event_metadata: dict = field(repr=False)
+    next_memory: dict = field(repr=False)
+    new_evidence: object = field(repr=False)
+    candidate_ids: tuple[UUID, UUID]
+    intent: dict = field(repr=False)
 
 
 _RECEIPT_FIELDS = (
@@ -259,8 +282,21 @@ class ImportMemoryPublicationService:
             sorted((row['document_id'], row['content'], row['metadata'], row['created_at'])
                    for row in rows))
 
-    def publish(self, rag_scope, attempt, new_rag_points, *, event_vector,
-                event_profile) -> ImportMemoryPublication:
+    @staticmethod
+    def _scope_intent(scope, head, last_id, receipt, candidate):
+        return {'tenant_id': scope.tenant_id, 'vector_kind': scope.vector_kind,
+                'namespace': scope.namespace, 'index_key': scope.index_key,
+                'identity': deepcopy(scope.identity.to_dict()),
+                'index_revision': head.index_revision,
+                'head': {'state': head.state, 'revision': head.revision,
+                         'generation_id': str(head.generation_id) if head.generation_id else None,
+                         'last_generation_id': str(last_id),
+                         'index_revision': head.index_revision,
+                         'snapshot_version': head.snapshot_version},
+                'old_receipt': list(receipt), 'candidate_id': str(candidate)}
+
+    def _plan_intent(self, rag_scope, attempt, new_rag_points, *, event_vector,
+                     event_profile) -> _FrozenMemoryPlan:
         (rag_scope, attempt, new_rag_points, task, bundle, event_id, vector,
          old_rows) = self._preflight(rag_scope, attempt, new_rag_points,
                                      event_vector, event_profile)
@@ -269,9 +305,9 @@ class ImportMemoryPublicationService:
             old_rag = self._receipt(cursor, rag_scope, old_rag_pairing.last_generation_id)
         if old_rag is None or old_rag[0] != 'published':
             raise ImportMemoryPublicationError('Prior RAG receipt changed')
-        prepared = self.documents._prepare_document(rag_scope, attempt,
-                                                    new_rag_points, task=task)
-        if prepared.old_pairing != old_rag_pairing:
+        planned = self.documents._plan_document(rag_scope, attempt,
+                                                new_rag_points, task=task)
+        if planned.old_pairing != old_rag_pairing:
             raise ImportMemoryPublicationError('Prior RAG pairing changed')
         user = task.user_id
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -281,7 +317,7 @@ class ImportMemoryPublicationService:
                 'metadata': {'user_id': user, 'import_task_id': task.task_id,
                              'document_id': task.document_id,
                              'document_name': task.original_name,
-                             'document_path': prepared.record['document_path'],
+                             'document_path': planned.record['document_path'],
                              'file_suffix': task.file_suffix, 'session_id': 'import'}}
         payload = dict(item['metadata']) | {
             'memory_id': event_id, 'episode_id': event_id, 'timestamp': timestamp,
@@ -290,14 +326,80 @@ class ImportMemoryPublicationService:
         _canonical(payload)
         next_memory = deepcopy(bundle.snapshot)
         next_memory['memories'].append(deepcopy(item))
-        next_history = deepcopy(prepared.next_history)
+        next_history = deepcopy(planned.next_history)
         old_episode = _receipt_projection(bundle.publication_receipt)
         new_evidence = document_evidence(user, next_history)
-        expected = _Expected(deepcopy(task), deepcopy(next_history), prepared.history.version + 1,
-                             deepcopy(next_memory), bundle.head.snapshot_version + 1,
-                             deepcopy(prepared.record), deepcopy(item), deepcopy(payload),
-                             event_id, tuple(prepared.issued_ref), new_evidence,
-                             old_rag[1], old_episode, prepared.old_pairing.last_generation_id,
+        candidates = (uuid4(), uuid4())
+        if candidates[0] == candidates[1]:
+            raise ImportMemoryPublicationError('Candidate identities collided')
+        raw_rows = [list(row) for row in old_rows]
+        intent = {
+            'schema_version': 1,
+            'attempt': {'user_id': user, 'task_id': task.task_id,
+                        'task_lease_version': attempt.lease_version,
+                        'worker_id': attempt.worker_id,
+                        'task_lease_token': str(attempt.lease_token),
+                        'user_lease_token': str(attempt.user_lease.lease_token),
+                        'user_lease_version': attempt.user_lease.lease_version,
+                        'document_id': task.document_id},
+            'task': {key: getattr(task, key) for key in (
+                'task_id', 'batch_id', 'user_id', 'document_id',
+                'original_name', 'file_suffix', 'size_bytes', 'created_at')},
+            'source': {'bucket': task.bucket, 'key': task.source.key,
+                       'version_id': task.source.version_id,
+                       'sha256': task.source.sha256,
+                       'size_bytes': task.source.size_bytes},
+            'scopes': {
+                'rag': self._scope_intent(rag_scope, planned.old_pairing.head,
+                    planned.old_pairing.last_generation_id, old_rag[1], candidates[0]),
+                'episode': self._scope_intent(self.episode_scope, bundle.head,
+                    bundle.receipt['generation_id'], old_episode, candidates[1])},
+            'snapshots': {
+                'old_history': {'version': planned.history.version,
+                                'data': deepcopy(planned.history.data)},
+                'next_history': {'version': planned.history.version + 1,
+                                 'data': deepcopy(next_history)},
+                'old_memory': {'version': bundle.head.snapshot_version,
+                               'data': deepcopy(bundle.snapshot)},
+                'next_memory': {'version': bundle.head.snapshot_version + 1,
+                                'data': deepcopy(next_memory)}},
+            'memory_rows': raw_rows,
+            'event': {'event_id': event_id, 'timestamp': timestamp,
+                      'item': deepcopy(item), 'metadata': deepcopy(payload)},
+            'document': {'key': planned.object_key, 'record': deepcopy(planned.record),
+                         'count': new_evidence.count, 'digest': new_evidence.digest,
+                         'baseline_row_digest': sha256(_canonical(raw_rows).encode('utf-8')).hexdigest(),
+                         'fixed_refs': [list(ref) for ref in planned.fixed_refs],
+                         'old_witness': ({'head_revision': old_rag_pairing.head.revision,
+                             'last_generation_id': str(old_rag_pairing.last_generation_id),
+                             'index_revision': old_rag_pairing.receipt_index_revision,
+                             'publication_snapshot_version': old_rag_pairing.receipt_snapshot_version,
+                             'document_count': old_rag_pairing.witness_count,
+                             'documents_sha256': old_rag_pairing.witness_digest}
+                             if old_rag_pairing.has_witness else None)},
+        }
+        encode_intent(intent)  # Refuse complete oversized intents before any publication write.
+        return _FrozenMemoryPlan(rag_scope, attempt, task, bundle, event_id,
+            tuple(vector), old_rows, planned, old_rag_pairing, old_rag[1],
+            old_episode, deepcopy(item), deepcopy(payload), next_memory,
+            new_evidence, candidates, deepcopy(intent))
+
+    def publish(self, rag_scope, attempt, new_rag_points, *, event_vector,
+                event_profile) -> ImportMemoryPublication:
+        plan = self._plan_intent(rag_scope, attempt, new_rag_points,
+                                 event_vector=event_vector, event_profile=event_profile)
+        rag_scope, attempt, task, bundle = (plan.rag_scope, plan.attempt,
+                                            plan.task, plan.bundle)
+        event_id, vector, old_rows = plan.event_id, plan.vector, plan.old_rows
+        prepared = self.documents._write_planned_document(plan.document, attempt)
+        if prepared.old_pairing != plan.old_rag_pairing:
+            raise ImportMemoryPublicationError('Prior RAG pairing changed')
+        expected = _Expected(deepcopy(task), deepcopy(plan.document.next_history), prepared.history.version + 1,
+                             deepcopy(plan.next_memory), bundle.head.snapshot_version + 1,
+                             deepcopy(prepared.record), deepcopy(plan.item), deepcopy(plan.event_metadata),
+                             event_id, tuple(prepared.issued_ref), plan.new_evidence,
+                             plan.old_rag_receipt, plan.old_episode_receipt,
+                             prepared.old_pairing.last_generation_id,
                              bundle.receipt['generation_id'])
         # The callback owns independent copies and the original issued capability.
         callback_expected = deepcopy(expected)
@@ -309,7 +411,8 @@ class ImportMemoryPublicationService:
         rag_plan = PairScopePlan(self.pair.rag, rag_scope, prepared.old_pairing.head,
                                  prepared.points, expected.history_version)
         episode_plan = PairScopePlan(self.pair.episode, self.episode_scope, bundle.head,
-                                     [*bundle.points, VectorPoint(event_id, vector, payload)],
+                                     [*bundle.points, VectorPoint(event_id, list(vector),
+                                                                   plan.event_metadata)],
                                      expected.memory_version)
         try:
             pair = self.pair.publish_prepared_pair(rag_plan, episode_plan, attempt,

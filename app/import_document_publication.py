@@ -7,7 +7,7 @@ It is never a local durable path.  The exact S3 version is held exclusively in
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from uuid import UUID
 
@@ -21,6 +21,7 @@ from app.postgres_history_document_witnesses import (
 from app.postgres_import_artifacts import PostgresImportArtifactService
 from app.postgres_import_leases import ImportAttempt, PostgresImportLeaseRepository
 from app.postgres_snapshots import PostgresSnapshotRepository, SnapshotConflict
+from app.import_publication_evidence import require_no_gate_in_transaction
 from app.postgres_vector_generations import VectorScope
 from app.vector_generation_service import VectorGenerationService, VectorPublication
 from hello_agents.memory.storage.generation_vector_store import GenerationVectorStore
@@ -60,6 +61,22 @@ class _PreparedDocument:
     original_ids: frozenset[str]
 
 
+@dataclass(frozen=True)
+class _PlannedDocument:
+    scope: VectorScope
+    task: _PreparedTask
+    history: object
+    old_pairing: object
+    old_evidence: object
+    fixed_refs: tuple
+    object_key: str
+    content: bytes = field(repr=False)
+    record: dict = field(repr=False)
+    next_history: dict = field(repr=False)
+    points: tuple[VectorPoint, ...] = field(repr=False)
+    original_ids: frozenset[str]
+
+
 class ImportDocumentPublicationService:
     """Append only one server-assigned document to an already paired corpus.
 
@@ -89,6 +106,7 @@ class ImportDocumentPublicationService:
 
     def _task_and_source(self, cursor, attempt: ImportAttempt) -> _PreparedTask:
         row = self.imports._live(cursor, attempt)
+        require_no_gate_in_transaction(cursor, attempt.task.user_id)
         task = _task_from_row(row)
         fields = ('task_id', 'batch_id', 'user_id', 'document_id',
                   'original_name', 'file_suffix', 'size_bytes', 'created_at')
@@ -183,6 +201,11 @@ class ImportDocumentPublicationService:
             snapshot_version=prepared.history.version + 1)
 
     def _prepare_document(self, scope, attempt, new_points, *, task=None):
+        planned = self._plan_document(scope, attempt, new_points, task=task)
+        return self._write_planned_document(planned, attempt)
+
+    def _plan_document(self, scope, attempt, new_points, *, task=None) -> _PlannedDocument:
+        scope, attempt, new_points = deepcopy((scope, attempt, new_points))
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             prepared_task = self._task_and_source(cursor, attempt)
@@ -203,9 +226,6 @@ class ImportDocumentPublicationService:
         object_key = artifact_key(prepared_task.user_id, 'documents',
                                   prepared_task.document_id, prepared_task.file_suffix,
                                   prepared_task.source.sha256)
-        object_ref = self.store.put_immutable(prepared_task.user_id, object_key, content).ref
-        verified = self.documents.verify_for_publication(prepared_task.user_id,
-                                                         prepared_task.document_id, object_ref)
 
         history = self.snapshots.read(prepared_task.user_id, 'history')
         if history is None:
@@ -246,18 +266,42 @@ class ImportDocumentPublicationService:
             'document_id': prepared_task.document_id,
             'document_name': prepared_task.original_name,
             'file_suffix': prepared_task.file_suffix,
-            'document_path': f'object://{self.store.bucket}/{object_ref.key}',
+            'document_path': f'object://{self.store.bucket}/{object_key}',
             'loaded_at': prepared_task.created_at,
             'import_task_id': prepared_task.task_id,
         }
         next_history = deepcopy(history.data)
         next_history['documents'].append(deepcopy(record))
-        return _PreparedDocument(prepared_task, history, old_pairing, old_evidence,
-                                 fixed_refs, verified,
+        return _PlannedDocument(scope, prepared_task, history, old_pairing, old_evidence,
+                                fixed_refs, object_key, bytes(content), deepcopy(record),
+                                next_history, tuple(deepcopy([*existing, *points])),
+                                frozenset(original_ids))
+
+    def _write_planned_document(self, planned: _PlannedDocument,
+                                attempt: ImportAttempt) -> _PreparedDocument:
+        if not isinstance(planned, _PlannedDocument):
+            raise ImportDocumentPublicationError('Read-only document plan required')
+        current_pairing = self.witnesses.read_current(planned.scope)
+        if current_pairing != planned.old_pairing:
+            raise ImportDocumentPublicationError('RAG base changed before document put')
+        with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            if self._task_and_source(cursor, attempt) != planned.task:
+                raise ImportDocumentPublicationError('Import task or source changed')
+            current = self.snapshots._read(cursor, planned.task.user_id, 'history')
+            if (current is None or current.version != planned.history.version
+                    or self._canonical_json(current.data) !=
+                       self._canonical_json(planned.history.data)):
+                raise ImportDocumentPublicationError('History changed before document put')
+        object_ref = self.store.put_immutable(planned.task.user_id,
+                                              planned.object_key, planned.content).ref
+        verified = self.documents.verify_for_publication(planned.task.user_id,
+                                                         planned.task.document_id, object_ref)
+        return _PreparedDocument(planned.task, planned.history, planned.old_pairing,
+                                 planned.old_evidence, planned.fixed_refs, verified,
                                  self.documents._issuance_values(verified),
-                                 deepcopy(record), next_history,
-                                 tuple(deepcopy([*existing, *points])),
-                                 frozenset(original_ids))
+                                 deepcopy(planned.record), deepcopy(planned.next_history),
+                                 deepcopy(planned.points), planned.original_ids)
 
     def _publish_document_domain(self, cursor, prepared, scope, attempt):
         prepared_task = prepared.task
