@@ -19,6 +19,8 @@ Latest migration is `20260930_13`. The revision-12 setup in `test_import_documen
 - Private planning performs no authority or external write. `reserve_intent` is a separate user-first transaction.
 - No remaining Packet 1 blocker. Numeric limits freeze after measured sizing; over-limit refusal remains legal, with no 100000-entry capacity guarantee.
 
+The later fixed-source Astra inventory (`.runtime/distributed-cutover/restart-mutator-inventory.md`, source `fa1c25169b4547e7db7d2875595afafb5662a2d4`) extends the main plan's explicit serial ownership to PostgreSQL import-control/store factories, source/task admission, bare witness/index helpers, candidate I/O admission, and unresolved source/task/audit retention. Packet 2's ownership now includes its evidence-slot repository and exact terminal admission in the four lower-level domain writers. Astra's follow-up found no scope blocker: these complete the approved all-mutator and exact-value contracts, not a new architecture or implementation PASS. Downstream packets remain draft pending their accepted prerequisites.
+
 ## Accepted scope and packet graph
 
 | Packet | Depends on | Parallel-safe | Outcome | Readiness |
