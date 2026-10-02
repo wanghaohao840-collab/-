@@ -1,7 +1,7 @@
 ---
 id: "restart-publication-evidence-02"
 title: "Live publication and detached restart proof"
-status: "ready"
+status: "in_progress"
 parallel-safe: false
 depends-on: ["restart-publication-evidence-01"]
 base-commit: "bc6aa90b088b70b6684cd3157f5aa10171935745"
@@ -9,6 +9,8 @@ owner: "restart_live_sol_implementation (GPT-6 Sol High)"
 ---
 
 # Task Packet: Live publication and detached restart proof
+
+Claimed by `restart_live_sol_implementation` (GPT-6 Sol High) after Astra's promoted-packet READY review. Dispatch source is documentation descendant `3c47a8d9e228ee6edb01ec78653f309b9a6ae5d3`, with product source identical to accepted Packet 1 `bc6aa90`. Root grants this worker the sole pytest lane after confirming no pytest process. The prior checkpoint was pushed with exit 0 and live remote verified at `3c47a8d`; this status update has its own later commit.
 
 ## Goal
 

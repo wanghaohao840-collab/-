@@ -26,7 +26,7 @@ The later fixed-source Astra inventory (`.runtime/distributed-cutover/restart-mu
 | Packet | Depends on | Parallel-safe | Outcome | Readiness |
 | --- | --- | --- | --- | --- |
 | `01-evidence-foundation.md` | Approved structure and completed sizing | false | Bounded codec, additive evidence/gate/reservations, guarded direct entries, read-only plan | Done; Sol implementation `bc6aa90`, Astra exact Spec/Quality/Delivery PASS |
-| `02-live-publication-proof.md` | Accepted Packet 1 `bc6aa90` and exact eight hashes | false | Live write-once publication slots and detached strong proof | Ready; Astra final promoted-packet check PASS, Sol High owns implementation |
+| `02-live-publication-proof.md` | Accepted Packet 1 `bc6aa90` and exact eight hashes | false | Live write-once publication slots and detached strong proof | In progress; Astra final promoted-packet READY, Sol High owns implementation |
 | Packet 3 | Packet 2 exact acceptance | false | Recovery-only lease/queue, permanent exact revocation and all remaining guards | Draft until prerequisite delivered; root prepares self-contained packet then |
 
 Packet 1 has completed verification and exact-commit review. Packet 2 freezes its new private signatures, type homes, wire hash, UUID conversion, issued callback and transaction/value admission, candidate operation checks, and detached proof service in a self-contained packet. These new APIs are to be implemented in Packet 2, rather than available baseline APIs. Packets overlap C files and must be serial.
