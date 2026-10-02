@@ -1,6 +1,6 @@
-# Restart-safe unknown publication evidence — design draft
+# Restart-safe unknown publication evidence — approved structural design
 
-**Status:** DRAFT / REVIEW PENDING USER APPROVAL. This is an architecture proposal, not approved or implemented.
+**Status:** STRUCTURE APPROVED — 2026-10-02 (user reply: “可以”). Approval covers the reviewed proposal structure only; it is not approval of an implementation or capability claim. Packet 1 must complete representative and incompressible sizing, then freeze numeric limits before implementation proceeds.
 **Scope:** The opt-in Import-Memory RAG + episode publication path before independent Worker wiring.
 **Out of scope:** runtime/API composition, historical episode migration, new-user episode baseline/profile,
 production cutover, source Qdrant and retained-target mutation, and any new recall policy.

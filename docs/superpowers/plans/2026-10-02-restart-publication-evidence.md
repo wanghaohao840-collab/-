@@ -1,0 +1,177 @@
+# Restart-safe unknown publication evidence Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `subagent-driven-development` to implement this plan task by task. Track each step with its checkbox. The three packets run strictly in order, with an independent review after each packet.
+
+**Goal:** Make one opt-in Import-Memory RAG plus episode publication attempt independently provable or safely quarantined after process restart, without replaying an unknown external write.
+
+**Architecture:** Freeze a bounded private canonical intent, a per-user unresolved gate, and two globally permanent generation reservations in one PostgreSQL transaction before publication S3/Qdrant I/O. Append verified document, sealed descriptors and actual terminal receipts once; terminal receipts commit with both vector heads, History/Memory, document reference/witness and task success. Detached recovery reads exact evidence and either proves then acknowledges success, or conditionally revokes both IDs and holds/retries a fresh attempt.
+
+**Tech Stack:** Python 3, psycopg/PostgreSQL, Alembic, existing S3 object store and Qdrant generation adapters, pytest. Use the repository `venv` on Windows.
+
+## Global Constraints
+
+- Approved design: `docs/superpowers/specs/2026-10-02-restart-publication-evidence-design.md` (2026-10-02 user approval); baseline HEAD `bc3176387ec4e41d452c5cac6e07bce1ba5fbc20`. Its status line may be updated separately; the approved structure, not that stale label, controls this plan.
+- Scope is opt-in C (`ImportMemoryPublicationService`) and B (`ImportVectorPairPublicationService`) before native Worker/API/bootstrap enablement. Existing local mode and standalone RAG publication compatibility remain intact. No historical episode migration, new-user baseline/profile, source Qdrant or retained-target mutation, or recall-policy change.
+- PostgreSQL is structured authority; S3 holds immutable document bytes; Qdrant holds vector generations. Unknown external outcomes are never inferred from absence or timeout and are never blindly replayed.
+- Lock order for mutation: **user → user mutation lease → task → task audit → evidence/gate → reservations/generation rows**, then RAG before episode; fresh database-clock liveness checks follow blocking locks. Do not hold a recovery queue row while waiting on user.
+- `VerifiedDocumentRef` is an instance-issued live capability; durable scalar object data is comparison evidence, never a reconstructed token. Detached proof does no S3 put, Qdrant stage/upload/seal/publish, token verification/issuance, or task completion.
+- All proof-dependent shared writes must check the unresolved gate under the user lock. An expired ordinary lease does not remove the gate. No generic ambient trusted context or unfenced bypass; only the exact live attempt may perform planned publication writes. Recovery metadata operations require a distinct narrow lease.
+- Before implementation, measure representative and incompressible payloads, then freeze the canonical and compressed byte bounds and total-slot/row bound. The design's 64 MiB / 8 MiB values are candidate ceilings, **not** a 100,000+1 capacity claim. Reject oversize before external publication I/O; streaming decode is bounded.
+- Keep payload private, tenant-scoped and redacted; retain unresolved evidence and proof dependencies without age-only cleanup, and retain UUID tombstones permanently. Existing approved retention applies only after resolution.
+- Real integration tests use disposable PostgreSQL/S3/Qdrant test resources through `POSTGRES_TEST_URL`, `S3_TEST_ENDPOINT`, `S3_TEST_ACCESS_KEY`, `S3_TEST_SECRET_KEY`, `GENERATION_QDRANT_TEST_URL`. Never aim them at retained or production resources. Use `--basetemp` within this repository.
+
+## File map and stable interfaces
+
+Packet 1 owns `migrations/versions/20261002_14_import_publication_evidence.py` (new, follows `20260930_13`), `app/import_publication_evidence.py` (new codec and repository), `app/import_document_publication.py` (read-only planning split), `app/import_memory_publication.py` (read-only frozen C planner; new durable publication entry remains disabled until all three packets and their guards pass review), and the minimal guards in `app/postgres_snapshots.py` and `app/postgres_memory_documents.py`. Its tests live in `tests/integration/test_import_publication_evidence.py` (new) and the existing C preflight tests.
+
+Packet 2 owns the B/C publication call chain in `app/import_vector_publication.py`, `app/import_memory_publication.py`, `app/import_document_publication.py`, `app/vector_generation_service.py`, and `app/postgres_vector_generations.py`; it adds `app/import_publication_proof.py` for detached read-only proof and tests in `tests/integration/test_import_publication_proof.py` (new) plus existing B/C fault tests. Packet 1's touched C file is handed off only after review; the packets never edit it concurrently.
+
+Packet 3 owns `migrations/versions/20261002_15_import_publication_recovery.py` (new, follows `_14`), `app/import_publication_recovery.py` (new), `app/postgres_import_leases.py`, `app/postgres_coordination.py`, final mutation guards in `app/postgres_vector_generations.py`, `app/postgres_document_objects.py`, `app/postgres_history_document_witnesses.py` and any distributed deletion/fence writer found by the call-site inventory. It adds `tests/integration/test_import_publication_recovery.py` (new) and extends existing lease/fault tests. Packet 3 may touch earlier files only after packet 2 review.
+
+Use these exact proposed interfaces across packets; change a signature only in packet review before downstream work:
+
+```python
+# app/import_publication_evidence.py
+AttemptKey = tuple[str, str, int]  # user_id, task_id, task_lease_version
+class PublicationGateHeld(RuntimeError): ...
+class PublicationEvidenceError(RuntimeError): ...
+class PostgresImportPublicationEvidenceRepository:
+    def __init__(self, database): ...
+    def reserve_intent(self, attempt: ImportAttempt, intent: dict) -> AttemptKey: ...
+    def read_exact(self, user_id: str, task_id: str, task_lease_version: int) -> FrozenEvidence | None: ...
+    def require_shared_write_in_transaction(self, cursor, user_id: str,
+                                            attempt: ImportAttempt | None = None,
+                                            *, phase: str | None = None) -> None: ...
+    def require_candidate_in_transaction(self, cursor, attempt: ImportAttempt,
+                                         scope: VectorScope, generation_id: UUID,
+                                         *, phases: tuple[str, ...]) -> None: ...
+    def append_document_in_transaction(self, cursor, attempt: ImportAttempt,
+                                       verified: VerifiedDocumentRef,
+                                       history_record_sha256: str) -> FrozenEvidence: ...
+    def append_sealed_in_transaction(self, cursor, attempt: ImportAttempt,
+                                     kind: str, sealed: _SealedGeneration) -> FrozenEvidence: ...
+    def append_terminal_in_transaction(self, cursor, attempt: ImportAttempt,
+                                       rag_receipt: tuple, episode_receipt: tuple) -> FrozenEvidence: ...
+```
+
+`FrozenEvidence` exposes validated, copied scalar intent/slots, immutable hash, phase/version and exact selectors; it carries no `ImportAttempt` handle, private `_PairContext`, or `VerifiedDocumentRef`. Private active-call data may keep those live objects separately. `require_shared_write_in_transaction` takes an explicit `ImportAttempt`, checks the *database* tuple and allowed phase, and never trusts a caller-supplied flag. Recovery never passes its lease through this method. B's candidate path additionally calls `require_candidate_in_transaction`; a bare UUID or a different owner cannot authorize it. No direct writer receives a general “trusted” bypass.
+
+## Packet 1 — bounded intent, additive authority, read-only planner
+
+### Task 1: Measure and implement the bounded typed codec
+
+**Files:** Create `app/import_publication_evidence.py`, `tests/integration/test_import_publication_evidence.py`; inspect `app/published_episode_reads.py:_json`, `app/import_memory_publication.py:_receipt_projection`, and existing scale fixtures.
+
+**Interfaces:** `encode_intent(intent: dict) -> EncodedIntent`; `decode_intent(encoded: bytes, *, canonical_bytes: int, digest: str) -> dict`. `EncodedIntent` contains format version, compressed bytes, canonical byte length and lowercase SHA-256; `limits` are module constants frozen by this task. Boolean values never satisfy integer fields; UUIDs are canonical lowercase text only at the JSON boundary and reconstructed with explicit typed validation.
+
+- [ ] Build a reproducible, offline sizing script in this test file using complete next History and Memory values duplicated as required by the design, a realistic representative corpus and seeded incompressible text. Record sample lengths, 95th/maximum per-attempt overhead, compressed/canonical sizes and decode time in test comments or a short adjacent measurement note; explicitly report samples over the candidate 64 MiB / 8 MiB limits.
+- [ ] Freeze numeric constants for canonical intent, compressed intent, total slots/row, and maximum decode output from that evidence. Keep the design's candidate 64 MiB / 8 MiB only if measured samples justify them; neither point count nor a synthetic compressible case establishes 100000+1 capacity.
+- [ ] Write failing tests for exact canonical JSON (`sort_keys=True`, compact separators, UTF-8, `allow_nan=False`), typed versions, duplicate-key rejection, unsupported format/schema, hash mismatch, truncated or trailing compressed stream, oversized declared length, decompression bomb and incompressible over-limit data. Example assertion: `with pytest.raises(PublicationEvidenceError): decode_intent(bomb, canonical_bytes=1, digest='0'*64)`.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_evidence.py -q --basetemp=.pytest-tmp-evidence-codec`; expect the new tests to fail before implementation.
+- [ ] Implement canonical encode and streaming `zlib.decompressobj()` decode in bounded chunks. Enforce both encoded and decoded bounds before allocating a full JSON value; check `eof`, `unused_data`, exact declared length, hash and canonical re-encoding. Validate schema and nested typed fields, copied source pin, two distinct UUIDs, both exact scope identities, old receipt tuples, full next snapshots, document count/digest and timestamp. Exclude raw vectors, staged file bytes, secrets and stack traces.
+- [ ] Run the same targeted test; expect all codec tests to pass. Record the chosen constants and measurements in the plan execution report before packet 1 review.
+
+### Task 2: Add immutable attempt evidence, user gate and permanent UUID reservations
+
+**Files:** Create `migrations/versions/20261002_14_import_publication_evidence.py`; extend `app/import_publication_evidence.py`, `tests/integration/test_import_publication_evidence.py`, `tests/integration/test_postgres_schema.py`.
+
+**Interfaces:** `reserve_intent(attempt, intent)` atomically inserts evidence, unresolved gate and RAG/episode reservations; `read_exact(user_id, task_id, lease_version)` returns a validated `FrozenEvidence` or `None`, and never searches by task alone. The schema keeps `intent_payload bytea`, format, lengths, `intent_hash`, exact task/user lease tuple, immutable source pin, phase/version and nullable write-once document/RAG-sealed/episode-sealed/terminal-RAG/terminal-episode slots.
+
+- [ ] Write failing disposable PostgreSQL migration tests for revision `_14` after `_13`; verify legacy rows migrate unchanged. Test uniqueness `(user_id,task_id,task_lease_version)`, partial unique unresolved gate per user, and global `generation_id uuid` uniqueness. Reservations store exact attempt/owner/scope/base and have no cleanup cascade. A second use of a revoked UUID must fail even after evidence resolution and optional candidate cleanup.
+- [ ] Add SQL checks/triggers for fixed identity and intent hash, legal monotone `intent → document_verified → pair_sealed → terminal_committed → proved_succeeded` or pre-terminal `→ abandoned`, typed nonnegative phase version, null-to-value slots, no receipt rewriting, and reservation `reserved → revoked` only. Gate states are `unresolved` and `resolved`; `unknown`/`manual_hold` are separate reason fields, not demoting phases. Use `clock_timestamp()` database times.
+- [ ] Implement `reserve_intent` with user-first lock, `_live(cursor, attempt)` before and after task/audit locks, pinned task/source/head/index/old-receipt/snapshot comparison, then all three inserts in **one** transaction. Reject duplicate UUIDs and drift; never regenerate IDs inside the transaction. On ambiguous commit response, return/raise Unknown without starting external I/O; an exact-key read is diagnostic only until confirmed.
+- [ ] Add tenant tests: wrong user cannot read or mutate exact evidence; same task with a new lease version cannot inherit it; direct SQL attempt to alter immutable payload/slots fails. If `read_exact` sees a row with malformed hash, format or shape, it fails closed rather than returning partial evidence.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_evidence.py tests/integration/test_postgres_schema.py -q --basetemp=.pytest-tmp-evidence-schema`; expect pass against a fresh disposable schema. Commit this independently reviewable schema/repository slice.
+
+### Task 3: Guard direct shared writes under the user lock
+
+**Files:** Modify `app/postgres_snapshots.py`, `app/postgres_memory_documents.py`; extend `app/import_publication_evidence.py`; tests in `tests/integration/test_import_publication_evidence.py`, `tests/integration/test_postgres_snapshots.py`, `tests/integration/test_postgres_memory_documents.py`.
+
+**Interfaces:** `require_shared_write_in_transaction(cursor,user_id,attempt=None,*,phase=None)` is called **after** existing `_lock_user` and before SQL mutation. Without a gate it returns. In packet 1, every ordinary direct snapshot/Memory-document mutator refuses an unresolved gate, including a caller holding the exact live attempt. Packet 2 may introduce only a private, transaction-bound terminal admission tied to the issuer, exact frozen kind/version/payload or item; validating the attempt alone never admits arbitrary values. Preserve ordinary no-gate behavior.
+
+- [ ] First write failing tests: with an unresolved gate and expired ordinary import lease, direct `PostgresSnapshotRepository.update`/`compare_and_swap_in_transaction` and `PostgresMemoryDocumentStore.add_document_in_transaction`/`delete_document_in_transaction` refuse with no row/version change. A separate user's direct write succeeds concurrently. A forged attempt, newer same-user lease and wrong phase refuse.
+- [ ] Add the guard to `compare_and_swap_in_transaction` and `update` (the latter must check before its mutation callback), and both Memory-document transaction mutators. Do not add an attempt-only public bypass to these ordinary writers. Packet 2 will bind exact frozen terminal values through a narrow private integration; avoid a global context variable, weak object identity shortcut or recovery-lease bypass. Recheck database liveness after blocking row locks.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_evidence.py tests/integration/test_postgres_snapshots.py tests/integration/test_postgres_memory_documents.py -q --basetemp=.pytest-tmp-evidence-guard`; expect pass. Commit this direct-writer slice.
+
+### Task 4: Freeze C's complete read-only plan before S3 document put
+
+**Files:** Modify `app/import_document_publication.py`, `app/import_memory_publication.py`; extend `tests/integration/test_import_memory_preflight.py`, `tests/integration/test_import_memory_publication.py`.
+
+**Interfaces:** Add `ImportDocumentPublicationService._plan_document(scope,attempt,new_points,*,task=None) -> _PlannedDocument` (no put/token) and `_write_planned_document(planned,attempt) -> _PreparedDocument` (same repository verifies and issues the live token). C adds `_plan_intent(rag_scope,attempt,new_rag_points,*,event_vector,event_profile) -> _FrozenMemoryPlan`, containing copied task/source, both base heads/index identities, old receipts, complete old/new History/Memory, deterministic document key/record, timestamp, event/item/metadata, document count/digest and two preallocated UUIDs. `_FrozenMemoryPlan` is process-private; its canonical `intent` is saved by Task 2.
+
+- [ ] Write failing tests that monkeypatch `put_immutable` and require all collision/source/pair/profile/size refusals to happen before any put. Specifically assert deterministic `record['document_path'] == f'object://{bucket}/{key}'` without VersionId; the same path appears in the next History and event metadata. Assert a caller mutation during source read cannot alter frozen intent.
+- [ ] Split `_prepare_document` at its current lines 185–260: perform source exact-version read, History/witness/retained-reference/head/corpus checks, collision checks and deterministic key/record construction in `_plan_document`; put and `verify_for_publication` only in `_write_planned_document`. Keep the existing standalone `ImportDocumentPublicationService.publish` path through both methods so no scope regression occurs.
+- [ ] Move C's timestamp, item, event payload, complete next snapshots and `_Expected`-equivalent frozen fields from after `_prepare_document` to `_plan_intent`; generate distinct UUIDs there. The `VerifiedDocumentRef` and exact VersionId remain absent until `_write_planned_document`. Compute hashes of **full canonical values**, not digests alone. Ensure the read-only plan plus intent validation completes before `reserve_intent` and before S3/Qdrant writes.
+- [ ] During packet 1, keep the new durable publication seam disabled or fail closed after planning until packet 2 wires its slots/proof and packet 3 completes all shared-writer guards. Preserve existing ungated C and standalone RAG publication in no-gate scopes; an unresolved gate must refuse those older entry points before external writes. Test the new disabled seam and the existing compatible flow explicitly. Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_memory_preflight.py tests/integration/test_import_memory_publication.py -q --basetemp=.pytest-tmp-evidence-plan`; keep existing success tests passing; add separate durable-seam refusal tests rather than changing those tests to accept a regression. Commit the planner slice.
+
+**Packet 1 review gate:** Independently inspect migration downgrade stance, immutable SQL enforcement, codec and sizing evidence, lock order, direct-entry gate denial, copied pin/base comparisons and first-external-write barrier. Freeze interfaces before packet 2. Do not enable distributed publication. Verify `git diff --check` and targeted tests; give the reviewer the exact commit and changed-file list.
+
+## Packet 2 — live publication slots and detached strong proof
+
+### Task 5: Bind original live attempt to document and sealed pair slots
+
+**Files:** Modify `app/import_memory_publication.py`, `app/import_vector_publication.py`, `app/import_document_publication.py`, `app/vector_generation_service.py`, `app/postgres_vector_generations.py`, `app/import_publication_evidence.py`; extend `tests/integration/test_import_memory_publication.py`, `tests/integration/test_import_vector_publication.py`, `tests/integration/test_import_memory_fault_matrix.py`.
+
+**Interfaces:** `publish_prepared_pair(..., generation_ids: tuple[UUID,UUID], _domain_work=...)`; B's `_plan` accepts the exact reserved IDs and never calls `uuid4()` for this path. `append_document_in_transaction` captures `(user,document,bucket,key,VersionId,SHA-256,size,record_hash)` after `verify_for_publication`; `final_expected_hash = SHA256(schema_version || intent_hash || canonical(document_result))`. `append_sealed_in_transaction(..., kind, sealed)` binds that hash, exact owner tuple, base/index revision, snapshot version, verified count and digest once per ordered kind.
+
+- [ ] Write failing tests: no reserved intent means no S3/Qdrant write; duplicate reservation or changed task/source/head/old receipt denies before put; lost put response leaves Unknown with no fabricated `VerifiedDocumentRef`; differing second document result or seal is refused; stale/new owner and revoked UUID cannot stage.
+- [ ] In C, call `reserve_intent` after Task 4 read-only plan, then recheck exact live task/user tuple and unresolved gate immediately before S3 I/O. Call `_write_planned_document` once; append the scalar document result by null-to-value CAS. Keep its issued capability only in the active call and use it in `_terminal`.
+- [ ] Pass both reserved IDs into B. At each stage/seal/publish/abandon entry, use `require_candidate_in_transaction` under user-first locks alongside the existing `_owner` and `_candidate` checks. Preserve `stage`'s pre/post-insert `_owner` checks and same-transaction task/audit locks. Recheck gate/leases immediately before each Qdrant operation. Stage/upload/seal uncertainty must stop with Unknown; no same-ID retry or generic cleanup as proof.
+- [ ] Append RAG then episode sealed slots after each verified `_SealedGeneration`, before `try_begin_committing`; only the original attempt can fill them. A precomputed corpus digest in intent must not count as Qdrant seal evidence. Assert both slots and exact hash exist before beginning commit.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_memory_publication.py tests/integration/test_import_vector_publication.py tests/integration/test_import_memory_fault_matrix.py -q --basetemp=.pytest-tmp-evidence-live`; expect pass on disposable services. Commit the live slot slice.
+
+### Task 6: Commit actual receipts atomically and prove them from detached data
+
+**Files:** Create `app/import_publication_proof.py`, `tests/integration/test_import_publication_proof.py`; modify `app/import_memory_publication.py`, `app/import_vector_publication.py`, `app/import_publication_evidence.py`; extend existing C/B integration tests.
+
+**Interfaces:** `prove_exact(user_id: str, task_id: str, task_lease_version: int) -> ImportMemoryPublication | None` opens one `REPEATABLE READ READ ONLY` transaction, decodes validated `FrozenEvidence`, builds read-only selectors, and checks B's task/audit/receipt proof plus C's full domain proof. It never calls `reconcile(ImportMemoryPublicationUnknown)` or constructs private `_PairContext`. Terminal `append_terminal_in_transaction` accepts actual complete `_receipt_projection` values, including immutable `created_at`, `sealed_at`, `published_at`, in RAG/episode order.
+
+- [ ] Write failing tests around `PostgresImportLeaseRepository.complete` transaction exit: inject a commit-response loss **after** real commit and assert exact detached proof succeeds after constructing a fresh service instance; inject rollback at every terminal write and assert no terminal slot, task success or domain rows survive. Mismatched receipt timestamp, wrong order, schema/hash tamper, wrong tenant, changed History/Memory, Memory document, object ref, witness or deletion fence must yield Unknown/`None`.
+- [ ] In `_terminal`, after existing task/source/old-receipt/snapshot checks and domain writes, fetch both actual new receipt rows in that same cursor; compare them to sealed slots and planned heads; append both complete projections and `terminal_committed` CAS before `complete` returns. Do not release gate in terminal or write a post-commit journal. Ensure rollback removes vectors, domain and evidence together.
+- [ ] Extract B's pure `_read_pair_evidence_in_cursor` and `_validate_pair_evidence` logic so detached proof can use saved scalar descriptors, without publishing or accepting a reconstructed private `_PairContext`. In one read-only snapshot, validate exact attempt/audit/task success, old RAG/episode receipts even if retired, actual new receipts, heads or exact retained generation receipts, complete History/Memory values, exact Memory row, pinned document hash/reference, History witness and fences. Keep current strict C proof as the success rule; optional byte read is diagnostic only.
+- [ ] Change active `publish` reconciliation to call detached `prove_exact` after uncertain completion; keep in-process Unknown useful for diagnostics but do not rely on its copied `_Expected`. Verify a later valid publication retiring first receipts does not invalidate first proof, while deleting an event or changing immutable timestamp does.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_proof.py tests/integration/test_import_memory_publication.py tests/integration/test_import_memory_fault_matrix.py -q --basetemp=.pytest-tmp-evidence-proof`; expect pass on disposable services. Commit the terminal/proof slice.
+
+**Packet 2 review gate:** Independent reviewer checks the complete terminal transaction, exact timestamps and hashes, no token reconstruction, one shared read-only MVCC snapshot, old-retired receipt support, all uncertain-response paths and owner/reservation fencing. Confirm packet 1 interfaces stayed stable. Leave Worker/API/bootstrap disabled.
+
+## Packet 3 — bounded recovery, permanent revoke and all remaining guards
+
+### Task 7: Add recovery-only lease and fair bounded claim queue
+
+**Files:** Create `migrations/versions/20261002_15_import_publication_recovery.py`, `app/import_publication_recovery.py`, `tests/integration/test_import_publication_recovery.py`; modify `app/postgres_import_leases.py`, `app/postgres_coordination.py`.
+
+**Interfaces:** `PostgresImportPublicationRecoveryRepository.claim_next(worker_id: str, lease_seconds: int = 60) -> RecoveryClaim | None`; `prove_or_hold(claim: RecoveryClaim) -> str`; `RecoveryClaim` names exact attempt and recovery token/version/expiry only. Recovery lease uses database clock and existing 1–86400 second bound. It permits proof-status CAS, exact revoke/abandon and resolved-gate release only, never ordinary publication or external writes.
+
+- [ ] Write failing tests: `recover_expired` of an attempt with evidence closes ordinary leases and leaves task in non-due `needs_reconciliation` hold, gate unresolved and both IDs reserved; `claim_next` excludes unresolved attempts. A task with no evidence keeps existing safe recovery behavior. A terminal committed task with lost response is held pending proof, not requeued or failed.
+- [ ] Add bounded recovery queue records, oldest first per user and fair across users. Claim with a short `FOR UPDATE SKIP LOCKED` transaction, commit claim, then open a separate user-first authority transaction. Do not hold queue locks while waiting for user; reject unsupported isolation/autocommit drift. Recovery claim/renew/takeover validates token, version, phase and database-clock expiry after blocking locks.
+- [ ] Implement `recover_expired` evidence detection under user → lease → task → audit locks before changing eligibility. Ordinary lease expiry/release never clears `user_publication_gates`; sanitized task error/status contains no intent payload. Database outage grants no lease, proof, retry or external write.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_recovery.py tests/integration/test_postgres_import_leases.py -q --basetemp=.pytest-tmp-evidence-recovery`; expect pass. Commit the queue/lease slice.
+
+### Task 8: Proof first, then exact acknowledge or all-ID revocation
+
+**Files:** Modify `app/import_publication_recovery.py`, `app/import_publication_evidence.py`, `app/postgres_vector_generations.py`; extend `tests/integration/test_import_publication_recovery.py`.
+
+**Interfaces:** `ack_proved_in_transaction(cursor, claim, proof) -> None` checks same successful task, terminal hashes/receipts and unchanged gate, then CAS to `proved_succeeded` and resolves gate. `abandon_exact_in_transaction(cursor, claim) -> None` is recovery-only and atomically revokes **both** permanent reservations (including absent generation row), abandons qualifying `staging|sealed` rows, CASes pre-terminal evidence to `abandoned`, resolves gate. Neither accepts a normal import or user lease as authority.
+
+- [ ] Test proof-first behavior for every design crash row: before/lost intent, S3 put, verified object before result, partial stage/upload/seal, both seals before commit, terminal rollback, committed response loss, PostgreSQL outage, stale Worker and late Qdrant I/O. No absence or elapsed time proves rollback. `terminal_committed` without full proof stays terminal with `manual_hold` reason.
+- [ ] Run strict detached proof before any metadata transition, even in `intent` or with no generation rows. On proof success, use a separate short recovery authority transaction and CAS to `proved_succeeded`; require exact terminal receipts/hashes, task already `succeeded`, same gate/attempt, and valid recovery lease. A mismatch is an incident/hold; never rerun C callback.
+- [ ] For unproved pre-terminal evidence, lock both UUIDs in RAG/episode fixed order under user-first authority. Require old task/user tuple expired, task not succeeded, no matching terminal receipt, unchanged hashes, and every present generation owned by exact attempt/scope and in `staging|sealed`. `published|retired`, wrong owner, unreadable row or failed predicate leaves `manual_hold` and rolls back. For absent rows, still revoke their reservation. Update evidence, present rows, gate and resolution in **one** transaction.
+- [ ] Implement two mandatory SQL schedules using barriers and two database connections: (1) pause old `stage` after user lock, let recovery wait, then inspect its commit/rollback; (2) recovery revokes an absent-row UUID first, then release old `stage`. Repeat with a new live owner and after optional physical Qdrant cleanup; every stage of the revoked ID refuses. Test another user's write progresses while one gate holds.
+- [ ] Run `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_recovery.py tests/integration/test_postgres_vector_generations.py -q --basetemp=.pytest-tmp-evidence-revoke`; expect pass. Commit the proof/revoke slice.
+
+### Task 9: Close all proof-related mutation entrances and Worker seam
+
+**Files:** Modify `app/postgres_coordination.py`, `app/postgres_import_leases.py`, `app/postgres_vector_generations.py`, `app/postgres_document_objects.py`, `app/postgres_history_document_witnesses.py`, and any distributed deletion/fence writer identified in a fresh `rg` call-site inventory; extend `tests/integration/test_import_publication_recovery.py`, `tests/integration/test_import_memory_fault_matrix.py`.
+
+**Interfaces:** Ordinary coordinator acquisition and task claim refuse an unresolved gate. Every low-level proof-related writer calls `require_shared_write_in_transaction` after user lock, before mutation; candidate writers additionally check exact nonrevoked reservation. A narrow opt-in Worker adapter calls C once, catches Unknown, schedules detached proof and returns stable `needs_reconciliation` without task retry. Native runtime/API/bootstrap remain disabled.
+
+- [ ] Inventory every SQL/write entry for `user_snapshots`, `memory_documents`, `document_objects`, `history_document_witnesses`, `vector_heads`, `vector_generations`, deletion/clear fences and retained references with `rg -n` over `app` and migrations. Mark each entry guarded, disabled in distributed mode, or read-only in the review report; do not treat route-level checks as coverage of direct repositories.
+- [ ] Add guard calls to all active low-level mutators, including `publish_user`, `complete_import`, vector `stage/seal/abandon/_publish`, document-object publication, witness insertion, deletion and fence paths. Keep the exact original attempt's planned terminal writes admitted; deny other ordinary leases and expired attempts. Never let the recovery lease call these writer paths.
+- [ ] Add Worker adapter/failure classification so evidence-bearing Unknown is non-due and proof-first; after exact abandonment only a fresh attempt may be scheduled with new live task/user tuple, UUIDs and preflight against current source/heads. Keep retries, error text and logs sanitized. No source Qdrant/retained-target mutation, public API enablement or bootstrap change.
+- [ ] Test all gate lifetime cases, direct snapshot update and Memory document delete under an expired attempt, changed owner, later deletion/fence writer, cross-user fairness, lease ABA, Qdrant late upsert into revoked namespace, resolved cleanup and permanent tombstone retention. Prove existing local/standalone flows without an evidence gate still work.
+- [ ] Run targeted disposable tests: `D:/python_self_agent/venv/Scripts/python.exe -m pytest tests/integration/test_import_publication_recovery.py tests/integration/test_import_memory_fault_matrix.py tests/integration/test_postgres_snapshots.py tests/integration/test_postgres_memory_documents.py tests/integration/test_postgres_vector_generations.py -q --basetemp=.pytest-tmp-evidence-final`; expect pass. Run the repository's relevant offline unit suite, `git diff --check`, and migration upgrade on a fresh disposable schema. Commit this final guarded slice.
+
+**Packet 3 final review:** Independently verify the two SQL schedules, all crash cases, recovery lease scope, queue fairness, after-lock clocks, every direct mutator, permanent tombstones, retention and disabled runtime/API/bootstrap. Record test URLs only as service types, redact credentials, and report any untested live-service gates. This implementation is not production cutover or authenticated restart acceptance; those have separate approved gates.
+
+
+
