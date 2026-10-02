@@ -1,11 +1,11 @@
 ---
 id: "restart-publication-evidence-01"
 title: "Bounded durable evidence foundation and read-only planner"
-status: "in_progress"
+status: "done"
 parallel-safe: false
 depends-on: []
 base-commit: "bc3176387ec4e41d452c5cac6e07bce1ba5fbc20"
-owner: "restart_foundation_sol_implementation (GPT-6 Sol High)"
+owner: "restart_foundation_finalize (GPT-6 Sol High); Astra High accepted bc6aa90"
 ---
 
 # Task Packet: Durable evidence foundation
@@ -67,12 +67,12 @@ Use `D:/python_self_agent/venv/Scripts/python.exe`. Root has assigned test-only 
 
 ## Acceptance and verification
 
-- [ ] Sizing records canonical, compressed and total-slot bounds with exact samples/commands; above-bound complete intents refuse before external writes.
-- [ ] Codec handles finite native types, bool/int distinctions, malformed UUID/time/schema, hash/length mismatch, duplicate keys, truncation/trailing streams and decompression bombs without partial data or unbounded output.
-- [ ] Fresh schema upgrades from 13 to 14, preserves prior business rows, and enforces immutable proof/slots, tenant/attempt identity, global UUID uniqueness and permanent reservations.
-- [ ] Real two-connection tests prove gate survives lease expiry, direct mutations fail before callbacks/data changes, unrelated users proceed, and source/base drift atomically leaves no partial gate/evidence/reservations.
-- [ ] Complete private planner performs no authority or external writes; `reserve_intent` is a separate explicit transaction. All profile/collision/source/size refusals precede S3 put and candidate stage. Caller mutation does not alter frozen intent.
-- [ ] Existing ungated C/RAG success and regression paths still pass; no durable publication or runtime enablement is claimed.
+- [x] Sizing records canonical, compressed and total-slot bounds with exact samples/commands; above-bound complete intents refuse before external writes.
+- [x] Codec handles finite native types, bool/int distinctions, malformed UUID/time/schema, hash/length mismatch, duplicate keys, truncation/trailing streams and decompression bombs without partial data or unbounded output.
+- [x] Fresh schema upgrades from 13 to 14, preserves prior business rows, and enforces immutable proof/slots, tenant/attempt identity, global UUID uniqueness and permanent reservations.
+- [x] Real two-connection tests prove gate survives lease expiry, direct mutations fail before callbacks/data changes, unrelated users proceed, and source/base drift atomically leaves no partial gate/evidence/reservations.
+- [x] Complete private planner performs no authority or external writes; `reserve_intent` is a separate explicit transaction. All profile/collision/source/size refusals precede S3 put and candidate stage. Caller mutation does not alter frozen intent.
+- [x] Existing ungated C/RAG success and regression paths still pass; no durable publication or runtime enablement is claimed.
 
 Run the new evidence module first; distinguish genuine behavioral RED from import/setup errors. Freeze source hashes before final runs and never edit loaded files. For the final selected suite:
 
@@ -92,3 +92,15 @@ Expected: all selected tests pass; no required service cases skip. Save full exi
 Commit only owned implementation/test paths after verification and self-review; coordinator commits documents. Report actual parent/HEAD, exact files/interfaces, codec limits/measurements, acceptance evidence, precise test counts/exit/hash, historical failures, permitted residues and open packet-2/3 dependencies in ignored `restart-packet1-implementation-report.md`. Root generates the exact review package; Astra reviews before downstream implementation.
 
 If current interfaces/required files do not support this boundary, report the specific mismatch, evidence and smallest amendment to root. Do not treat a routine implementation choice or already-approved structural scope as needing renewed user approval.
+
+## Implementation handoff — accepted 2026-10-02
+
+- Status: done. Implementation `bc6aa90b088b70b6684cd3157f5aa10171935745`, parent `258d4fd5041107d5e403b00837a9430dde9abdb8`; exact review source BASE `fa1c25169b4547e7db7d2875595afafb5662a2d4`.
+- Changed files: the new evidence repository, migration 14 and evidence test; document/Memory publication planners, snapshot and Memory-row guards, and the legacy revision-12 document fixture. Exactly eight implementation/test paths; coordinator documents were committed separately.
+- Final corrective verification: `run-restart-packet1-reviewed.ps1` invokes the project venv on evidence, C preflight/publication, document publication, fault-matrix and consistency modules. **158 passed in 932.20s, exit 0; 0 failures/errors/skips**. Eight source hashes match before/after, review and committed raw blobs exactly. Post-test eight-file `py_compile` and `git diff --check` exited 0.
+- The broader pre-correction nine-module run was 161 passed and includes the three unchanged schema/snapshot/Memory-store modules. The intermediate 99-pass run edited loaded source and is not acceptance; focused corrective runs also preceded the final derived-record/event fix. Counts are not added. The corrected frozen six-module run and exact-source review establish this acceptance.
+- Disposable ledger: 158 case entries, 137 schemas, 137 buckets and 238 target collections; 21 offline cases N/A. Separate ledger-scoped read-only checks found zero of those names remaining; this is not an exhaustive service or protected-resource audit.
+- Limits: 64 MiB canonical/decode, 8 MiB compressed, 9 MiB compressed-plus-four-slots and 256 KiB per slot. Eight actual-schema synthetic samples fit; complete four-slot sum 3175 bytes, maximum canonical 7,743,255 and compressed 4,051,688 bytes. No product capacity/RAM claim.
+- Deviation: foundation substeps were delivered as one coherent eight-file commit. The delivered ordinary guard is module-level `require_no_gate_in_transaction(cursor, user_id)` with no attempt argument or bypass. Astra's three P2 findings were corrected: final S3 admission after witness read, fresh lease clock after global UUID inserts, and exact full derived domain validation.
+- Independent review: Astra High Spec PASS, Quality PASS, DELIVERY PASS at exact `bc6aa90`; report `.runtime/distributed-cutover/restart-packet1-final-acceptance-review.md`. Full implementation, logs/XML/meta, resource/absence and commit binding remain private ignored artifacts. Packet 2 embeds the accepted source hashes for downstream review.
+- Residual gates: durable live publication remains closed; Packet 2/3, resolved private-payload lifetime separation, full mutation coverage, Worker/API/bootstrap, authenticated restart journeys, compatible-image rollback and production acceptance remain open. Permanent UUID retention does not approve permanent private-payload retention.
