@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ from app.object_store import artifact_key
 from app.postgres_memory_documents import PostgresMemoryDocumentStore
 from app.postgres_snapshots import PostgresSnapshotRepository
 from app.postgres_coordination import PostgresUserMutationCoordinator
+from app.postgres_history_document_witnesses import PostgresHistoryDocumentWitnessRepository
 from app.postgres_vector_generations import VectorScope
 from hello_agents.memory.rag.embedding_profile import EmbeddingProfile
 from hello_agents.memory.rag.index_identity import IndexIdentity
@@ -161,6 +163,22 @@ def _complete_slots(intent, intent_hash):
     return (_canonical(result), _canonical(sealed['rag']),
             _canonical(sealed['episode']),
             _canonical({'final_expected_hash': final_hash, **receipts}))
+
+
+def test_exact_evidence_decodes_inside_callers_read_only_snapshot(memory_publication):
+    service, db, store, rag, snapshots, rag_scope, episode_scope, profile, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    plan = service._plan_intent(rag_scope, attempt,
+        [_point(rag_scope, attempt.task.document_id, 'new')],
+        event_vector=[1., 0., 0., 0.], event_profile=profile)
+    key = PostgresImportPublicationEvidenceRepository(db).reserve_intent(attempt, plan.intent)
+    repository = PostgresImportPublicationEvidenceRepository(db)
+    with db.transaction() as cursor:
+        cursor.execute('set transaction isolation level repeatable read read only')
+        frozen = repository._read_exact_in_cursor(cursor, key)
+        assert frozen.key == key
+        assert frozen.intent == plan.intent
+        assert frozen.phase == 'intent'
 
 
 def test_codec_round_trip_and_bounds_for_complete_typed_intent():
@@ -313,6 +331,52 @@ def _live_plan(memory_publication):
         [_point(rag_scope, attempt.task.document_id, 'new')],
         event_vector=[1., 0., 0., 0.], event_profile=profile)
     return service, db, store, rag_scope, user, other, attempt, plan
+
+
+def test_ordinary_witness_lock_serializes_with_intent_reservation(
+        memory_publication, monkeypatch):
+    service, db, store, scope, user, other, attempt, plan = _live_plan(memory_publication)
+    pairing = plan.document.old_pairing
+    assert not pairing.has_witness
+    acquired = threading.Event()
+    reservation_attempted = threading.Event()
+    release = threading.Event()
+    original_lock = PostgresUserMutationCoordinator._lock_user
+
+    def held_lock(cursor, user_id, *, skip=False):
+        if (threading.current_thread().name.startswith('ordinary-witness')
+                and acquired.is_set()):
+            reservation_attempted.set()
+        result = original_lock(cursor, user_id, skip=skip)
+        if (threading.current_thread().name.startswith('ordinary-witness')
+                and not acquired.is_set()):
+            acquired.set()
+            assert release.wait(30)
+        return result
+
+    monkeypatch.setattr(PostgresUserMutationCoordinator, '_lock_user',
+                        staticmethod(held_lock))
+    def insert_witness():
+        with db.transaction() as cursor:
+            cursor.execute('begin')
+            PostgresHistoryDocumentWitnessRepository.insert(
+                cursor, scope, pairing, plan.document.old_evidence)
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix='ordinary-witness') as pool:
+        witness = pool.submit(insert_witness)
+        assert acquired.wait(30)
+        reserve = pool.submit(PostgresImportPublicationEvidenceRepository(db).reserve_intent,
+                              attempt, plan.intent)
+        try:
+            assert reservation_attempted.wait(30)
+            assert not reserve.done()
+        finally:
+            release.set()
+        witness.result(timeout=60)
+        with pytest.raises(Exception):
+            reserve.result(timeout=60)
+    with db.transaction() as cursor:
+        assert cursor.execute('select count(*) as n from user_publication_gates').fetchone()['n'] == 0
 
 
 def test_read_only_plan_then_reservation_is_separate_and_gates_direct_writers(memory_publication,

@@ -7,16 +7,21 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import math
+from threading import Lock
 from uuid import UUID, uuid4, uuid5
+from weakref import WeakKeyDictionary
 
 from app.import_document_publication import (
     ImportDocumentPublicationError, ImportDocumentPublicationService,
 )
-from app.import_publication_evidence import encode_intent
+from app.import_publication_evidence import (
+    AttemptKey, PostgresImportPublicationEvidenceRepository, encode_intent,
+    require_no_gate_in_transaction,
+)
 from app.import_vector_publication import (
     ImportPairUnknown, ImportVectorPairPublicationService, PairScopePlan,
 )
-from app.postgres_document_objects import PostgresDocumentObjectRepository
+from app.postgres_document_objects import PostgresDocumentObjectRepository, VerifiedDocumentRef
 from app.postgres_history_document_witnesses import document_evidence
 from app.postgres_memory_documents import PostgresMemoryDocumentStore
 from app.postgres_vector_generations import VectorScope
@@ -27,6 +32,9 @@ from hello_agents.memory.rag.embedding_profile import EmbeddingProfile
 from hello_agents.memory.rag.index_identity import IndexIdentityError, validate_profile
 from hello_agents.memory.rag.prepare import PROJECT_POINT_NAMESPACE_UUID
 from hello_agents.memory.storage.vector_store import VectorPoint
+from hello_agents.memory.storage.generation_vector_store import (
+    GenerationVectorStoreError, _validate_candidate_points,
+)
 
 
 class ImportMemoryPublicationError(ImportDocumentPublicationError):
@@ -57,6 +65,191 @@ class ImportMemoryPublicationUnknown(RuntimeError):
         super().__init__(f'Import Memory {self.generation_ids} has unknown {phase} outcome')
         if cause is not None:
             self.__cause__ = cause
+
+
+class _LivePublication:
+    """Opaque, process-local handle; issuance is kept by its C service."""
+
+    __slots__ = ('__weakref__',)
+
+
+_LIVE_ISSUERS = WeakKeyDictionary()
+
+
+def _require_live_issuer(live):
+    if type(live) is not _LivePublication:
+        raise ImportMemoryPublicationError('Original issued live handle required')
+    service = _LIVE_ISSUERS.get(live)
+    if service is None:
+        raise ImportMemoryPublicationError('Live publication issuer is missing')
+    return service, service._require_live_issue(live)
+
+
+@dataclass(frozen=True)
+class _LiveIssue:
+    plan: _FrozenMemoryPlan
+    original_attempt: object
+    key: AttemptKey
+    intent_hash: str
+    document_service: object
+    document_repository: object
+    pair: object
+    imports: object
+    rag_service: object
+    episode_service: object
+    rag_authority: object
+    episode_authority: object
+    database: object
+    rag_raw: object
+    episode_raw: object
+
+
+class DurablePublicationUnknown(RuntimeError):
+    def __init__(self, attempt_key: AttemptKey, phase: str):
+        self.attempt_key = attempt_key
+        self.phase = phase
+        super().__init__(f'Durable publication outcome is unknown at {phase}')
+
+
+class _FixedTerminalWork:
+    __slots__ = ('__weakref__',)
+
+    def run(self, cursor, admission):
+        service, issue = _require_terminal_work(self)
+        return service._run_fixed_terminal(cursor, admission, issue)
+
+
+@dataclass(frozen=True)
+class _FixedTerminalIssue:
+    live: _LivePublication
+    prepared: object
+    rag_sealed: object
+    episode_sealed: object
+    expected: object
+    callback: object
+
+
+_TERMINAL_ISSUERS = WeakKeyDictionary()
+
+
+def _require_terminal_work(work):
+    if type(work) is not _FixedTerminalWork:
+        raise ImportMemoryPublicationError('Issued fixed terminal work required')
+    service = _TERMINAL_ISSUERS.get(work)
+    issue = None if service is None else service._terminal_issues.get(work)
+    if (issue is None or issue.callback.__self__ is not work
+            or issue.callback.__func__ is not _FixedTerminalWork.run):
+        raise ImportMemoryPublicationError('Fixed terminal callback issuer differs')
+    service._require_live_issue(issue.live)
+    return service, issue
+
+
+class _TerminalAdmission:
+    __slots__ = ('__weakref__',)
+
+
+@dataclass
+class _AdmissionIssue:
+    service: object
+    terminal_work: _FixedTerminalWork
+    cursor: object
+    evidence: object
+    transaction_id: int
+    active: bool = True
+
+
+_ADMISSIONS = WeakKeyDictionary()
+
+
+def _create_terminal_admission(work, cursor, evidence):
+    service, _ = _require_terminal_work(work)
+    admission = _TerminalAdmission()
+    transaction_id = cursor.execute('select txid_current() as id').fetchone()['id']
+    _ADMISSIONS[admission] = _AdmissionIssue(service, work, cursor, evidence,
+                                            transaction_id)
+    return admission
+
+
+def _close_terminal_admission(admission):
+    issued = _ADMISSIONS.get(admission)
+    if issued is not None:
+        issued.active = False
+
+
+def _require_terminal_admission(admission, cursor, operation, *values):
+    from psycopg.pq import TransactionStatus
+    issued = _ADMISSIONS.get(admission) if type(admission) is _TerminalAdmission else None
+    if (issued is None or not issued.active or issued.cursor is not cursor
+            or cursor.connection.info.transaction_status != TransactionStatus.INTRANS):
+        raise ImportMemoryPublicationError('Active transaction-bound terminal admission required')
+    if cursor.execute('select txid_current() as id').fetchone()['id'] != issued.transaction_id:
+        raise ImportMemoryPublicationError('Terminal admission transaction changed')
+    service, terminal = _require_terminal_work(issued.terminal_work)
+    evidence = issued.evidence
+    intent = evidence.intent
+    user = intent['attempt']['user_id']
+    if (service is not issued.service or evidence.phase != 'pair_sealed'
+            or evidence.terminal_slot is not None):
+        raise ImportMemoryPublicationError('Terminal admission evidence differs')
+    if operation == 'terminal_entry':
+        pass
+    elif operation == 'task_source':
+        (attempt,) = values
+        issue = service._require_live_issue(terminal.live)
+        if attempt is not issue.plan.attempt or attempt != issue.original_attempt:
+            raise ImportMemoryPublicationError('Admitted attempt differs')
+    elif operation == 'snapshot':
+        subject, kind, data, old_version = values
+        expected = intent['snapshots'].get('next_' + kind)
+        prior = intent['snapshots'].get('old_' + kind)
+        if (subject != user or kind not in ('history', 'memory')
+                or expected is None or prior is None
+                or old_version != prior['version']
+                or _canonical(data) != _canonical(expected['data'])):
+            raise ImportMemoryPublicationError('Admitted snapshot differs')
+    elif operation == 'memory_document':
+        subject, event_id, content, metadata = values
+        if (subject != user or event_id != intent['event']['event_id']
+                or content != intent['event']['item']['content']
+                or metadata != _canonical(intent['event']['metadata'])):
+            raise ImportMemoryPublicationError('Admitted Memory row differs')
+    elif operation == 'document':
+        repository, token, copied = values
+        if repository is not service.documents.documents:
+            raise ImportMemoryPublicationError('Admitted document issuer differs')
+        issued_ref = service._require_document_continuation(terminal.live, token)
+        document = json.loads(evidence.document_slot)
+        if (repository._issuance_values(copied) != issued_ref
+                or issued_ref != (document['user_id'], document['document_id'],
+                           document['bucket'], document['key'],
+                           document['version_id'], document['sha256'],
+                           document['size_bytes'])
+                or document['record_hash'] !=
+                    PostgresDocumentObjectRepository._record_hash(
+                        intent['document']['record'])):
+            raise ImportMemoryPublicationError('Admitted document reference differs')
+    elif operation == 'witness':
+        scope, pairing, document_evidence_value = values
+        rag = intent['scopes']['rag']
+        next_history = intent['snapshots']['next_history']
+        if (scope != service._require_live_issue(terminal.live).plan.rag_scope
+                or scope.key != (user, 'rag', rag['namespace'], rag['index_key'])):
+            raise ImportMemoryPublicationError('Admitted witness scope differs')
+        actual = (pairing.head.revision, str(pairing.last_generation_id),
+                  pairing.receipt_index_revision, pairing.receipt_snapshot_version,
+                  document_evidence_value.count, document_evidence_value.digest)
+        old = terminal.prepared.old_pairing
+        expected_old = (old.head.revision, str(old.last_generation_id),
+                        old.receipt_index_revision, old.receipt_snapshot_version,
+                        terminal.prepared.old_evidence.count,
+                        terminal.prepared.old_evidence.digest)
+        expected_new = (rag['head']['revision'] + 1, rag['candidate_id'],
+                        rag['index_revision'], next_history['version'],
+                        intent['document']['count'], intent['document']['digest'])
+        if actual not in (expected_old, expected_new):
+            raise ImportMemoryPublicationError('Admitted witness differs')
+    else:
+        raise ImportMemoryPublicationError('Operation is outside terminal admission')
 
 
 @dataclass(frozen=True)
@@ -215,6 +408,273 @@ class ImportMemoryPublicationService:
         self.episodes = PublishedEpisodeReadFactory(episode_vectors, trusted_episode_scope)
         self.episode_scope = deepcopy(trusted_episode_scope)
         self.database = database
+        self._live_issues = WeakKeyDictionary()
+        self._document_continuations = WeakKeyDictionary()
+        self._sealed_continuations = WeakKeyDictionary()
+        self._terminal_issues = WeakKeyDictionary()
+        self._live_executions = WeakKeyDictionary()
+        self._live_execution_lock = Lock()
+
+    def _issue_live_publication(self, rag_scope, attempt, new_rag_points, *,
+                                event_vector, event_profile) -> _LivePublication:
+        plan = self._plan_intent(rag_scope, attempt, new_rag_points,
+            event_vector=event_vector, event_profile=event_profile)
+        encoded = encode_intent(plan.intent)
+        key = PostgresImportPublicationEvidenceRepository(self.database).reserve_intent(
+            plan.attempt, plan.intent)
+        live = _LivePublication()
+        self._live_issues[live] = _LiveIssue(plan, attempt, key, encoded.digest,
+            self.documents, self.documents.documents, self.pair,
+            self.pair.imports, self.pair.rag, self.pair.episode,
+            self.pair.rag.authority, self.pair.episode.authority,
+            self.database, self.pair.rag.raw, self.pair.episode.raw)
+        _LIVE_ISSUERS[live] = self
+        return live
+
+    def _require_live_issue(self, live: _LivePublication) -> _LiveIssue:
+        if type(live) is not _LivePublication:
+            raise ImportMemoryPublicationError('Original issued live handle required')
+        issue = self._live_issues.get(live)
+        if (issue is None or _LIVE_ISSUERS.get(live) is not self
+                or issue.document_service is not self.documents
+                or issue.document_repository is not self.documents.documents
+                or issue.pair is not self.pair or issue.imports is not self.pair.imports
+                or issue.rag_service is not self.pair.rag
+                or issue.episode_service is not self.pair.episode
+                or issue.rag_authority is not self.pair.rag.authority
+                or issue.episode_authority is not self.pair.episode.authority
+                or issue.database is not self.database
+                or issue.document_service.database is not self.database
+                or issue.document_repository.database is not self.database
+                or issue.imports.database is not self.database
+                or issue.rag_authority.database is not self.database
+                or issue.episode_authority.database is not self.database
+                or issue.rag_raw is not self.pair.rag.raw
+                or issue.episode_raw is not self.pair.episode.raw
+                or issue.plan.attempt != issue.original_attempt
+                or encode_intent(issue.plan.intent).digest != issue.intent_hash):
+            raise ImportMemoryPublicationError('Live publication issuance differs')
+        return issue
+
+    def _bind_verified_document(self, live: _LivePublication, verified) -> None:
+        issue = self._require_live_issue(live)
+        if type(verified) is not VerifiedDocumentRef:
+            raise ImportMemoryPublicationError('Original verified document token required')
+        if live in self._document_continuations:
+            raise ImportMemoryPublicationError('Document continuation is write-once')
+        repository = issue.document_repository
+        issued = repository._verified.get(verified)
+        if (issued is None or issued != repository._issuance_values(verified)
+                or issued != (issue.key.user_id, issue.plan.task.document_id,
+                    self.documents.store.bucket, issue.plan.document.object_key,
+                    verified.ref.version_id, issue.plan.task.source.sha256,
+                    issue.plan.task.source.size_bytes)):
+            raise ImportMemoryPublicationError('Verified document issuer or value differs')
+        self._document_continuations[live] = (verified, tuple(issued))
+
+    def _require_document_continuation(self, live, verified):
+        self._require_live_issue(live)
+        continuation = self._document_continuations.get(live)
+        if (type(verified) is not VerifiedDocumentRef
+                or continuation is None or continuation[0] is not verified
+                or self.documents.documents._verified.get(verified) != continuation[1]
+                or self.documents.documents._issuance_values(verified) != continuation[1]):
+            raise ImportMemoryPublicationError('Original verified document continuation required')
+        return continuation[1]
+
+    def _issue_fixed_terminal(self, live, prepared, rag_sealed, episode_sealed,
+                              expected):
+        issue = self._require_live_issue(live)
+        if (prepared.verified is not self._document_continuations[live][0]
+                or prepared.task != issue.plan.task
+                or rag_sealed.generation_id != issue.plan.candidate_ids[0]
+                or episode_sealed.generation_id != issue.plan.candidate_ids[1]):
+            raise ImportMemoryPublicationError('Terminal work differs from issuance')
+        issue.rag_service._require_issued_seal(rag_sealed)
+        issue.episode_service._require_issued_seal(episode_sealed)
+        work = _FixedTerminalWork()
+        self._terminal_issues[work] = _FixedTerminalIssue(live, prepared,
+            rag_sealed, episode_sealed, deepcopy(expected), work.run)
+        _TERMINAL_ISSUERS[work] = self
+        return work
+
+    def _bind_sealed(self, live, kind, sealed):
+        issue = self._require_live_issue(live)
+        service = issue.rag_service if kind == 'rag' else issue.episode_service
+        service._require_issued_seal(sealed)
+        current = self._sealed_continuations.setdefault(live, {})
+        if kind in current:
+            raise ImportMemoryPublicationError('Sealed continuation is write-once')
+        current[kind] = sealed
+
+    def _require_pair_sealed(self, live, evidence):
+        issue = self._require_live_issue(live)
+        selected = self._sealed_continuations.get(live)
+        if (selected is None or set(selected) != {'rag', 'episode'}
+                or evidence.phase != 'pair_sealed'
+                or evidence.rag_sealed_slot is None
+                or evidence.episode_sealed_slot is None):
+            raise ImportMemoryPublicationError('Both original seals are required')
+        for kind, service in (('rag', issue.rag_service),
+                              ('episode', issue.episode_service)):
+            sealed = selected[kind]
+            service._require_issued_seal(sealed)
+            saved = json.loads(getattr(evidence, kind + '_sealed_slot'))
+            if (saved['generation_id'] != str(sealed.generation_id)
+                    or saved['expected_count'] != sealed.expected_count
+                    or saved['content_digest'] != sealed.content_digest
+                    or saved['snapshot_version'] != sealed.snapshot_version):
+                raise ImportMemoryPublicationError('Saved seal differs from issuance')
+        return selected
+
+    def _run_fixed_terminal(self, cursor, admission, terminal):
+        issued = _ADMISSIONS.get(admission)
+        if (issued is None or not issued.active or issued.cursor is not cursor
+                or issued.service is not self or issued.evidence.phase != 'pair_sealed'
+                or _require_terminal_work(issued.terminal_work)[1] is not terminal):
+            raise ImportMemoryPublicationError('Fixed terminal admission differs')
+        _require_terminal_admission(admission, cursor, 'terminal_entry')
+        live = terminal.live
+        issue = self._require_live_issue(live)
+        saved = self._require_pair_sealed(live, issued.evidence)
+        if (saved['rag'] is not terminal.rag_sealed
+                or saved['episode'] is not terminal.episode_sealed):
+            raise ImportMemoryPublicationError('Terminal seals differ')
+        for kind, sealed, scope, service in (
+                ('rag', terminal.rag_sealed, issue.plan.rag_scope, issue.rag_service),
+                ('episode', terminal.episode_sealed, self.episode_scope,
+                 issue.episode_service)):
+            service.authority._publish(cursor, scope, issue.plan.attempt,
+                sealed.generation_id,
+                expected_revision=sealed.expected_head.revision,
+                expected_index_revision=sealed.expected_index_revision,
+                snapshot_version=sealed.snapshot_version,
+                expected_count=sealed.expected_count,
+                content_digest=sealed.content_digest)
+        receipts = {}
+        self._terminal(cursor, issue.plan.rag_scope, issue.plan.attempt,
+            terminal.prepared, issue.plan.old_rows, terminal.expected,
+            receipts, admission=admission)
+        for kind, sealed in (('rag', terminal.rag_sealed),
+                             ('episode', terminal.episode_sealed)):
+            if UUID(receipts[kind][0]) != sealed.generation_id:
+                raise ImportMemoryPublicationError('Terminal receipt identity differs')
+        repository = PostgresImportPublicationEvidenceRepository(self.database)
+        repository.append_terminal_in_transaction(cursor, live,
+            receipts['rag'], receipts['episode'],
+            expected_phase='pair_sealed',
+            expected_version=issued.evidence.phase_version)
+
+    def _execute_live_publication(self, live: _LivePublication):
+        """One private forward-only attempt; any ambiguous external result stops."""
+        issue = self._require_live_issue(live)
+        with self._live_execution_lock:
+            if self._live_executions.get(live):
+                raise ImportMemoryPublicationError('Live publication was already attempted')
+            self._live_executions[live] = True
+        plan = issue.plan
+        repository = PostgresImportPublicationEvidenceRepository(self.database)
+        frozen = repository.read_exact(issue.key.user_id, issue.key.task_id,
+                                        issue.key.task_lease_version)
+        if (frozen is None or frozen.phase != 'intent'
+                or frozen.intent_hash != issue.intent_hash):
+            raise ImportMemoryPublicationError('Original committed reservation required')
+        try:
+            prepared = self.documents._write_planned_document(
+                plan.document, plan.attempt, live=live)
+        except Exception as error:
+            from app.postgres_import_leases import ImportLeaseLost
+            if isinstance(error, ImportLeaseLost):
+                raise
+            raise DurablePublicationUnknown(issue.key, 'document_put') from error
+        self._bind_verified_document(live, prepared.verified)
+        try:
+            with self.database.transaction() as cursor:
+                cursor.execute('begin')
+                frozen = repository._read_exact_in_cursor(cursor, issue.key)
+                if frozen is None or frozen.phase != 'intent':
+                    raise ImportMemoryPublicationError('Document evidence phase differs')
+                frozen = repository.append_document_in_transaction(cursor, live,
+                    prepared.verified, expected_phase='intent',
+                    expected_version=frozen.phase_version)
+        except Exception as error:
+            raise DurablePublicationUnknown(issue.key, 'document_evidence') from error
+
+        expected = _Expected(deepcopy(plan.task), deepcopy(plan.document.next_history),
+            prepared.history.version + 1, deepcopy(plan.next_memory),
+            plan.bundle.head.snapshot_version + 1, deepcopy(prepared.record),
+            deepcopy(plan.item), deepcopy(plan.event_metadata), plan.event_id,
+            tuple(prepared.issued_ref), plan.new_evidence, plan.old_rag_receipt,
+            plan.old_episode_receipt, prepared.old_pairing.last_generation_id,
+            plan.bundle.receipt['generation_id'])
+        requests = (
+            ('rag', issue.rag_service, plan.rag_scope,
+             prepared.old_pairing.head, prepared.points,
+             expected.history_version, plan.candidate_ids[0]),
+            ('episode', issue.episode_service, self.episode_scope,
+             plan.bundle.head,
+             [*plan.bundle.points, VectorPoint(plan.event_id, list(plan.vector),
+                                               deepcopy(plan.event_metadata))],
+             expected.memory_version, plan.candidate_ids[1]),
+        )
+        seals = {}
+        for kind, vector_service, scope, head, points, version, candidate in requests:
+            try:
+                sealed = vector_service._prepare_sealed(scope, plan.attempt,
+                    head, points, snapshot_version=version,
+                    generation_id=candidate, live=live)
+                with self.database.transaction() as cursor:
+                    cursor.execute('begin')
+                    current = repository._read_exact_in_cursor(cursor, issue.key)
+                    if current is None or current.phase != frozen.phase:
+                        raise ImportMemoryPublicationError('Sealed evidence phase changed')
+                    frozen = repository.append_sealed_in_transaction(cursor,
+                        live, kind, sealed, expected_phase=current.phase,
+                        expected_version=current.phase_version)
+                seals[kind] = sealed
+            except Exception as error:
+                from app.postgres_import_leases import ImportLeaseLost
+                from app.postgres_coordination import MutationLeaseLost
+                from app.vector_generation_service import _StageRejected
+                if isinstance(error, _StageRejected):
+                    raise error.reason from error
+                if isinstance(error, (ImportLeaseLost, MutationLeaseLost)):
+                    raise
+                raise DurablePublicationUnknown(issue.key,
+                    kind + '_candidate_or_seal') from error
+
+        work = self._issue_fixed_terminal(live, prepared,
+            seals['rag'], seals['episode'], expected)
+        try:
+            begun = issue.imports.try_begin_committing(issue.original_attempt,
+                                                       live=live)
+            if not begun:
+                raise ImportMemoryPublicationError('Committing stage refused')
+            issue.imports.complete(issue.original_attempt, terminal_work=work)
+        except Exception as error:
+            from app.import_publication_proof import ImportPublicationProofService
+            try:
+                proved = ImportPublicationProofService(self.database).prove_exact(
+                    issue.key.user_id, issue.key.task_id,
+                    issue.key.task_lease_version)
+            except Exception:
+                proved = None
+            if proved is not None:
+                return proved
+            from app.postgres_import_leases import ImportLeaseLost
+            if isinstance(error, ImportLeaseLost):
+                raise
+            raise DurablePublicationUnknown(issue.key, 'terminal_commit') from error
+        from app.import_publication_proof import ImportPublicationProofService
+        try:
+            proved = ImportPublicationProofService(self.database).prove_exact(
+                issue.key.user_id, issue.key.task_id,
+                issue.key.task_lease_version)
+        except Exception as error:
+            raise DurablePublicationUnknown(issue.key, 'terminal_proof') from error
+        if proved is None:
+            raise DurablePublicationUnknown(issue.key, 'terminal_proof')
+        return proved
 
     @staticmethod
     def _rows(cursor, user):
@@ -309,6 +769,12 @@ class ImportMemoryPublicationService:
                                                 new_rag_points, task=task)
         if planned.old_pairing != old_rag_pairing:
             raise ImportMemoryPublicationError('Prior RAG pairing changed')
+        if len(planned.points) > _MAX_POINTS:
+            raise ImportMemoryPublicationError('RAG corpus exceeds candidate bound')
+        try:
+            _validate_candidate_points(rag_scope, planned.points, _MAX_POINTS)
+        except GenerationVectorStoreError as error:
+            raise ImportMemoryPublicationError('RAG candidate is invalid') from error
         user = task.user_id
         timestamp = datetime.now(timezone.utc).isoformat()
         item = {'id': event_id, 'content': f'用户导入了文档：{task.original_name}',
@@ -386,6 +852,8 @@ class ImportMemoryPublicationService:
 
     def publish(self, rag_scope, attempt, new_rag_points, *, event_vector,
                 event_profile) -> ImportMemoryPublication:
+        with self.database.transaction() as cursor:
+            require_no_gate_in_transaction(cursor, attempt.task.user_id)
         plan = self._plan_intent(rag_scope, attempt, new_rag_points,
                                  event_vector=event_vector, event_profile=event_profile)
         rag_scope, attempt, task, bundle = (plan.rag_scope, plan.attempt,
@@ -437,9 +905,10 @@ class ImportMemoryPublicationService:
         return found
 
     def _terminal(self, cursor, rag_scope, attempt, prepared, old_rows,
-                  expected, new_receipts):
+                  expected, new_receipts, *, admission=None):
+        admission_args = {'admission': admission} if admission is not None else {}
         user = expected.task.user_id
-        if self.documents._task_and_source(cursor, attempt) != expected.task:
+        if self.documents._task_and_source(cursor, attempt, admission=admission) != expected.task:
             raise ImportMemoryPublicationError('Import task or source changed')
         old_history = self.documents.snapshots._read(cursor, user, 'history')
         old_memory = self.documents.snapshots._read(cursor, user, 'memory')
@@ -472,17 +941,19 @@ class ImportMemoryPublicationService:
                     or receipt[1][_RECEIPT_FIELDS.index('publication_revision')] != head['revision']
                     or receipt[1][_RECEIPT_FIELDS.index('index_revision')] != head['index_revision']):
                 raise ImportMemoryPublicationError('New publication receipt differs')
-        self.documents._publish_document_domain(cursor, prepared, rag_scope, attempt)
+        self.documents._publish_document_domain(cursor, prepared, rag_scope,
+                                                attempt, **admission_args)
         updated = self.documents.snapshots.compare_and_swap_in_transaction(
             cursor, user, 'memory', deepcopy(expected.memory),
-            expected_version=expected.memory_version - 1)
+            expected_version=expected.memory_version - 1, **admission_args)
         if updated.version != expected.memory_version:
             raise ImportMemoryPublicationError('Memory CAS version differs')
         PostgresMemoryDocumentStore(self.database, user).add_document_in_transaction(
             cursor, expected.event_id, expected.item['content'],
             json.dumps(expected.event_metadata, ensure_ascii=False,
-                       sort_keys=True, separators=(',', ':'), allow_nan=False))
-        if self.documents._task_and_source(cursor, attempt) != expected.task:
+                       sort_keys=True, separators=(',', ':'), allow_nan=False),
+            **admission_args)
+        if self.documents._task_and_source(cursor, attempt, admission=admission) != expected.task:
             raise ImportMemoryPublicationError('Import task or source changed')
         if (_canonical(self.documents.snapshots._read(cursor, user, 'history').data)
                 != _canonical(expected.history)

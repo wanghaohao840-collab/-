@@ -140,7 +140,25 @@ class PostgresVectorGenerationAuthority:
             return VectorHead('empty' if generation is None else 'published', row['revision'],
                               generation, row['head_index_revision'], row['snapshot_version'])
 
-    def stage(self, scope, authority, *, expected_revision, generation_id=None):
+    def require_candidate(self, live, scope, generation_id, *, operation):
+        from app.import_memory_publication import _require_live_issuer
+        from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+        _, issue = _require_live_issuer(live)
+        selected = issue.rag_service if scope.vector_kind == 'rag' else issue.episode_service
+        if self is not selected.authority:
+            raise VectorAuthorityError('Candidate database differs')
+        evidence_repository = PostgresImportPublicationEvidenceRepository(self.database)
+        with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            evidence = evidence_repository._read_exact_in_cursor(cursor, issue.key)
+            if evidence is None:
+                raise VectorAuthorityError('Candidate evidence is missing')
+            evidence_repository.require_candidate_in_transaction(cursor, live,
+                scope.vector_kind, scope, generation_id, operation=operation,
+                expected_phase=evidence.phase, expected_version=evidence.phase_version)
+
+    def stage(self, scope, authority, *, expected_revision, generation_id=None,
+              live=None):
         """Allocate a never-reused candidate, bound to the current complete head."""
         _check_revision(expected_revision)
         generation_id = uuid4() if generation_id is None else generation_id
@@ -149,6 +167,18 @@ class PostgresVectorGenerationAuthority:
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             lease, task = self._owner(cursor, authority, scope)
+            if live is None:
+                from app.import_publication_evidence import require_no_gate_in_transaction
+                require_no_gate_in_transaction(cursor, scope.tenant_id)
+            else:
+                from app.import_memory_publication import _require_live_issuer
+                from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+                evidence_repository = PostgresImportPublicationEvidenceRepository(self.database)
+                evidence = evidence_repository._read_exact_in_cursor(cursor,
+                    _require_live_issuer(live)[1].key)
+                evidence_repository.require_candidate_in_transaction(cursor, live,
+                    scope.vector_kind, scope, generation_id, operation='stage_before',
+                    expected_phase=evidence.phase, expected_version=evidence.phase_version)
             index_revision = self._index(cursor, scope, create=True)
             head = self._head_row(cursor, scope, lock=True)
             if (None if head is None else head['revision']) != expected_revision:
@@ -161,6 +191,10 @@ class PostgresVectorGenerationAuthority:
                 (generation_id, *scope.key, expected_revision, index_revision,
                  lease.owner, lease.lease_token, lease.lease_version, *task))
             self._owner(cursor, authority, scope)
+            if live is not None:
+                evidence_repository.require_candidate_in_transaction(cursor, live,
+                    scope.vector_kind, scope, generation_id, operation='stage_after',
+                    expected_phase=evidence.phase, expected_version=evidence.phase_version)
         return generation_id
 
     def _candidate(self, cursor, scope, authority, generation_id, *, states):
@@ -176,13 +210,26 @@ class PostgresVectorGenerationAuthority:
         self._owner(cursor, authority, scope)  # fresh clock after candidate lock
         return row
 
-    def seal(self, scope, authority, generation_id, *, expected_count, content_digest):
+    def seal(self, scope, authority, generation_id, *, expected_count, content_digest,
+             live=None):
         if (type(expected_count) is not int or expected_count < 0
                 or not isinstance(content_digest, str) or not _DIGEST.fullmatch(content_digest)):
             raise ValueError('Verified count and SHA-256 digest are required')
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             self._candidate(cursor, scope, authority, generation_id, states=('staging',))
+            if live is None:
+                from app.import_publication_evidence import require_no_gate_in_transaction
+                require_no_gate_in_transaction(cursor, scope.tenant_id)
+            else:
+                from app.import_memory_publication import _require_live_issuer
+                from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+                repository = PostgresImportPublicationEvidenceRepository(self.database)
+                evidence = repository._read_exact_in_cursor(cursor,
+                    _require_live_issuer(live)[1].key)
+                repository.require_candidate_in_transaction(cursor, live,
+                    scope.vector_kind, scope, generation_id, operation='seal',
+                    expected_phase=evidence.phase, expected_version=evidence.phase_version)
             cursor.execute('''update vector_generations set state='sealed', expected_count=%s,
                 content_digest=%s,sealed_at=clock_timestamp() where generation_id=%s''',
                 (expected_count, content_digest, generation_id))

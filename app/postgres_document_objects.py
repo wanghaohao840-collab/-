@@ -60,7 +60,8 @@ class PostgresDocumentObjectRepository:
         return (token.user_id, token.document_id, token.bucket,
                 ref.key, ref.version_id, ref.sha256, ref.size_bytes)
 
-    def publish_in_transaction(self, cursor, verified: VerifiedDocumentRef) -> None:
+    def publish_in_transaction(self, cursor, verified: VerifiedDocumentRef,
+                               *, admission=None) -> None:
         """Insert once in the same transaction that makes History visible.
 
         Caller locks the user first and checks its Worker lease/fence. Replays
@@ -69,11 +70,14 @@ class PostgresDocumentObjectRepository:
         if (cursor.connection.autocommit
                 and cursor.connection.info.transaction_status != TransactionStatus.INTRANS):
             raise ValueError('Caller-owned transaction required')
+        if type(verified) is not VerifiedDocumentRef:
+            raise DocumentPublicationError('Original verified document token required')
         issued = self._verified.get(verified)
         if issued is None or issued != self._issuance_values(verified):
             raise DocumentPublicationError('Document reference differs from verification')
         # Use the repository's independent copy for every subsequent check
         # and SQL argument, even if a caller mutates the token concurrently.
+        original_verified = verified
         user_id, document_id, bucket, key, version_id, sha256, size_bytes = issued
         verified = VerifiedDocumentRef(
             user_id, document_id, bucket, ObjectRef(key, sha256, size_bytes, version_id))
@@ -84,6 +88,13 @@ class PostgresDocumentObjectRepository:
                              (verified.user_id,)).fetchone()
         if row is None:
             raise FileNotFoundError(verified.user_id)
+        if admission is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor, issued[0])
+        else:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission, cursor, 'document',
+                                        self, original_verified, verified)
         record = self._visible_record(cursor, verified.user_id, verified.document_id)
         if record is None:
             raise DocumentPublicationError('Document is absent from History')

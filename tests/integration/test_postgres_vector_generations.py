@@ -11,6 +11,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from psycopg import errors as pgerrors
+from psycopg.types.json import Jsonb
 
 from app.import_models import ImportTaskCreate
 from app.import_repository import PostgresImportTaskRepository
@@ -77,6 +78,34 @@ def lease(db, user, owner='worker'):
     result = PostgresUserMutationCoordinator(db).acquire(user, owner)
     assert result is not None
     return result
+
+
+def _legacy_stage(db, scope, handle):
+    """Seed a rev-10 candidate without calling a rev-14 guarded writer."""
+    generation = uuid4()
+    with db.transaction() as cursor:
+        cursor.execute('''insert into vector_indexes
+            (tenant_id,vector_kind,namespace,index_key,identity)
+            values (%s,%s,%s,%s,%s) on conflict do nothing''',
+            (*scope.key, Jsonb(scope.identity.to_dict())))
+        head = cursor.execute('''select revision from vector_heads
+            where tenant_id=%s and vector_kind=%s and namespace=%s
+            and index_key=%s''', scope.key).fetchone()
+        cursor.execute('''insert into vector_generations
+            (generation_id,tenant_id,vector_kind,namespace,index_key,
+             base_revision,index_revision,owner,user_lease_token,user_lease_version,state)
+            values (%s,%s,%s,%s,%s,%s,1,%s,%s,%s,'staging')''',
+            (generation, *scope.key, None if head is None else head['revision'],
+             handle.owner, handle.lease_token, handle.lease_version))
+    return generation
+
+
+def _legacy_seal(db, generation):
+    with db.transaction() as cursor:
+        cursor.execute('''update vector_generations
+            set state='sealed',expected_count=1,content_digest=%s,
+                sealed_at=clock_timestamp() where generation_id=%s''',
+            (DIGEST, generation))
 
 
 def import_attempt(db, owner, *, lease_seconds=60):
@@ -162,8 +191,7 @@ def test_receipt_migration_upgrades_unpublished_candidate(shared_database):
     identity = IndexIdentity('qdrant', 'docs',
                              EmbeddingProfile('simple', '', 'SimpleEmbedding', 'v1', 4))
     scope = VectorScope(owner, 'rag', 'documents', identity)
-    authority = PostgresVectorGenerationAuthority(first)
-    generation = authority.stage(scope, lease(first, owner), expected_revision=None)
+    generation = _legacy_stage(first, scope, lease(first, owner))
     command.upgrade(Config('alembic.ini'), '20260929_11')
     with first.transaction() as cursor:
         row = cursor.execute('''select state,publication_revision,
@@ -189,8 +217,8 @@ def test_receipt_migration_rejects_existing_publication(shared_database, histori
     scope = VectorScope(owner, 'rag', 'documents', identity)
     authority = PostgresVectorGenerationAuthority(first)
     handle = lease(first, owner)
-    old = authority.stage(scope, handle, expected_revision=None)
-    authority.seal(scope, handle, old, expected_count=1, content_digest=DIGEST)
+    old = _legacy_stage(first, scope, handle)
+    _legacy_seal(first, old)
     with first.transaction() as cursor:
         cursor.execute('''insert into vector_heads
             (tenant_id,vector_kind,namespace,index_key,revision,generation_id,
@@ -202,8 +230,8 @@ def test_receipt_migration_rejects_existing_publication(shared_database, histori
             set state='published',published_at=clock_timestamp()
             where generation_id=%s''', (old,))
     if historical_state == 'retired':
-        new = authority.stage(scope, handle, expected_revision=1)
-        authority.seal(scope, handle, new, expected_count=1, content_digest=DIGEST)
+        new = _legacy_stage(first, scope, handle)
+        _legacy_seal(first, new)
         with first.transaction() as cursor:
             cursor.execute('''update vector_heads set revision=2,generation_id=%s,
                 last_generation_id=%s,updated_at=clock_timestamp()

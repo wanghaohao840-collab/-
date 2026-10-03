@@ -777,9 +777,18 @@ class PostgresImportPublicationEvidenceRepository:
         _text(task_id)
         _int(task_lease_version, minimum=1)
         with self.database.transaction() as cursor:
-            row = cursor.execute('''select * from import_publication_evidence
-                where user_id=%s and task_id=%s and task_lease_version=%s''',
-                (user_id, task_id, task_lease_version)).fetchone()
+            return self._read_exact_in_cursor(cursor, AttemptKey(
+                user_id, task_id, task_lease_version))
+
+    def _read_exact_in_cursor(self, cursor, key: AttemptKey) -> FrozenEvidence | None:
+        if not isinstance(key, AttemptKey):
+            raise PublicationEvidenceError('Exact attempt key required')
+        _text(key.user_id)
+        _text(key.task_id)
+        _int(key.task_lease_version, minimum=1)
+        row = cursor.execute('''select * from import_publication_evidence
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            (key.user_id, key.task_id, key.task_lease_version)).fetchone()
         if row is None:
             return None
         if row['schema_version'] != SCHEMA_VERSION or row['intent_format'] != INTENT_FORMAT:
@@ -802,9 +811,252 @@ class PostgresImportPublicationEvidenceRepository:
             raise PublicationEvidenceError('Stored evidence row exceeds bound')
         _validate_stored_slots(intent, row['intent_hash'], row['phase'],
                                row['phase_version'], row['observation_reason'], slots)
-        return FrozenEvidence(AttemptKey(user_id, task_id, task_lease_version),
+        if (row['user_id'], row['task_id'], row['task_lease_version']) != (
+                key.user_id, key.task_id, key.task_lease_version):
+            raise PublicationEvidenceError('Stored evidence key differs')
+        return FrozenEvidence(key,
             deepcopy(intent), row['phase'], row['phase_version'], row['observation_reason'],
             row['intent_hash'], *slots)
+
+    def _live_evidence(self, cursor, live, *, expected_phase, expected_version):
+        from app.import_memory_publication import _require_live_issuer
+
+        service, issue = _require_live_issuer(live)
+        if service.database is not self.database:
+            raise PublicationEvidenceError('Live issuer database differs')
+        evidence = self._read_exact_in_cursor(cursor, issue.key)
+        if (evidence is None or evidence.intent_hash != issue.intent_hash
+                or evidence.intent != issue.plan.intent
+                or evidence.phase != expected_phase
+                or evidence.phase_version != expected_version):
+            raise PublicationEvidenceError('Live evidence phase or intent differs')
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            (issue.key.user_id, issue.key.task_id,
+             issue.key.task_lease_version)).fetchone()
+        if gate is None or gate['status'] != 'unresolved':
+            raise PublicationEvidenceError('Original publication gate differs')
+        self.imports._live(cursor, issue.plan.attempt)
+        return service, issue, evidence
+
+    def require_document_put(self, live) -> None:
+        from app.import_memory_publication import _require_live_issuer
+        _, issue = _require_live_issuer(live)
+        with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            current = self._read_exact_in_cursor(cursor, issue.key)
+            if current is None or current.phase != 'intent':
+                raise PublicationEvidenceError('Document evidence phase differs')
+            _, issue, evidence = self._live_evidence(cursor, live,
+                expected_phase='intent', expected_version=current.phase_version)
+            if any((evidence.document_slot, evidence.rag_sealed_slot,
+                    evidence.episode_sealed_slot, evidence.terminal_slot)):
+                raise PublicationEvidenceError('Document write already started')
+            self._verify_current(cursor, issue.plan.attempt, evidence.intent)
+            for kind in ('rag', 'episode'):
+                scope = evidence.intent['scopes'][kind]
+                reservation = cursor.execute('''select state,user_id,task_id,
+                    task_lease_version,vector_kind,namespace,index_key,
+                    base_revision from generation_reservations
+                    where generation_id=%s''', (scope['candidate_id'],)).fetchone()
+                if (reservation is None or tuple(reservation[name] for name in
+                        ('state','user_id','task_id','task_lease_version',
+                         'vector_kind','namespace','index_key','base_revision')) !=
+                    ('reserved',issue.key.user_id,issue.key.task_id,
+                     issue.key.task_lease_version,kind,scope['namespace'],
+                     scope['index_key'],scope['head']['revision'])):
+                    raise PublicationEvidenceError('Candidate reservation changed before document put')
+            self.imports._live(cursor, issue.plan.attempt)
+
+    @staticmethod
+    def _append_slot(cursor, evidence, slot_name, value, next_phase):
+        if slot_name not in ('document_slot', 'rag_sealed_slot',
+                             'episode_sealed_slot', 'terminal_slot'):
+            raise PublicationEvidenceError('Unknown evidence slot')
+        raw = _canonical(value)
+        if len(raw) > SLOT_LIMIT:
+            raise PublicationEvidenceError('Evidence slot exceeds bound')
+        slots = [getattr(evidence, field) for field in (
+            'document_slot', 'rag_sealed_slot', 'episode_sealed_slot', 'terminal_slot')]
+        index = ('document_slot', 'rag_sealed_slot', 'episode_sealed_slot',
+                 'terminal_slot').index(slot_name)
+        if slots[index] is not None:
+            raise PublicationEvidenceError('Evidence slot is already written')
+        slots[index] = raw
+        _validate_stored_slots(evidence.intent, evidence.intent_hash,
+            next_phase, evidence.phase_version + 1, evidence.observation_reason,
+            tuple(slots))
+        changed = cursor.execute(f'''update import_publication_evidence
+            set {slot_name}=%s,phase=%s,phase_version=phase_version+1
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            and phase=%s and phase_version=%s and intent_hash=%s
+            and {slot_name} is null returning phase_version''',
+            (raw, next_phase, evidence.key.user_id, evidence.key.task_id,
+             evidence.key.task_lease_version, evidence.phase,
+             evidence.phase_version, evidence.intent_hash)).fetchone()
+        if changed is None:
+            raise PublicationEvidenceError('Evidence append CAS lost')
+        return FrozenEvidence(evidence.key, deepcopy(evidence.intent), next_phase,
+            changed['phase_version'], evidence.observation_reason,
+            evidence.intent_hash, *slots)
+
+    def append_document_in_transaction(self, cursor, live, verified, *,
+                                       expected_phase, expected_version):
+        service, issue, evidence = self._live_evidence(cursor, live,
+            expected_phase=expected_phase, expected_version=expected_version)
+        if expected_phase != 'intent' or evidence.document_slot is not None:
+            raise PublicationEvidenceError('Document append phase differs')
+        continuation = service._require_document_continuation(live, verified)
+        self._verify_current(cursor, issue.plan.attempt, evidence.intent)
+        user_id, document_id, bucket, key, version_id, digest, size = continuation
+        unsigned = {'user_id': user_id, 'document_id': document_id,
+            'bucket': bucket, 'key': key, 'version_id': version_id,
+            'sha256': digest, 'size_bytes': size,
+            'record_hash': sha256(_canonical(evidence.intent['document']['record'])).hexdigest()}
+        value = dict(unsigned, final_expected_hash=sha256(
+            b'1:' + evidence.intent_hash.encode('ascii') + b':' +
+            _canonical(unsigned)).hexdigest())
+        return self._append_slot(cursor, evidence, 'document_slot', value,
+                                 'document_verified')
+
+    def append_sealed_in_transaction(self, cursor, live, kind, sealed, *,
+                                     expected_phase, expected_version):
+        service, issue, evidence = self._live_evidence(cursor, live,
+            expected_phase=expected_phase, expected_version=expected_version)
+        if kind not in ('rag', 'episode') or expected_phase != 'document_verified':
+            raise PublicationEvidenceError('Sealed append phase differs')
+        if (kind == 'rag' and evidence.rag_sealed_slot is not None
+                or kind == 'episode' and (evidence.rag_sealed_slot is None
+                                          or evidence.episode_sealed_slot is not None)):
+            raise PublicationEvidenceError('Sealed append order differs')
+        vector = issue.rag_service if kind == 'rag' else issue.episode_service
+        vector._require_issued_seal(sealed)
+        from app.vector_generation_service import _owner_key
+        scope = evidence.intent['scopes'][kind]
+        frozen_scope = issue.plan.rag_scope if kind == 'rag' else service.episode_scope
+        next_name = 'next_history' if kind == 'rag' else 'next_memory'
+        if (sealed.scope != frozen_scope or sealed.generation_id != UUID(scope['candidate_id'])
+                or sealed.owner_key != _owner_key(issue.plan.attempt)
+                or sealed.expected_head.revision != scope['head']['revision']
+                or sealed.expected_index_revision != scope['index_revision']
+                or sealed.snapshot_version != evidence.intent['snapshots'][next_name]['version']):
+            raise PublicationEvidenceError('Issued seal differs from frozen intent')
+        final_hash = _read_slot(evidence.document_slot)['final_expected_hash']
+        attempt = evidence.intent['attempt']
+        value = {'generation_id': str(sealed.generation_id), 'vector_kind': kind,
+            'user_id': attempt['user_id'], 'task_id': attempt['task_id'],
+            'task_lease_token': attempt['task_lease_token'],
+            'task_lease_version': attempt['task_lease_version'],
+            'worker_id': attempt['worker_id'],
+            'user_lease_token': attempt['user_lease_token'],
+            'user_lease_version': attempt['user_lease_version'],
+            'namespace': scope['namespace'], 'index_key': scope['index_key'],
+            'base_revision': scope['head']['revision'],
+            'index_revision': scope['index_revision'],
+            'snapshot_version': sealed.snapshot_version,
+            'expected_count': sealed.expected_count,
+            'content_digest': sealed.content_digest,
+            'final_expected_hash': final_hash}
+        appended = self._append_slot(cursor, evidence, kind + '_sealed_slot', value,
+            'pair_sealed' if kind == 'episode' else 'document_verified')
+        service._bind_sealed(live, kind, sealed)
+        return appended
+
+    def append_terminal_in_transaction(self, cursor, live, rag_receipt,
+                                       episode_receipt, *, expected_phase,
+                                       expected_version):
+        _, _, evidence = self._live_evidence(cursor, live,
+            expected_phase=expected_phase, expected_version=expected_version)
+        if expected_phase != 'pair_sealed' or evidence.terminal_slot is not None:
+            raise PublicationEvidenceError('Terminal append phase differs')
+        value = {'final_expected_hash': _read_slot(evidence.document_slot)['final_expected_hash'],
+                 'rag_receipt': list(rag_receipt),
+                 'episode_receipt': list(episode_receipt)}
+        return self._append_slot(cursor, evidence, 'terminal_slot', value,
+                                 'terminal_committed')
+
+    def require_candidate_in_transaction(self, cursor, live, kind, scope,
+                                         generation_id, *, operation,
+                                         expected_phase, expected_version):
+        service, issue, evidence = self._live_evidence(cursor, live,
+            expected_phase=expected_phase, expected_version=expected_version)
+        if kind not in ('rag', 'episode') or operation not in (
+                'stage_before', 'stage_after', 'upload', 'verify', 'seal'):
+            raise PublicationEvidenceError('Candidate operation differs')
+        frozen = evidence.intent['scopes'][kind]
+        issued_scope = issue.plan.rag_scope if kind == 'rag' else service.episode_scope
+        if (scope != issued_scope or str(generation_id) != frozen['candidate_id']
+                or scope.key != (issue.key.user_id, kind, frozen['namespace'],
+                                 frozen['index_key'])
+                or scope.identity.to_dict() != frozen['identity']
+                or evidence.document_slot is None
+                or evidence.terminal_slot is not None):
+            raise PublicationEvidenceError('Candidate identity differs')
+        if (evidence.phase != 'document_verified'
+                or (kind == 'rag' and evidence.rag_sealed_slot is not None)
+                or (kind == 'episode' and (evidence.rag_sealed_slot is None
+                                           or evidence.episode_sealed_slot is not None))):
+            raise PublicationEvidenceError('Candidate stage order differs')
+        reservation = cursor.execute('''select * from generation_reservations
+            where generation_id=%s''', (generation_id,)).fetchone()
+        attempt = evidence.intent['attempt']
+        if (reservation is None or reservation['state'] != 'reserved'
+                or (reservation['user_id'], reservation['task_id'],
+                    reservation['task_lease_version'], reservation['vector_kind'],
+                    reservation['namespace'], reservation['index_key'],
+                    reservation['base_revision'], reservation['owner'],
+                    str(reservation['user_lease_token']), reservation['user_lease_version']) !=
+                   (issue.key.user_id, issue.key.task_id, issue.key.task_lease_version,
+                    kind, frozen['namespace'], frozen['index_key'],
+                    frozen['head']['revision'], attempt['worker_id'],
+                    attempt['user_lease_token'], attempt['user_lease_version'])):
+            raise PublicationEvidenceError('Candidate reservation differs or is revoked')
+        row = cursor.execute('''select * from vector_generations
+            where generation_id=%s''', (generation_id,)).fetchone()
+        if operation == 'stage_before':
+            if row is not None:
+                raise PublicationEvidenceError('Candidate UUID was already staged')
+        elif (row is None or row['state'] != 'staging'
+                or (row['tenant_id'], row['vector_kind'], row['namespace'],
+                    row['index_key'], row['base_revision'], row['index_revision'],
+                    row['owner'], str(row['user_lease_token']),
+                    row['user_lease_version'], row['task_id'],
+                    str(row['task_lease_token']), row['task_lease_version']) !=
+                   (issue.key.user_id, kind, frozen['namespace'], frozen['index_key'],
+                    frozen['head']['revision'], frozen['index_revision'],
+                    attempt['worker_id'], attempt['user_lease_token'],
+                    attempt['user_lease_version'], issue.key.task_id,
+                    attempt['task_lease_token'], issue.key.task_lease_version)):
+            raise PublicationEvidenceError('Candidate state or owner differs')
+        return None
+
+    def require_sealed_reservations_in_transaction(self, cursor, live, evidence):
+        """Hold both permanent reservations through the terminal transaction."""
+        _, issue, current = self._live_evidence(cursor, live,
+            expected_phase='pair_sealed', expected_version=evidence.phase_version)
+        if current != evidence:
+            raise PublicationEvidenceError('Sealed evidence changed')
+        attempt = evidence.intent['attempt']
+        scopes = evidence.intent['scopes']
+        requests = sorted(((UUID(scopes[kind]['candidate_id']), kind)
+                           for kind in ('rag', 'episode')), key=lambda item: item[0].int)
+        for generation_id, kind in requests:
+            frozen = scopes[kind]
+            reservation = cursor.execute('''select * from generation_reservations
+                where generation_id=%s for update''', (generation_id,)).fetchone()
+            if (reservation is None or reservation['state'] != 'reserved'
+                    or (reservation['user_id'], reservation['task_id'],
+                        reservation['task_lease_version'], reservation['vector_kind'],
+                        reservation['namespace'], reservation['index_key'],
+                        reservation['base_revision'], reservation['owner'],
+                        str(reservation['user_lease_token']),
+                        reservation['user_lease_version']) !=
+                       (issue.key.user_id, issue.key.task_id,
+                        issue.key.task_lease_version, kind, frozen['namespace'],
+                        frozen['index_key'], frozen['head']['revision'],
+                        attempt['worker_id'], attempt['user_lease_token'],
+                        attempt['user_lease_version'])):
+                raise PublicationEvidenceError('Sealed candidate reservation differs or is revoked')
 
 
 def _receipt_from_sql(row: dict) -> list:

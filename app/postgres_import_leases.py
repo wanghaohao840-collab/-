@@ -203,22 +203,79 @@ class PostgresImportLeaseRepository:
         self._touch(cursor,row)
         return _task_from_row(self._live(cursor,attempt))
 
-    def try_begin_committing(self,attempt):
+    def try_begin_committing(self,attempt,*,live: object | None = None):
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             row = self._live(cursor,attempt)
+            if live is None:
+                from app.import_publication_evidence import require_no_gate_in_transaction
+                require_no_gate_in_transaction(cursor, attempt.task.user_id)
+            else:
+                from app.import_memory_publication import _require_live_issuer
+                from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+                service, issue = _require_live_issuer(live)
+                if (self is not issue.imports or attempt is not issue.original_attempt
+                        or issue.plan.attempt != attempt):
+                    raise ImportLeaseLost('Original durable attempt issuer required')
+                repository = PostgresImportPublicationEvidenceRepository(self.database)
+                current = repository._read_exact_in_cursor(cursor, issue.key)
+                if current is None:
+                    raise ImportLeaseLost('Durable publication evidence is missing')
+                _, _, evidence = repository._live_evidence(cursor, live,
+                    expected_phase='pair_sealed',
+                    expected_version=current.phase_version)
+                service._require_pair_sealed(live, evidence)
+                repository.require_sealed_reservations_in_transaction(cursor,
+                    live, evidence)
+                repository._verify_current(cursor, issue.plan.attempt,
+                    evidence.intent)
             if row['cancel_requested_at'] is not None or row['stage']=='committing':
                 return False
             self._progress(cursor,attempt,row,'committing',row['progress'])
             return True
 
-    def complete(self,attempt,publish):
+    def complete(self,attempt,publish=None,*,terminal_work: object | None = None):
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             row = self._live(cursor,attempt)
             if row['stage']!='committing':
                 raise InvalidImportTransition('Completion requires committing')
-            publish(cursor)
+            if terminal_work is None:
+                from app.import_publication_evidence import require_no_gate_in_transaction
+                require_no_gate_in_transaction(cursor, attempt.task.user_id)
+                if publish is None:
+                    raise TypeError('Publication callback required')
+                publish(cursor)
+            else:
+                from app.import_memory_publication import (
+                    _close_terminal_admission, _create_terminal_admission,
+                    _require_terminal_work,
+                )
+                from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+                service, work_issue = _require_terminal_work(terminal_work)
+                live = work_issue.live
+                issue = service._require_live_issue(live)
+                if (publish is not None or self is not issue.imports
+                        or attempt is not issue.original_attempt
+                        or issue.plan.attempt != attempt):
+                    raise ImportLeaseLost('Only original fixed terminal work is admitted')
+                repository = PostgresImportPublicationEvidenceRepository(self.database)
+                current = repository._read_exact_in_cursor(cursor, issue.key)
+                if current is None:
+                    raise ImportLeaseLost('Durable publication evidence is missing')
+                _, _, evidence = repository._live_evidence(cursor, live,
+                    expected_phase='pair_sealed',
+                    expected_version=current.phase_version)
+                service._require_pair_sealed(live, evidence)
+                repository.require_sealed_reservations_in_transaction(cursor,
+                    live, evidence)
+                repository._verify_current(cursor, issue.plan.attempt,
+                    evidence.intent)
+                admission = _create_terminal_admission(terminal_work, cursor, evidence)
+                try:
+                    work_issue.callback(cursor, admission)
+                finally:
+                    _close_terminal_admission(admission)
             row = self._live(cursor,attempt)
             if row['stage'] != 'committing':
                 raise ImportLeaseLost('Committing stage changed during publication')

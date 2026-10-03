@@ -216,7 +216,16 @@ class PostgresHistoryDocumentWitnessRepository:
 
     @staticmethod
     def insert(cursor, scope: VectorScope, pairing: Pairing,
-               evidence: DocumentEvidence) -> None:
+               evidence: DocumentEvidence, *, admission=None) -> None:
+        if admission is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            from app.postgres_coordination import PostgresUserMutationCoordinator
+            PostgresUserMutationCoordinator._lock_user(cursor, scope.tenant_id)
+            require_no_gate_in_transaction(cursor, scope.tenant_id)
+        else:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission, cursor, 'witness',
+                scope, pairing, evidence)
         cursor.execute('''insert into history_document_witnesses
             (tenant_id,vector_kind,namespace,index_key,head_revision,last_generation_id,
              index_revision,publication_snapshot_version,document_count,documents_sha256)

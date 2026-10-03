@@ -62,20 +62,47 @@ def publication(shared_database, store):
     with db.transaction() as cursor:
         legacy_revision = cursor.execute(
             'select version_num from alembic_version').fetchone()['version_num']
-    def bootstrap_history(cursor):
-        if legacy_revision == '20260929_12':
-            # This test deliberately creates a rev-12 business row before
-            # upgrading. The current writer requires the rev-14 gate table.
+    if legacy_revision == '20260929_12':
+        # Build the rev-12 paired empty head using that revision's real SQL.
+        # The current writer requires the rev-14 gate table.
+        generation = uuid4()
+        empty_digest = hashlib.sha256(b'[]').hexdigest()
+        with db.transaction() as cursor:
+            cursor.execute('''insert into vector_indexes
+                (tenant_id,vector_kind,namespace,index_key,identity)
+                values (%s,%s,%s,%s,%s)''',
+                (*scope.key, Jsonb(scope.identity.to_dict())))
+            cursor.execute('''insert into vector_generations
+                (generation_id,tenant_id,vector_kind,namespace,index_key,
+                 base_revision,index_revision,owner,user_lease_token,
+                 user_lease_version,state)
+                values (%s,%s,%s,%s,%s,null,1,%s,%s,%s,'staging')''',
+                (generation, *scope.key, lease.owner, lease.lease_token,
+                 lease.lease_version))
+            cursor.execute('''update vector_generations
+                set state='sealed',expected_count=0,content_digest=%s,
+                    sealed_at=clock_timestamp() where generation_id=%s''',
+                (empty_digest, generation))
             cursor.execute('''insert into user_snapshots
                 (user_id,kind,version,payload,updated_at)
                 values(%s,'history',1,%s,clock_timestamp())''',
                 (user, Jsonb(dict(EMPTY_HISTORY))))
-        else:
+            cursor.execute('''update vector_generations
+                set state='published',publication_revision=1,
+                    publication_snapshot_version=1,published_at=clock_timestamp()
+                where generation_id=%s''', (generation,))
+            cursor.execute('''insert into vector_heads
+                (tenant_id,vector_kind,namespace,index_key,revision,generation_id,
+                 last_generation_id,index_revision,snapshot_version)
+                values (%s,%s,%s,%s,1,null,%s,1,1)''',
+                (*scope.key, generation))
+    else:
+        def bootstrap_history(cursor):
             snapshots.compare_and_swap_in_transaction(
                 cursor, user, 'history', dict(EMPTY_HISTORY), expected_version=0)
-    vectors.publish_complete(scope, lease, vectors.authority.read_head(scope), [],
-        domain_publish=bootstrap_history,
-        snapshot_version=1)
+        vectors.publish_complete(scope, lease, vectors.authority.read_head(scope), [],
+            domain_publish=bootstrap_history,
+            snapshot_version=1)
     coordinator.release(lease)
     service = ImportDocumentPublicationService(db, store, vectors)
     try:

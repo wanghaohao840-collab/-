@@ -104,9 +104,24 @@ class ImportDocumentPublicationService:
         except (TypeError, ValueError, AttributeError):
             return False
 
-    def _task_and_source(self, cursor, attempt: ImportAttempt) -> _PreparedTask:
+    def _task_and_source(self, cursor, attempt: ImportAttempt, *, live=None,
+                         admission=None) -> _PreparedTask:
         row = self.imports._live(cursor, attempt)
-        require_no_gate_in_transaction(cursor, attempt.task.user_id)
+        if admission is not None:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission, cursor, 'task_source', attempt)
+        elif live is not None:
+            from app.import_memory_publication import _require_live_issuer
+            from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+            evidence = PostgresImportPublicationEvidenceRepository(self.database)
+            current = evidence._read_exact_in_cursor(cursor,
+                _require_live_issuer(live)[1].key)
+            if current is None or current.phase != 'intent':
+                raise ImportDocumentPublicationError('Document evidence phase differs')
+            evidence._live_evidence(cursor, live, expected_phase='intent',
+                                    expected_version=current.phase_version)
+        else:
+            require_no_gate_in_transaction(cursor, attempt.task.user_id)
         task = _task_from_row(row)
         fields = ('task_id', 'batch_id', 'user_id', 'document_id',
                   'original_name', 'file_suffix', 'size_bytes', 'created_at')
@@ -278,7 +293,7 @@ class ImportDocumentPublicationService:
                                 frozenset(original_ids))
 
     def _write_planned_document(self, planned: _PlannedDocument,
-                                attempt: ImportAttempt) -> _PreparedDocument:
+                                attempt: ImportAttempt, *, live=None) -> _PreparedDocument:
         if not isinstance(planned, _PlannedDocument):
             raise ImportDocumentPublicationError('Read-only document plan required')
         current_pairing = self.witnesses.read_current(planned.scope)
@@ -286,13 +301,16 @@ class ImportDocumentPublicationService:
             raise ImportDocumentPublicationError('RAG base changed before document put')
         with self.database.transaction() as cursor:
             cursor.execute('begin')
-            if self._task_and_source(cursor, attempt) != planned.task:
+            if self._task_and_source(cursor, attempt, live=live) != planned.task:
                 raise ImportDocumentPublicationError('Import task or source changed')
             current = self.snapshots._read(cursor, planned.task.user_id, 'history')
             if (current is None or current.version != planned.history.version
                     or self._canonical_json(current.data) !=
                        self._canonical_json(planned.history.data)):
                 raise ImportDocumentPublicationError('History changed before document put')
+        if live is not None:
+            from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+            PostgresImportPublicationEvidenceRepository(self.database).require_document_put(live)
         object_ref = self.store.put_immutable(planned.task.user_id,
                                               planned.object_key, planned.content).ref
         verified = self.documents.verify_for_publication(planned.task.user_id,
@@ -303,13 +321,15 @@ class ImportDocumentPublicationService:
                                  deepcopy(planned.record), deepcopy(planned.next_history),
                                  deepcopy(planned.points), planned.original_ids)
 
-    def _publish_document_domain(self, cursor, prepared, scope, attempt):
+    def _publish_document_domain(self, cursor, prepared, scope, attempt,
+                                 *, admission=None):
+        admission_args = {'admission': admission} if admission is not None else {}
         prepared_task = prepared.task
         history = prepared.history
         old_pairing = prepared.old_pairing
         old_evidence = prepared.old_evidence
         fixed_refs = prepared.fixed_refs
-        if self._task_and_source(cursor, attempt) != prepared_task:
+        if self._task_and_source(cursor, attempt, admission=admission) != prepared_task:
             raise ImportDocumentPublicationError('Import task or source changed before commit')
         current = self.snapshots._read(cursor, prepared_task.user_id, 'history')
         if (current is None or current.version != history.version
@@ -324,7 +344,8 @@ class ImportDocumentPublicationService:
             self.witnesses.check_old_receipt(cursor, scope, old_pairing)
             self.witnesses.check_retained_references(cursor, scope, fixed_refs)
             if not old_pairing.has_witness:
-                self.witnesses.insert(cursor, scope, old_pairing, old_evidence)
+                self.witnesses.insert(cursor, scope, old_pairing, old_evidence,
+                                      **admission_args)
         except HistoryDocumentWitnessError as exc:
             raise ImportDocumentPublicationError(str(exc)) from exc
         if any(item.get('import_task_id') == prepared_task.task_id or
@@ -335,16 +356,18 @@ class ImportDocumentPublicationService:
                            set(prepared.original_ids) | {prepared_task.document_id})
         changed = self.snapshots.compare_and_swap_in_transaction(
             cursor, prepared_task.user_id, 'history', deepcopy(prepared.next_history),
-            expected_version=history.version)
+            expected_version=history.version, **admission_args)
         if changed.version != history.version + 1:
             raise SnapshotConflict('History version changed')
-        self.documents.publish_in_transaction(cursor, prepared.verified)
+        self.documents.publish_in_transaction(cursor, prepared.verified,
+                                              **admission_args)
         try:
             new_pairing = self.witnesses.read_current(scope, cursor=cursor)
             if new_pairing.has_witness or new_pairing.head.snapshot_version != history.version + 1:
                 raise HistoryDocumentWitnessError('New RAG publication receipt differs from History')
             self.witnesses.insert(cursor, scope, new_pairing,
-                                  document_evidence(prepared_task.user_id, prepared.next_history))
+                                  document_evidence(prepared_task.user_id, prepared.next_history),
+                                  **admission_args)
         except HistoryDocumentWitnessError as exc:
             raise ImportDocumentPublicationError(str(exc)) from exc
 

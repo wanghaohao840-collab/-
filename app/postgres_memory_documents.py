@@ -58,13 +58,19 @@ class PostgresMemoryDocumentStore:
         with self.database.transaction() as cursor:
             self.add_document_in_transaction(cursor, doc_id, content, metadata)
 
-    def add_document_in_transaction(self, cursor, doc_id: str, content: str, metadata: str) -> None:
+    def add_document_in_transaction(self, cursor, doc_id: str, content: str,
+                                    metadata: str, *, admission=None) -> None:
         _identifier(doc_id)
         if not isinstance(content, str):
             raise ValueError('Document content must be text')
         self._metadata(metadata)
         self._lock_user(cursor)
-        require_no_gate_in_transaction(cursor, self.user_id)
+        if admission is None:
+            require_no_gate_in_transaction(cursor, self.user_id)
+        else:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission, cursor, 'memory_document',
+                self.user_id, doc_id, content, metadata)
         cursor.execute('''insert into memory_documents(user_id,document_id,content,metadata,created_at)
             values(%s,%s,%s,%s,to_char(clock_timestamp() at time zone 'UTC','YYYY-MM-DD HH24:MI:SS.US'))
             on conflict(user_id,document_id) do update set content=excluded.content,metadata=excluded.metadata''',

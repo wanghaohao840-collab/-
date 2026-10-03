@@ -104,14 +104,20 @@ class PostgresSnapshotRepository:
                                                         expected_version=expected_version)
 
     def compare_and_swap_in_transaction(self, cursor, user_id: str, kind: str,
-                                        data: dict, *, expected_version: int) -> VersionedSnapshot:
+                                        data: dict, *, expected_version: int,
+                                        admission=None) -> VersionedSnapshot:
         if type(expected_version) is not int or expected_version < 0:
             raise ValueError('Snapshot version must be a nonnegative integer')
         payload = _validate(user_id, kind, data)
         # The surrounding publication transaction must lock this user before
         # any other domain rows, then check its Worker attempt if applicable.
         self._lock_user(cursor, user_id)
-        require_no_gate_in_transaction(cursor, user_id)
+        if admission is None:
+            require_no_gate_in_transaction(cursor, user_id)
+        else:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission, cursor, 'snapshot',
+                user_id, kind, payload, expected_version)
         if expected_version == 0:
             row = cursor.execute(
                 'insert into user_snapshots(user_id,kind,version,payload,updated_at) '

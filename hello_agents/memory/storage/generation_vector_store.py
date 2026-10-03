@@ -14,6 +14,7 @@ import uuid
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from app.postgres_vector_generations import VectorHead, VectorScope
+from hello_agents.memory.rag.errors import RAGBackendError
 from hello_agents.memory.storage.vector_scan import (
     NativePointId, VectorScanPage, VectorScanRecord, cursor_key,
     iter_qdrant_pages, native_point_id,
@@ -29,6 +30,12 @@ class GenerationVectorStoreError(RuntimeError):
 
 class CandidateAbortRequired(GenerationVectorStoreError):
     """Unknown write outcome: permanently abandon this PG candidate UUID."""
+
+
+class _CandidateGuardInterrupted(RAGBackendError):
+    def __init__(self, cause):
+        self.cause = cause
+        super().__init__('Candidate authority changed before vector I/O')
 
 
 _POINT_NAMESPACE = uuid.UUID("314ebff1-4f8b-42c6-a03a-04f94935d181")
@@ -83,6 +90,86 @@ def _check_caller_fields(scope: VectorScope, values: Mapping[str, Any]) -> None:
         raise GenerationVectorStoreError("Caller scope conflicts with pinned vector scope")
 
 
+def _validate_json_native(value: Any, active: set[int]) -> None:
+    """Reject values that JSON would silently change on a storage round trip."""
+    if value is None or type(value) in (str, int, bool):
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise GenerationVectorStoreError("Invalid vector payload")
+        return
+    if type(value) not in (dict, list):
+        raise GenerationVectorStoreError("Invalid vector payload")
+    identity = id(value)
+    if identity in active:
+        raise GenerationVectorStoreError("Cyclic vector payload")
+    active.add(identity)
+    try:
+        if type(value) is list:
+            for child in value:
+                _validate_json_native(child, active)
+        else:
+            for key, child in value.items():
+                if type(key) is not str:
+                    raise GenerationVectorStoreError("Non-string vector payload key")
+                _validate_json_native(child, active)
+    finally:
+        active.remove(identity)
+
+
+def _validate_candidate_points(scope: VectorScope, points: Iterable[VectorPoint],
+                               max_points: int) -> dict[str, VectorPoint]:
+    """Validate the full candidate before an import reserves or writes anything."""
+    expected = {}
+    for point in points:
+        if not isinstance(point, VectorPoint):
+            raise GenerationVectorStoreError("Invalid vector point")
+        logical_id = _validate_logical_id(point.id)
+        if logical_id in expected:
+            raise GenerationVectorStoreError("Duplicate logical vector ID")
+        if not isinstance(point.payload, dict):
+            raise GenerationVectorStoreError("Invalid vector payload")
+        try:
+            _check_caller_fields(scope, point.payload)
+            _validate_json_native(point.payload, set())
+            _canonical(point.payload).encode('utf-8')
+        except (TypeError, ValueError, OverflowError, AttributeError,
+                RecursionError, UnicodeError) as error:
+            raise GenerationVectorStoreError("Invalid vector payload") from error
+        vector = point.vector
+        if (not isinstance(vector, list)
+                or len(vector) != scope.identity.profile.dimension
+                or any(type(item) not in (float, int) or not math.isfinite(item)
+                       for item in vector)
+                or not math.isfinite(math.hypot(*vector))):
+            raise GenerationVectorStoreError("Invalid vector dimension or component")
+        if len(expected) >= max_points:
+            raise GenerationVectorStoreError("Candidate exceeds verification bound")
+        expected[logical_id] = VectorPoint(logical_id, list(vector), dict(point.payload))
+    return expected
+
+
+def _decode_record(scope: VectorScope, generation_id: uuid.UUID,
+                   physical_id: str, payload: Mapping[str, Any],
+                   storage_id: NativePointId | None = None) -> tuple[str, dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        raise GenerationVectorStoreError("Malformed vector payload")
+    logical_id = _validate_logical_id(payload.get(_LOGICAL_ID))
+    expected_id = _physical_id(scope, generation_id, logical_id)
+    if (physical_id != expected_id
+            or payload.get(QdrantVectorStore.LOGICAL_ID_PAYLOAD_KEY) != expected_id
+            or any(payload.get(key) != value for key, value in
+                   _scope_fields(scope, generation_id).items())
+            or any(key.startswith("_gv_") and key not in _RESERVED
+                   for key in payload)
+            or (storage_id is not None and str(storage_id) != expected_id)):
+        raise GenerationVectorStoreError("Vector point identity or scope is corrupt")
+    public = {key: value for key, value in payload.items()
+              if key not in _RESERVED and not key.startswith("_gv_")}
+    _check_caller_fields(scope, public)
+    return logical_id, public
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationVectorStore:
     """Read-only view of one PostgreSQL head, pinned for a public operation."""
@@ -101,9 +188,10 @@ class GenerationVectorStore:
                 or type(self.head.index_revision) is not int or self.head.index_revision < 1
                 or (self.head.state == "published") != isinstance(self.head.generation_id, uuid.UUID)):
             raise GenerationVectorStoreError("Invalid published vector head")
-        self.raw.require_collection(self.scope.identity.physical_collection,
-                                    self.scope.identity.profile.dimension,
-                                    self.scope.identity.profile.distance)
+        self.raw.require_collection(
+            self.scope.identity.physical_collection,
+            self.scope.identity.profile.dimension,
+            self.scope.identity.profile.distance)
         object.__setattr__(self, "collection_name", self.scope.identity.physical_collection)
 
     def _collection(self, collection_name: str) -> None:
@@ -123,22 +211,8 @@ class GenerationVectorStore:
 
     def _record(self, physical_id: str, payload: Mapping[str, Any],
                 storage_id: NativePointId | None = None) -> tuple[str, dict[str, Any]]:
-        if not isinstance(payload, Mapping):
-            raise GenerationVectorStoreError("Malformed vector payload")
-        logical_id = _validate_logical_id(payload.get(_LOGICAL_ID))
-        expected_id = _physical_id(self.scope, self.head.generation_id, logical_id)
-        if (physical_id != expected_id
-                or payload.get(QdrantVectorStore.LOGICAL_ID_PAYLOAD_KEY) != expected_id
-                or any(payload.get(key) != value for key, value in
-                       _scope_fields(self.scope, self.head.generation_id).items())
-                or any(key.startswith("_gv_") and key not in _RESERVED
-                       for key in payload)
-                or (storage_id is not None and str(storage_id) != expected_id)):
-            raise GenerationVectorStoreError("Vector point identity or scope is corrupt")
-        public = {key: value for key, value in payload.items()
-                  if key not in _RESERVED and not key.startswith("_gv_")}
-        _check_caller_fields(self.scope, public)
-        return logical_id, public
+        return _decode_record(self.scope, self.head.generation_id,
+                              physical_id, payload, storage_id)
 
     def require_collection(self, collection_name: str, dimension: int,
                            distance: str = "Cosine") -> None:
@@ -296,7 +370,8 @@ class CandidateGenerationWriter:
     def __init__(self, raw: QdrantVectorStore, scope: VectorScope,
                  generation_id: uuid.UUID,
                  state_check: Callable[[VectorScope, uuid.UUID], str],
-                 *, max_points: int = 100_000):
+                 *, max_points: int = 100_000,
+                 live_check: Callable[[str], None] | None = None):
         if not isinstance(generation_id, uuid.UUID) or generation_id.int == 0:
             raise ValueError("Fresh generation UUID is required")
         if type(max_points) is not int or not 1 <= max_points <= 1_000_000:
@@ -305,13 +380,43 @@ class CandidateGenerationWriter:
         self.scope = scope
         self.generation_id = generation_id
         self.state_check = state_check
+        self.live_check = live_check
+        self._operation = 'upload'
         self.max_points = max_points
         self.collection_name = scope.identity.physical_collection
         self._uploaded = False
         self._poisoned = False
         self._expected: dict[str, VectorPoint] = {}
-        raw.require_collection(self.collection_name, scope.identity.profile.dimension,
-                               scope.identity.profile.distance)
+        if live_check is None:
+            raw.require_collection(self.collection_name, scope.identity.profile.dimension,
+                                   scope.identity.profile.distance)
+        else:
+            self._require_collection(self.collection_name,
+                                     scope.identity.profile.dimension,
+                                     scope.identity.profile.distance)
+
+    def _require_collection(self, name, dimension, distance):
+        if not self._read('collection_exists', self.raw.client.collection_exists, name):
+            raise GenerationVectorStoreError('Candidate collection is absent')
+        info = self._read('get_collection', self.raw.client.get_collection, name)
+        self.raw._validate_collection(name, info, dimension, distance)
+
+    def _checked(self, function):
+        if self.live_check is None:
+            return function
+        def checked(*args, **kwargs):
+            try:
+                self.live_check(self._operation)
+            except Exception as error:
+                raise _CandidateGuardInterrupted(error) from error
+            return function(*args, **kwargs)
+        return checked
+
+    def _read(self, operation, function, *args, **kwargs):
+        try:
+            return self.raw._call(operation, self._checked(function), *args, **kwargs)
+        except _CandidateGuardInterrupted as error:
+            raise error.cause from error
 
     def _staging(self) -> None:
         if self._poisoned or self.state_check(self.scope, self.generation_id) != "staging":
@@ -321,37 +426,24 @@ class CandidateGenerationWriter:
         self._staging()
         if self._uploaded:
             raise GenerationVectorStoreError("Candidate upload is one shot")
-        if self.raw.count(self.collection_name,
-                          _scope_fields(self.scope, self.generation_id)) != 0:
+        if self.live_check is None:
+            count = self.raw.count(self.collection_name,
+                                   _scope_fields(self.scope, self.generation_id))
+        else:
+            count_result = self._read('count', self.raw.client.count,
+                collection_name=self.collection_name,
+                count_filter=self.raw._filter(_scope_fields(self.scope, self.generation_id)),
+                exact=True)
+            count = int(getattr(count_result, 'count', count_result))
+        if count != 0:
             raise GenerationVectorStoreError("Staging generation is not physically fresh")
+        expected = _validate_candidate_points(self.scope, points, self.max_points)
         prepared = []
-        expected = {}
-        for point in points:
-            logical_id = _validate_logical_id(point.id)
-            if logical_id in expected:
-                raise GenerationVectorStoreError("Duplicate logical vector ID")
-            if not isinstance(point.payload, dict):
-                raise GenerationVectorStoreError("Invalid vector payload")
-            _check_caller_fields(self.scope, point.payload)
-            vector = point.vector
-            if (not isinstance(vector, list)
-                    or len(vector) != self.scope.identity.profile.dimension
-                    or any(type(item) not in (float, int) or not math.isfinite(item)
-                           for item in vector)):
-                raise GenerationVectorStoreError("Invalid vector dimension or component")
-            if not math.isfinite(math.hypot(*vector)):
-                raise GenerationVectorStoreError("Invalid vector magnitude")
-            if len(expected) >= self.max_points:
-                raise GenerationVectorStoreError("Candidate exceeds verification bound")
-            public = VectorPoint(logical_id, list(vector), dict(point.payload))
-            try:
-                _canonical(public.payload)  # preflight before any write
-            except (TypeError, ValueError, OverflowError) as error:
-                raise GenerationVectorStoreError("Invalid vector payload") from error
-            expected[logical_id] = public
+        for logical_id, public in expected.items():
+            vector = public.vector
             physical = _physical_id(self.scope, self.generation_id, logical_id)
             vector_digest = hashlib.sha256(_canonical(vector).encode()).hexdigest()
-            payload = dict(point.payload) | _scope_fields(self.scope, self.generation_id) | {
+            payload = dict(public.payload) | _scope_fields(self.scope, self.generation_id) | {
                 _LOGICAL_ID: logical_id, _VECTOR_DIGEST: vector_digest,
             }
             prepared.append(self.raw._point_struct(physical, list(vector), payload))
@@ -360,6 +452,8 @@ class CandidateGenerationWriter:
         self._expected = expected
         for start in range(0, len(prepared), self.raw.UPSERT_BATCH_SIZE):
             self._staging()
+            if self.live_check is not None:
+                self.live_check('upload')
             try:
                 result = self.raw.client.upsert(
                     collection_name=self.collection_name,
@@ -376,20 +470,25 @@ class CandidateGenerationWriter:
 
     def verify(self) -> tuple[int, str]:
         self._staging()
+        self._operation = 'verify'
         if not self._uploaded:
             raise GenerationVectorStoreError("Candidate has not been uploaded")
-        view = GenerationVectorStore(
-            self.raw, self.scope,
-            VectorHead("published", 1, self.generation_id, 1, None),
-        )
+        if self.live_check is None:
+            self.raw.require_collection(self.collection_name,
+                self.scope.identity.profile.dimension,
+                self.scope.identity.profile.distance)
+        else:
+            self._require_collection(self.collection_name,
+                self.scope.identity.profile.dimension,
+                self.scope.identity.profile.distance)
         actual = {}
         offset = None
         seen_offsets = set()
         for _ in range(_MAX_SCAN_PAGES):
-            batch, next_offset = self.raw._call(
+            batch, next_offset = self._read(
                 "scroll", self.raw.client.scroll,
                 collection_name=self.collection_name,
-                scroll_filter=self.raw._filter(view._filters(None)),
+                scroll_filter=self.raw._filter(_scope_fields(self.scope, self.generation_id)),
                 offset=offset, limit=_PAGE_SIZE,
                 with_payload=True, with_vectors=True,
             )
@@ -398,7 +497,8 @@ class CandidateGenerationWriter:
             for item in batch:
                 payload = getattr(item, "payload", None)
                 physical = str(native_point_id(getattr(item, "id", None)))
-                logical_id, public_payload = view._record(physical, payload, physical)
+                logical_id, public_payload = _decode_record(
+                    self.scope, self.generation_id, physical, payload, physical)
                 if logical_id in actual or logical_id not in self._expected:
                     raise GenerationVectorStoreError("Candidate contains unexpected or duplicate point")
                 expected = self._expected[logical_id]

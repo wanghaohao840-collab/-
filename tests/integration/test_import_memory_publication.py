@@ -78,6 +78,43 @@ def test_empty_episode_baseline_publishes_one_event_and_both_heads(memory_public
     assert service._reconcile(result._context, result._expected) is not None
 
 
+@pytest.mark.parametrize('durable', [False, True])
+@pytest.mark.parametrize('episode_dimension', [3, 4])
+def test_rag_candidate_validation_keeps_distinct_episode_vector(
+        publication, durable, episode_dimension):
+    document_service, db, store, rag, snapshots, rag_scope, user, _ = publication
+    raw = QdrantVectorStore(url=os.environ['GENERATION_QDRANT_TEST_URL'], retry_delays=())
+    profile = EmbeddingProfile('test-explicit', '', 'episode-test', 'v1',
+                               episode_dimension)
+    identity = IndexIdentity('qdrant', 'import_memory_' + uuid4().hex, profile)
+    raw.ensure_collection(identity.physical_collection, episode_dimension)
+    episode_scope = VectorScope(user, 'episode', 'episodes', identity)
+    episode = VectorGenerationService(PostgresVectorGenerationAuthority(db), raw)
+    try:
+        publish_episode_baseline(db, episode, episode_scope, [])
+        service = ImportMemoryPublicationService(db, store, rag, episode,
+                                                  trusted_episode_scope=episode_scope)
+        attempt = _task(db, store, user)
+        rag_point = _point(rag_scope, attempt.task.document_id, 'new')
+        event_vector = [0., 1., *([0.] * (episode_dimension - 2))]
+        plan = service._plan_intent(rag_scope, attempt, [rag_point],
+                                    event_vector=event_vector, event_profile=profile)
+        assert plan.vector == tuple(event_vector)
+        if durable:
+            live = service._issue_live_publication(rag_scope, attempt, [rag_point],
+                event_vector=event_vector, event_profile=profile)
+            result = service._execute_live_publication(live)
+        else:
+            result = service.publish(rag_scope, attempt, [rag_point],
+                event_vector=event_vector, event_profile=profile)
+        episode_points = PublishedEpisodeReadFactory(episode,
+            episode_scope)._capture_bundle(user).points
+        assert next(point.vector for point in episode_points
+                    if point.id == result.event_id) == event_vector
+    finally:
+        raw.client.delete_collection(identity.physical_collection)
+
+
 def _mixed_baseline(service, db, episode_scope, user):
     negative = episode_item(user, '旧负值', logical_id='old-negative')
     negative['importance'] = -0.5

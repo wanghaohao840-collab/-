@@ -10,10 +10,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable, Sequence
 from uuid import UUID, uuid4
+from weakref import WeakKeyDictionary
 
 from app.import_repository import _task_from_row
 from app.postgres_coordination import MutationLeaseLost, UserMutationLease
-from app.postgres_import_leases import ImportAttempt
+from app.postgres_import_leases import ImportAttempt, ImportLeaseLost
+from app.import_publication_evidence import PublicationEvidenceError
 from app.postgres_vector_generations import (
     PostgresVectorGenerationAuthority, VectorAuthorityError, VectorHead, VectorScope,
 )
@@ -56,7 +58,7 @@ class VectorPublication:
     import_task: object | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class _SealedGeneration:
     scope: VectorScope
     generation_id: UUID
@@ -118,6 +120,12 @@ class VectorGenerationService:
                  raw: QdrantVectorStore):
         self.authority = authority
         self.raw = raw
+        self._sealed_issuance = WeakKeyDictionary()
+
+    def _require_issued_seal(self, sealed: _SealedGeneration) -> None:
+        if (type(sealed) is not _SealedGeneration
+                or self._sealed_issuance.get(sealed) != deepcopy(sealed.__dict__)):
+            raise ValueError('Original immutable sealed descriptor required')
 
     def read_view(self, scope: VectorScope) -> GenerationVectorStore:
         """Resolve one coherent PG head for all subreads of a public operation."""
@@ -172,26 +180,40 @@ class VectorGenerationService:
                 and record['publication_snapshot_version'] is None)
 
     def _prepare_sealed(self, scope, owner, expected_head, complete_corpus,
-                        *, snapshot_version, generation_id, before_stage=None):
+                        *, snapshot_version, generation_id, before_stage=None,
+                        live=None):
         """Prepare one internally issued candidate; caller owns uncertain-ID policy."""
         if self.authority.read_head(scope) != expected_head:
             raise GenerationVectorStoreError('Expected vector head changed')
         if before_stage is not None:
             before_stage()
         try:
+            stage_options = {'live': live} if live is not None else {}
             self.authority.stage(scope, owner, expected_revision=expected_head.revision,
-                                 generation_id=generation_id)
+                                 generation_id=generation_id, **stage_options)
         except (MutationLeaseLost, VectorAuthorityError) as error:
             raise _StageRejected(error) from error
-        writer = CandidateGenerationWriter(self.raw, scope, generation_id, self._state)
+        live_check = None
+        if live is not None:
+            live_check = lambda operation: self.authority.require_candidate(
+                live, scope, generation_id, operation=operation)
+        writer = CandidateGenerationWriter(self.raw, scope, generation_id,
+            self._state, live_check=live_check)
         writer.upload(complete_corpus)
         count, digest = writer.verify()
         owner_key = _owner_key(owner)
         index_revision = expected_head.index_revision or 1
         try:
+            seal_options = {'live': live} if live is not None else {}
             self.authority.seal(scope, owner, generation_id,
-                                expected_count=count, content_digest=digest)
+                                expected_count=count, content_digest=digest,
+                                **seal_options)
         except Exception as error:
+            if live is not None:
+                if isinstance(error, (ImportLeaseLost, MutationLeaseLost,
+                                      PublicationEvidenceError)):
+                    raise
+                raise VectorPublicationUnknown(generation_id, 'seal') from error
             try:
                 record = self.authority.publication_receipt(scope, generation_id)
             except Exception:
@@ -199,8 +221,10 @@ class VectorGenerationService:
             if not self._matches_sealed(record, scope, generation_id, owner_key,
                                         expected_head, index_revision, count, digest):
                 raise VectorPublicationUnknown(generation_id, 'seal') from error
-        return _SealedGeneration(scope, generation_id, owner_key, expected_head,
-                                 index_revision, count, digest, snapshot_version)
+        sealed = _SealedGeneration(scope, generation_id, owner_key, expected_head,
+                                   index_revision, count, digest, snapshot_version)
+        self._sealed_issuance[sealed] = deepcopy(sealed.__dict__)
+        return sealed
 
     def _published(self, scope: VectorScope, generation_id: UUID,
                    expected_revision: int | None, expected_index_revision: int,
