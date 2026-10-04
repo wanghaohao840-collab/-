@@ -19,9 +19,10 @@ from uuid import UUID
 
 from app.import_memory_publication import (
     DurablePublicationUnknown, ImportMemoryPublicationError, _LivePublication,
-    _TerminalAdmission, _AdmissionIssue, _ADMISSIONS,
+    _ADMISSIONS,
     _require_terminal_admission,
 )
+from app.postgres_import_leases import InvalidImportTransition
 from app.import_publication_evidence import (
     PostgresImportPublicationEvidenceRepository, PublicationEvidenceError,
 )
@@ -40,6 +41,7 @@ from app.postgres_memory_documents import PostgresMemoryDocumentStore
 from app.object_store import ObjectRef, ObjectWrite
 from tests.integration.test_import_document_publication import _point, _task, publication
 from tests.integration.test_import_memory_publication import memory_publication
+from tests.integration.test_import_publication_evidence import _advance_private_evidence
 from tests.integration.test_postgres_auth_sessions import shared_database
 from tests.integration.test_s3_object_store import store
 
@@ -58,13 +60,13 @@ def test_live_issue_reserves_before_io_and_ordinary_completion_refuses_callback(
     assert frozen is not None and frozen.phase == 'intent'
     with pytest.raises(PublicationEvidenceError):
         service.pair.imports.try_begin_committing(attempt)
-    # Test-only stage setup isolates complete's callback admission check.
     with db.transaction() as cursor:
         cursor.execute('begin')
         row = service.pair.imports._live(cursor, attempt)
-        service.pair.imports._progress(cursor, attempt, row, 'committing', row['progress'])
+        with pytest.raises(PublicationEvidenceError):
+            service.pair.imports._progress(cursor, attempt, row, 'committing', row['progress'])
     invoked = []
-    with pytest.raises(PublicationEvidenceError):
+    with pytest.raises(InvalidImportTransition):
         service.pair.imports.complete(attempt, lambda cursor: invoked.append(True))
     assert invoked == []
     assert live is not None
@@ -374,11 +376,8 @@ def test_blocking_sealed_reservation_revocation_wins_before_terminal(
 def test_intent_observation_version_is_used_for_document_append(memory_publication):
     service, db, store, user, attempt, live = _issue(memory_publication)
     with db.transaction() as cursor:
-        changed = cursor.execute('''update import_publication_evidence
-            set phase_version=phase_version+1,observation_reason='unknown'
-            where user_id=%s and task_id=%s and task_lease_version=%s
-            and phase='intent' and phase_version=1 returning phase_version''',
-            (user, attempt.task.task_id, attempt.lease_version)).fetchone()
+        changed = _advance_private_evidence(cursor,
+            (user,attempt.task.task_id,attempt.lease_version),reason='unknown')
     assert changed['phase_version'] == 2
     result = service._execute_live_publication(live)
     assert result.proof.phase == 'terminal_committed'
@@ -396,19 +395,31 @@ def test_changed_original_authority_refuses_before_document_put(
 
 
 def test_terminal_admission_cannot_cross_transaction_on_same_cursor(
-        memory_publication):
+        memory_publication, monkeypatch):
     service, db, store, user, attempt, live = _issue(memory_publication)
-    with db.transaction() as cursor:
-        cursor.execute('begin')
-        original_id = cursor.execute('select txid_current() as id').fetchone()['id']
-        admission = _TerminalAdmission()
-        _ADMISSIONS[admission] = _AdmissionIssue(service, None, cursor, None,
-                                                original_id)
+    original_admission = live_module._create_terminal_admission
+    reached = []
+
+    def changed_transaction(work, cursor, evidence):
+        admission = original_admission(work,cursor,evidence)
+        original_id = _ADMISSIONS[admission].transaction_id
         cursor.execute('commit')
         cursor.execute('begin')
+        assert cursor.execute('select txid_current() as id').fetchone()['id'] != original_id
         with pytest.raises(ImportMemoryPublicationError,
                            match='transaction changed'):
             _require_terminal_admission(admission, cursor, 'task_source', attempt)
+        reached.append(True)
+        raise RuntimeError('admission intentionally stopped after transaction test')
+
+    monkeypatch.setattr(live_module,'_create_terminal_admission',
+                        changed_transaction)
+    with pytest.raises(DurablePublicationUnknown) as unknown:
+        service._execute_live_publication(live)
+    assert unknown.value.phase == 'terminal_commit' and reached == [True]
+    saved = PostgresImportPublicationEvidenceRepository(db).read_exact(
+        user,attempt.task.task_id,attempt.lease_version)
+    assert saved.phase == 'pair_sealed' and saved.terminal_slot is None
 
 
 def test_changed_source_after_seals_refuses_before_committing_stage(
@@ -451,13 +462,9 @@ def test_simulated_acknowledgement_allows_later_real_publication_and_retained_pr
     # This keyed CAS is not an ordinary recovery API or recovery acceptance.
     with db.transaction() as cursor:
         cursor.execute('begin')
-        evidence = cursor.execute('''update import_publication_evidence
-            set phase='proved_succeeded',phase_version=phase_version+1
-            where user_id=%s and task_id=%s and task_lease_version=%s
-              and phase='terminal_committed' and phase_version=%s
-            returning phase_version''',
-            (user, attempt.task.task_id, attempt.lease_version,
-             first.proof.phase_version)).fetchall()
+        evidence = [_advance_private_evidence(cursor,
+            (user,attempt.task.task_id,attempt.lease_version),
+            phase='proved_succeeded')]
         gate = cursor.execute('''update user_publication_gates
             set status='resolved',resolved_at=clock_timestamp()
             where user_id=%s and task_id=%s and task_lease_version=%s
@@ -486,14 +493,20 @@ def test_simulated_acknowledgement_allows_later_real_publication_and_retained_pr
 def test_detached_proof_rejects_retained_identity_tamper(memory_publication, target):
     service, db, store, user, attempt, live = _issue(memory_publication)
     result = service._execute_live_publication(live)
+    if target == 'source':
+        with pytest.raises(psycopg.errors.RaiseException,
+                           match='Pinned import source has unresolved publication evidence'):
+            with db.transaction() as cursor:
+                cursor.execute('''update import_objects set version_id=%s
+                    where task_id=%s and user_id=%s''',
+                    ('changed-version', attempt.task.task_id, user))
+        assert ImportPublicationProofService(db).prove_exact(
+            user, attempt.task.task_id, attempt.lease_version) is not None
+        return
     with db.transaction() as cursor:
         if target == 'task':
             cursor.execute('''update import_tasks set original_name=%s where id=%s''',
                            ('changed.txt', attempt.task.task_id))
-        elif target == 'source':
-            cursor.execute('''update import_objects set version_id=%s
-                where task_id=%s and user_id=%s''',
-                ('changed-version', attempt.task.task_id, user))
         else:
             cursor.execute('''update memory_documents set content=%s
                 where user_id=%s and document_id=%s''',
@@ -822,6 +835,16 @@ def test_detached_proof_refuses_immutable_receipt_domain_and_fence_tamper(
         memory_publication, tamper):
     service, db, store, user, attempt, live = _issue(memory_publication)
     published = service._execute_live_publication(live)
+    if tamper == 'audit':
+        with pytest.raises(psycopg.errors.RaiseException,
+                           match='Unresolved publication audit end is immutable'):
+            with db.transaction() as cursor:
+                cursor.execute('''update import_task_attempts set end_reason='failed'
+                    where task_id=%s and lease_version=%s''',
+                    (attempt.task.task_id, attempt.lease_version))
+        assert ImportPublicationProofService(db).prove_exact(
+            user, attempt.task.task_id, attempt.lease_version) is not None
+        return
     if tamper == 'receipt_timestamp':
         # Test-only corruption inside this disposable schema. PostgreSQL's
         # deferred receipt trigger requires separate disable/write/enable
@@ -851,10 +874,6 @@ def test_detached_proof_refuses_immutable_receipt_domain_and_fence_tamper(
                      published.proof.rag_receipt[7]))
                 cursor.execute('''alter table history_document_witnesses
                     enable trigger history_document_witness_guard''')
-            elif tamper == 'audit':
-                cursor.execute('''update import_task_attempts set end_reason='failed'
-                    where task_id=%s and lease_version=%s''',
-                    (attempt.task.task_id, attempt.lease_version))
             elif tamper == 'tenant':
                 cursor.execute('''update memory_documents set metadata=%s
                     where user_id=%s and document_id=%s''',
@@ -989,23 +1008,35 @@ def test_equal_subclass_of_verified_document_cannot_claim_original_token(
 
 
 def test_closed_or_foreign_cursor_terminal_admission_refuses(
-        memory_publication):
+        memory_publication, monkeypatch):
     service, db, store, user, attempt, live = _issue(memory_publication)
-    with db.transaction() as cursor:
-        cursor.execute('begin')
-        transaction_id = cursor.execute('select txid_current() as id').fetchone()['id']
-        admission = _TerminalAdmission()
-        _ADMISSIONS[admission] = _AdmissionIssue(service, None, cursor, None,
-                                                transaction_id)
+    original_admission = live_module._create_terminal_admission
+    reached = []
+
+    def foreign_and_closed(work, cursor, evidence):
+        admission = original_admission(work,cursor,evidence)
         with db.transaction() as other_cursor:
             other_cursor.execute('begin')
-            with pytest.raises(ImportMemoryPublicationError):
+            with pytest.raises(ImportMemoryPublicationError,
+                               match='Active transaction-bound terminal admission required'):
                 _require_terminal_admission(admission, other_cursor,
                                             'task_source', attempt)
         live_module._close_terminal_admission(admission)
-        with pytest.raises(ImportMemoryPublicationError):
+        with pytest.raises(ImportMemoryPublicationError,
+                           match='Active transaction-bound terminal admission required'):
             _require_terminal_admission(admission, cursor,
                                         'task_source', attempt)
+        reached.append(True)
+        raise RuntimeError('admission intentionally stopped after cursor tests')
+
+    monkeypatch.setattr(live_module,'_create_terminal_admission',
+                        foreign_and_closed)
+    with pytest.raises(DurablePublicationUnknown) as unknown:
+        service._execute_live_publication(live)
+    assert unknown.value.phase == 'terminal_commit' and reached == [True]
+    saved = PostgresImportPublicationEvidenceRepository(db).read_exact(
+        user,attempt.task.task_id,attempt.lease_version)
+    assert saved.phase == 'pair_sealed' and saved.terminal_slot is None
 
 
 def test_shallow_copied_service_cannot_use_original_live_handle(memory_publication,
@@ -1078,11 +1109,8 @@ def test_observation_during_candidate_preparation_uses_fresh_seal_version(
         sealed = original(*args, **kwargs)
         with db.transaction() as cursor:
             cursor.execute('begin')
-            changed = cursor.execute('''update import_publication_evidence
-                set phase_version=phase_version+1,observation_reason='unknown'
-                where user_id=%s and task_id=%s and task_lease_version=%s
-                and phase='document_verified' returning phase_version''',
-                (user, attempt.task.task_id, attempt.lease_version)).fetchone()
+            changed = _advance_private_evidence(cursor,
+                (user,attempt.task.task_id,attempt.lease_version),reason='unknown')
         assert changed is not None
         return sealed
     monkeypatch.setattr(service.pair.rag, '_prepare_sealed', observed)

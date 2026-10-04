@@ -44,7 +44,12 @@ def _text(value):
 # Cast existing timestamp text; lexical ordering does not preserve offsets.
 _DUE = """t.status in ('queued','retry_wait')
     and (t.next_attempt_at is null or t.next_attempt_at::timestamptz <= clock_timestamp())
-    and exists(select 1 from import_objects o where o.task_id=t.id and o.user_id=t.user_id)"""
+    and exists(select 1 from import_objects o where o.task_id=t.id and o.user_id=t.user_id)
+    and not exists(select 1 from user_publication_gates g where g.user_id=t.user_id
+        and g.status='unresolved')
+    and not exists(select 1 from import_publication_evidence e
+        join user_publication_gates g using(user_id,task_id,task_lease_version)
+        where e.user_id=t.user_id and e.task_id=t.id and g.status='unresolved')"""
 
 
 class PostgresImportLeaseRepository:
@@ -170,8 +175,20 @@ class PostgresImportLeaseRepository:
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             self._live(cursor,attempt)
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            gate = cursor.execute('''select 1 from user_publication_gates where
+                user_id=%s and task_id=%s and task_lease_version=%s
+                and status='unresolved' ''',
+                (attempt.task.user_id,attempt.task.task_id,
+                 attempt.lease_version)).fetchone()
+            if gate is None:
+                require_no_gate_in_transaction(cursor,attempt.task.user_id)
             try:
-                lease = self.coordinator.heartbeat_in_transaction(cursor,attempt.user_lease,lease_seconds)
+                lease = self.coordinator.heartbeat_in_transaction(cursor,
+                    attempt.user_lease,lease_seconds,
+                    gated_attempt_key=(attempt.task.user_id,
+                        attempt.task.task_id,attempt.lease_version) if gate else None,
+                    task_lease_token=attempt.lease_token if gate else None)
             except MutationLeaseLost as exc:
                 raise ImportLeaseLost(str(exc)) from exc
             row = cursor.execute('''with t as materialized(select clock_timestamp() as now)
@@ -191,11 +208,39 @@ class PostgresImportLeaseRepository:
         with self.database.transaction() as cursor:
             cursor.execute('begin')
             row = self._live(cursor,attempt)
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,attempt.task.user_id)
             if (row['stage']=='committing') != (stage=='committing'):
                 raise InvalidImportTransition('Use try_begin_committing to enter committing; cannot leave it')
             return self._progress(cursor,attempt,row,stage,progress)
 
-    def _progress(self,cursor,attempt,row,stage,progress):
+    def _progress(self,cursor,attempt,row,stage,progress,*,live=None):
+        if live is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,attempt.task.user_id)
+        else:
+            from app.import_memory_publication import _require_live_issuer
+            from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+            service, issue = _require_live_issuer(live)
+            fresh = self._live(cursor,attempt)
+            if (self is not issue.imports or attempt is not issue.original_attempt
+                    or fresh['id'] != issue.key.task_id
+                    or fresh['lease_version'] != issue.key.task_lease_version
+                    or stage != 'committing' or progress != fresh['progress']
+                    or fresh['stage'] == 'committing'
+                    or fresh['cancel_requested_at'] is not None):
+                raise ImportLeaseLost('Original fixed committing progress required')
+            row = fresh
+            evidence_repo = PostgresImportPublicationEvidenceRepository(self.database)
+            current = evidence_repo._read_exact_in_cursor(cursor, issue.key)
+            if current is None:
+                raise ImportLeaseLost('Durable publication evidence is missing')
+            _, _, evidence = evidence_repo._live_evidence(cursor, live,
+                expected_phase='pair_sealed',
+                expected_version=current.phase_version)
+            service._require_pair_sealed(live,evidence)
+            evidence_repo.require_sealed_reservations_in_transaction(cursor,
+                live,evidence)
         cursor.execute('update import_tasks set stage=%s,progress=%s,updated_at=%s where id=%s',
                        (stage,progress,_text(_now(cursor)),row['id']))
         cursor.execute('update import_task_attempts set last_stage=%s where task_id=%s and lease_version=%s',
@@ -231,57 +276,97 @@ class PostgresImportLeaseRepository:
                     evidence.intent)
             if row['cancel_requested_at'] is not None or row['stage']=='committing':
                 return False
-            self._progress(cursor,attempt,row,'committing',row['progress'])
+            self._progress(cursor,attempt,row,'committing',row['progress'],live=live)
             return True
 
     def complete(self,attempt,publish=None,*,terminal_work: object | None = None):
-        with self.database.transaction() as cursor:
-            cursor.execute('begin')
-            row = self._live(cursor,attempt)
-            if row['stage']!='committing':
-                raise InvalidImportTransition('Completion requires committing')
-            if terminal_work is None:
-                from app.import_publication_evidence import require_no_gate_in_transaction
-                require_no_gate_in_transaction(cursor, attempt.task.user_id)
-                if publish is None:
-                    raise TypeError('Publication callback required')
-                publish(cursor)
-            else:
-                from app.import_memory_publication import (
-                    _close_terminal_admission, _create_terminal_admission,
-                    _require_terminal_work,
-                )
-                from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
-                service, work_issue = _require_terminal_work(terminal_work)
-                live = work_issue.live
-                issue = service._require_live_issue(live)
-                if (publish is not None or self is not issue.imports
-                        or attempt is not issue.original_attempt
-                        or issue.plan.attempt != attempt):
-                    raise ImportLeaseLost('Only original fixed terminal work is admitted')
-                repository = PostgresImportPublicationEvidenceRepository(self.database)
-                current = repository._read_exact_in_cursor(cursor, issue.key)
-                if current is None:
-                    raise ImportLeaseLost('Durable publication evidence is missing')
-                _, _, evidence = repository._live_evidence(cursor, live,
-                    expected_phase='pair_sealed',
-                    expected_version=current.phase_version)
-                service._require_pair_sealed(live, evidence)
-                repository.require_sealed_reservations_in_transaction(cursor,
-                    live, evidence)
-                repository._verify_current(cursor, issue.plan.attempt,
-                    evidence.intent)
-                admission = _create_terminal_admission(terminal_work, cursor, evidence)
-                try:
-                    work_issue.callback(cursor, admission)
-                finally:
-                    _close_terminal_admission(admission)
-            row = self._live(cursor,attempt)
-            if row['stage'] != 'committing':
-                raise ImportLeaseLost('Committing stage changed during publication')
-            return self._finish(cursor,attempt,row,'succeeded','succeeded',progress=100)
+        terminal_release = None
+        try:
+            with self.database.transaction() as cursor:
+                cursor.execute('begin')
+                row = self._live(cursor,attempt)
+                if row['stage']!='committing':
+                    raise InvalidImportTransition('Completion requires committing')
+                if terminal_work is None:
+                    from app.import_publication_evidence import require_no_gate_in_transaction
+                    require_no_gate_in_transaction(cursor, attempt.task.user_id)
+                    if publish is None:
+                        raise TypeError('Publication callback required')
+                    publish(cursor)
+                else:
+                    from app.import_memory_publication import (
+                        _RELEASE_BINDINGS, _TerminalReleaseBinding,
+                        _close_terminal_admission, _create_terminal_admission,
+                        _require_terminal_work,
+                    )
+                    from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+                    service, work_issue = _require_terminal_work(terminal_work)
+                    live = work_issue.live
+                    issue = service._require_live_issue(live)
+                    if (publish is not None or self is not issue.imports
+                            or attempt is not issue.original_attempt
+                            or issue.plan.attempt != attempt):
+                        raise ImportLeaseLost('Only original fixed terminal work is admitted')
+                    repository = PostgresImportPublicationEvidenceRepository(self.database)
+                    current = repository._read_exact_in_cursor(cursor, issue.key)
+                    if current is None:
+                        raise ImportLeaseLost('Durable publication evidence is missing')
+                    _, _, evidence = repository._live_evidence(cursor, live,
+                        expected_phase='pair_sealed',
+                        expected_version=current.phase_version)
+                    service._require_pair_sealed(live, evidence)
+                    repository.require_sealed_reservations_in_transaction(cursor,
+                        live, evidence)
+                    repository._verify_current(cursor, issue.plan.attempt,
+                        evidence.intent)
+                    admission = _create_terminal_admission(terminal_work, cursor, evidence)
+                    try:
+                        terminal_release = work_issue.callback(cursor, admission)
+                    finally:
+                        _close_terminal_admission(admission)
+                    bound = (_RELEASE_BINDINGS.get(terminal_release)
+                             if type(terminal_release) is _TerminalReleaseBinding else None)
+                    if (bound is None or bound.work is not terminal_work
+                            or bound.admission is not admission or bound.cursor is not cursor
+                            or bound.attempt is not attempt):
+                        raise ImportLeaseLost('Original fixed release binding required')
+                row = self._live(cursor,attempt)
+                if row['stage'] != 'committing':
+                    raise ImportLeaseLost('Committing stage changed during publication')
+                return self._finish(cursor,attempt,row,'succeeded','succeeded',
+                                    progress=100,terminal_release=terminal_release)
+        finally:
+            if terminal_release is not None:
+                from app.import_memory_publication import _close_terminal_release_binding
+                _close_terminal_release_binding(terminal_release)
 
-    def _finish(self,cursor,attempt,row,status,reason,*,progress=None,error_code=None,error_summary=None,delay=None,unstarted=False):
+    def _finish(self,cursor,attempt,row,status,reason,*,progress=None,error_code=None,error_summary=None,delay=None,unstarted=False,terminal_release=None):
+        if terminal_release is not None:
+            from app.import_memory_publication import (
+                ImportMemoryPublicationError, _RELEASE_BINDINGS,
+                _TerminalReleaseBinding, _require_terminal_release_binding,
+            )
+            binding = (_RELEASE_BINDINGS.get(terminal_release)
+                       if type(terminal_release) is _TerminalReleaseBinding else None)
+            if (binding is None or binding.original_issue.imports is not self
+                    or binding.coordinator is not self.coordinator):
+                raise ImportMemoryPublicationError('Original terminal import receiver required')
+            if (status,reason,progress,error_code,error_summary,delay,unstarted) != (
+                    'succeeded','succeeded',100,None,None,None,False):
+                raise ImportLeaseLost('Fixed terminal finish arguments differ')
+            fresh = self._live(cursor,attempt)
+            consumed = ('id','user_id','lease_version','batch_id',
+                        'started_at','progress')
+            if (not isinstance(row,dict) or any(
+                    field not in row or row[field] != fresh[field]
+                    for field in consumed)):
+                raise ImportMemoryPublicationError('Original terminal task row required')
+            row = fresh
+            _require_terminal_release_binding(terminal_release,cursor,attempt,
+                                              operation='finish')
+        else:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,attempt.task.user_id)
         now = _now(cursor)
         retry = status=='retry_wait'
         requeue = status=='queued'
@@ -299,7 +384,8 @@ class PostgresImportLeaseRepository:
         self._touch(cursor,row)
         result = self._live(cursor,attempt,status=status,ended=True)
         try:
-            self.coordinator.release_in_transaction(cursor,attempt.user_lease)
+            self.coordinator.release_in_transaction(cursor,attempt.user_lease,
+                                                    terminal_release=terminal_release)
         except MutationLeaseLost as exc:
             raise ImportLeaseLost(str(exc)) from exc
         # Keep tokens/version as durable evidence, but expire task authority too.
@@ -374,6 +460,28 @@ class PostgresImportLeaseRepository:
                     where t.id=%s and t.lease_expires_at>clock_timestamp() and u.lease_expires_at>clock_timestamp()
                     and u.owner=t.claimed_by and u.lease_token=t.user_lease_token and u.lease_version=t.user_lease_version''',(row['id'],)).fetchone()
                 if live:
+                    continue
+                from app.import_publication_evidence import AttemptKey
+                from app.import_publication_recovery import (
+                    close_expired_evidence_attempt_in_transaction,
+                    seed_missing_queue_in_transaction,
+                )
+                key = AttemptKey(row['user_id'],row['id'],row['lease_version'])
+                header = cursor.execute('''select * from import_publication_evidence
+                    where user_id=%s and task_id=%s and task_lease_version=%s
+                    for update''',(key.user_id,key.task_id,
+                                    key.task_lease_version)).fetchone()
+                if header is not None:
+                    lease_row = cursor.execute('''select * from user_mutation_leases
+                        where user_id=%s''',(row['user_id'],)).fetchone()
+                    clock = _now(cursor)
+                    if (lease_row is None or row['lease_expires_at']>clock
+                            or lease_row['lease_expires_at']>clock):
+                        continue
+                    close_expired_evidence_attempt_in_transaction(cursor,key,row)
+                    seed_missing_queue_in_transaction(cursor,key,
+                        row['lease_expires_at'],lease_row['lease_expires_at'])
+                    recovered += 1
                     continue
                 now = _now(cursor)
                 cursor.execute('''update import_task_attempts set ended_at=%s,end_reason='lease_expired'

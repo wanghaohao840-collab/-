@@ -128,10 +128,52 @@ class PostgresUserMutationCoordinator:
             raise MutationLeaseLost('User mutation lease is no longer live')
         return row
 
-    def heartbeat_in_transaction(self, cursor, handle, lease_seconds=60):
+    def heartbeat_in_transaction(self, cursor, handle, lease_seconds=60, *,
+                                 gated_attempt_key=None, task_lease_token=None):
         """Renew without committing; any failure requires caller rollback."""
         _duration(lease_seconds)
         self.require_live_in_transaction(cursor, handle)
+        if gated_attempt_key is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,handle.user_id)
+        else:
+            if (type(gated_attempt_key) is not tuple or len(gated_attempt_key)!=3
+                    or gated_attempt_key[0]!=handle.user_id
+                    or type(gated_attempt_key[2]) is not int
+                    or not isinstance(task_lease_token,UUID)):
+                raise MutationLeaseLost('Exact gated heartbeat attempt required')
+            user,task_id,version = gated_attempt_key
+            task = cursor.execute('''select * from import_tasks where id=%s
+                and user_id=%s for update''',(task_id,user)).fetchone()
+            audit = cursor.execute('''select * from import_task_attempts where
+                task_id=%s and lease_version=%s for update''',
+                (task_id,version)).fetchone()
+            header = cursor.execute('''select * from import_publication_evidence
+                where user_id=%s and task_id=%s and task_lease_version=%s
+                for update''',(user,task_id,version)).fetchone()
+            gate = cursor.execute('''select * from user_publication_gates
+                where user_id=%s and task_id=%s and task_lease_version=%s
+                for update''',(user,task_id,version)).fetchone()
+            recovery = cursor.execute('''select expires_at from
+                import_publication_recovery_leases where user_id=%s and task_id=%s
+                and task_lease_version=%s''',(user,task_id,version)).fetchone()
+            now = cursor.execute('select clock_timestamp() as now').fetchone()['now']
+            if (task is None or audit is None or header is None or gate is None
+                    or gate['status']!='unresolved'
+                    or header['phase'] not in ('intent','document_verified','pair_sealed')
+                    or task['status']!='running' or task['lease_version']!=version
+                    or task['lease_token']!=task_lease_token
+                    or task['claimed_by']!=handle.owner
+                    or task['user_lease_token']!=handle.lease_token
+                    or task['user_lease_version']!=handle.lease_version
+                    or task['lease_expires_at']<=now
+                    or audit['worker_id']!=handle.owner
+                    or audit['lease_token']!=task_lease_token
+                    or audit['user_lease_token']!=handle.lease_token
+                    or audit['user_lease_version']!=handle.lease_version
+                    or audit['ended_at'] is not None
+                    or (recovery is not None and recovery['expires_at']>now)):
+                raise MutationLeaseLost('Original gated heartbeat authority changed')
         row = cursor.execute(
             'with t as materialized (select clock_timestamp() as now) '
             'update user_mutation_leases set heartbeat_at=t.now, '
@@ -149,9 +191,27 @@ class PostgresUserMutationCoordinator:
             self._isolation(cursor)
             return self.heartbeat_in_transaction(cursor, handle, lease_seconds)
 
-    def release_in_transaction(self, cursor, handle):
+    def release_in_transaction(self, cursor, handle, *, terminal_release=None):
         """Release live ownership in caller transaction; loss always raises."""
+        if terminal_release is not None:
+            from app.import_memory_publication import (
+                ImportMemoryPublicationError, _RELEASE_BINDINGS,
+                _TerminalReleaseBinding,
+            )
+            binding = (_RELEASE_BINDINGS.get(terminal_release)
+                       if type(terminal_release) is _TerminalReleaseBinding else None)
+            if binding is None or binding.coordinator is not self:
+                raise ImportMemoryPublicationError('Original terminal coordinator required')
         self.require_live_in_transaction(cursor, handle)
+        if terminal_release is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,handle.user_id)
+        else:
+            from app.import_memory_publication import _require_terminal_release_binding
+            if binding is None or binding.attempt.user_lease is not handle:
+                raise MutationLeaseLost('Original terminal user lease required')
+            _require_terminal_release_binding(
+                terminal_release,cursor,binding.attempt,operation='release')
         row = cursor.execute(
             'with t as materialized (select clock_timestamp() as now) '
             'update user_mutation_leases set lease_expires_at=t.now from t '
@@ -180,5 +240,7 @@ class PostgresUserMutationCoordinator:
         with self.database.transaction() as cursor:
             self._isolation(cursor)
             self.require_live_in_transaction(cursor, handle)
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor, handle.user_id)
             yield cursor
             self.require_live_in_transaction(cursor, handle)

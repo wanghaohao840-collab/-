@@ -165,6 +165,38 @@ def _complete_slots(intent, intent_hash):
             _canonical({'final_expected_hash': final_hash, **receipts}))
 
 
+def _advance_private_evidence(cursor, selector, *, phase=None, slot=None,
+                              value=None, reason=None):
+    """Test-only legal child-first, header-second CAS for raw fixture setup."""
+    row = cursor.execute('''select phase,phase_version from import_publication_evidence
+        where user_id=%s and task_id=%s and task_lease_version=%s for update''',
+        selector).fetchone()
+    assert row is not None
+    if slot is None:
+        child = cursor.execute('''update import_publication_private_payloads
+            set payload_phase_version=payload_phase_version+1
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            and payload_phase_version=%s returning payload_phase_version''',
+            (*selector,row['phase_version'])).fetchone()
+    else:
+        assert slot in ('document_slot','rag_sealed_slot','episode_sealed_slot','terminal_slot')
+        child = cursor.execute(f'''update import_publication_private_payloads
+            set {slot}=%s,payload_phase_version=payload_phase_version+1
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            and payload_phase_version=%s and {slot} is null
+            returning payload_phase_version''',
+            (value,*selector,row['phase_version'])).fetchone()
+    assert child is not None
+    new_phase = row['phase'] if phase is None else phase
+    header = cursor.execute('''update import_publication_evidence
+        set phase=%s,phase_version=phase_version+1,observation_reason=%s
+        where user_id=%s and task_id=%s and task_lease_version=%s
+        and phase_version=%s returning phase_version''',
+        (new_phase,reason,*selector,row['phase_version'])).fetchone()
+    assert header is not None
+    return header
+
+
 def test_exact_evidence_decodes_inside_callers_read_only_snapshot(memory_publication):
     service, db, store, rag, snapshots, rag_scope, episode_scope, profile, user, _ = memory_publication
     attempt = _task(db, store, user)
@@ -587,13 +619,12 @@ def test_reservation_rechecks_lease_after_unique_index_wait(memory_publication):
                 cursor.execute('''insert into import_publication_evidence
                     (user_id,task_id,task_lease_version,document_id,worker_id,
                      task_lease_token,user_lease_token,user_lease_version,
-                     schema_version,intent_format,intent_payload,canonical_bytes,intent_hash)
-                    values(%s,%s,%s,%s,%s,%s,%s,%s,1,'canonical-json-zlib-1',%s,%s,%s)''',
+                         schema_version,intent_format,intent_hash)
+                        values(%s,%s,%s,%s,%s,%s,%s,%s,1,'canonical-json-zlib-1',%s)''',
                     (other, blocker_attempt.task.task_id, blocker_attempt.lease_version,
                      blocker_attempt.task.document_id, blocker_attempt.worker_id,
                      blocker_attempt.lease_token, blocker_attempt.user_lease.lease_token,
-                     blocker_attempt.user_lease.lease_version, encoded.payload,
-                     encoded.canonical_bytes, encoded.digest))
+                         blocker_attempt.user_lease.lease_version, encoded.digest))
                 cursor.execute('''insert into generation_reservations
                     (generation_id,user_id,task_id,task_lease_version,vector_kind,
                      namespace,index_key,base_revision,owner,user_lease_token,
@@ -687,12 +718,11 @@ def test_read_exact_fails_closed_on_phase_slot_shape_and_sql_immutability(memory
             cursor.execute('''insert into import_publication_evidence
                 (user_id,task_id,task_lease_version,document_id,worker_id,
                  task_lease_token,user_lease_token,user_lease_version,
-                 schema_version,intent_format,intent_payload,canonical_bytes,
-                 intent_hash,phase)
+                 schema_version,intent_format,intent_hash,phase)
                 select user_id,task_id,task_lease_version+1,document_id,worker_id,
                  task_lease_token,user_lease_token,user_lease_version,
-                 schema_version,intent_format,intent_payload,canonical_bytes,
-                 intent_hash,'abandoned' from import_publication_evidence
+                 schema_version,intent_format,intent_hash,'abandoned'
+                 from import_publication_evidence
                 where user_id=%s and task_id=%s and task_lease_version=%s''', selector)
     with pytest.raises(psycopg.errors.RaiseException, match='intent is immutable'):
         with db.transaction() as cursor:
@@ -705,17 +735,16 @@ def test_read_exact_fails_closed_on_phase_slot_shape_and_sql_immutability(memory
                 phase_version=phase_version+1 where user_id=%s and task_id=%s
                 and task_lease_version=%s''', selector)
     with db.transaction() as cursor:
-        cursor.execute('''update import_publication_evidence
-            set phase='document_verified',phase_version=phase_version+1,document_slot=%s
-            where user_id=%s and task_id=%s and task_lease_version=%s''',
-            (b'{}', *selector))
+        _advance_private_evidence(cursor,selector,phase='document_verified',
+                                  slot='document_slot',value=b'{}')
     with pytest.raises(PublicationEvidenceError):
         repository.read_exact(*selector)
     with pytest.raises(psycopg.errors.RaiseException, match='slots are write once'):
         with db.transaction() as cursor:
-            cursor.execute('''update import_publication_evidence set document_slot=%s,
-                phase_version=phase_version+1 where user_id=%s and task_id=%s
-                and task_lease_version=%s''', (b'{"changed":true}', *selector))
+            cursor.execute('''update import_publication_private_payloads
+                set document_slot=%s,payload_phase_version=payload_phase_version+1
+                where user_id=%s and task_id=%s and task_lease_version=%s''',
+                (b'{"changed":true}', *selector))
 
 
 def test_read_exact_rejects_stored_hash_corruption(memory_publication):
@@ -728,6 +757,7 @@ def test_read_exact_rejects_stored_hash_corruption(memory_publication):
         cursor.execute('''update import_publication_evidence set intent_hash=%s
             where user_id=%s and task_id=%s and task_lease_version=%s''',
             ('0' * 64, key.user_id, key.task_id, key.task_lease_version))
+        cursor.execute('set constraints all immediate')
         cursor.execute('''alter table import_publication_evidence
             enable trigger import_publication_evidence_guard''')
     with pytest.raises(PublicationEvidenceError, match='Intent hash differs'):
@@ -841,29 +871,20 @@ def test_read_exact_accepts_only_typed_ordered_complete_future_slots(memory_publ
     document, rag, episode, terminal = _complete_slots(saved.intent, saved.intent_hash)
     assert sum(map(len, (document, rag, episode, terminal))) < 4 * 262144
     with db.transaction() as cursor:
-        cursor.execute('''update import_publication_evidence
-            set phase='document_verified',phase_version=phase_version+1,document_slot=%s
-            where user_id=%s and task_id=%s and task_lease_version=%s''',
-            (document, *selector))
-        cursor.execute('''update import_publication_evidence
-            set phase_version=phase_version+1,rag_sealed_slot=%s
-            where user_id=%s and task_id=%s and task_lease_version=%s''',
-            (rag, *selector))
+        _advance_private_evidence(cursor,selector,phase='document_verified',
+                                  slot='document_slot',value=document)
+        _advance_private_evidence(cursor,selector,slot='rag_sealed_slot',value=rag)
     assert repository.read_exact(*selector).rag_sealed_slot == rag
-    with pytest.raises(psycopg.errors.RaiseException, match='phase lacks proof slots'):
+    with pytest.raises(psycopg.errors.RaiseException, match='phase mismatch'):
         with db.transaction() as cursor:
             cursor.execute('''update import_publication_evidence
                 set phase='pair_sealed',phase_version=phase_version+1
                 where user_id=%s and task_id=%s and task_lease_version=%s''', selector)
     with db.transaction() as cursor:
-        cursor.execute('''update import_publication_evidence
-            set phase='pair_sealed',phase_version=phase_version+1,episode_sealed_slot=%s
-            where user_id=%s and task_id=%s and task_lease_version=%s''',
-            (episode, *selector))
-        cursor.execute('''update import_publication_evidence
-            set phase='terminal_committed',phase_version=phase_version+1,terminal_slot=%s
-            where user_id=%s and task_id=%s and task_lease_version=%s''',
-            (terminal, *selector))
+        _advance_private_evidence(cursor,selector,phase='pair_sealed',
+                                  slot='episode_sealed_slot',value=episode)
+        _advance_private_evidence(cursor,selector,phase='terminal_committed',
+                                  slot='terminal_slot',value=terminal)
     assert repository.read_exact(*selector).terminal_slot == terminal
     with pytest.raises(psycopg.errors.RaiseException, match='Illegal import publication phase'):
         with db.transaction() as cursor:

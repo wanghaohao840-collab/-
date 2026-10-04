@@ -4,6 +4,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+import psycopg
 
 from app.postgres_import_leases import ImportLeaseLost, PostgresImportLeaseRepository
 from app.postgres_import_artifacts import PostgresImportArtifactService
@@ -122,7 +123,8 @@ def test_callback_rollback_full_tuple_and_clock(fixture,failure):
             'status':"update import_tasks set status='queued'",
         }
         cursor.execute(statements[failure])
-    with pytest.raises((ImportLeaseLost,RuntimeError)): repo.complete(attempt,publish)
+    expected = (ImportLeaseLost, RuntimeError, psycopg.errors.RaiseException) if failure == 'audit_token' else (ImportLeaseLost, RuntimeError)
+    with pytest.raises(expected): repo.complete(attempt,publish)
     with other.transaction() as cursor:
         assert cursor.execute('select updated_at from users where id=%s',(owner,)).fetchone()['updated_at']!='published'
         assert cursor.execute('select status from import_tasks').fetchone()['status']=='running'
@@ -396,7 +398,7 @@ def test_migration_preserves_legacy_rows_and_audit_constraints(fixture):
     import importlib
     from alembic import command
     from alembic.config import Config
-    from psycopg.errors import CheckViolation,ForeignKeyViolation,UniqueViolation
+    from psycopg.errors import CheckViolation,UniqueViolation,RaiseException
     db,_,_,owner,other,_=fixture
     task=submit(fixture).tasks[0]
     with db.transaction() as cursor:
@@ -410,20 +412,38 @@ def test_migration_preserves_legacy_rows_and_audit_constraints(fixture):
         assert row['lease_version']==0 and row['total_attempt_count']==7 and row['lease_token'] is None
         cursor.execute("update import_tasks set status='queued'")
     attempt=repo.claim_next('worker')
-    for statement,error in [
-        ('update import_tasks set lease_version=-1',CheckViolation),
-        ('update import_task_attempts set lease_version=0',CheckViolation),
-        ("update import_task_attempts set worker_id=' '",CheckViolation),
-        ("update import_task_attempts set user_id='missing'",ForeignKeyViolation),
-        ('insert into import_task_attempts select * from import_task_attempts',UniqueViolation),
-        ("update import_task_attempts set error_summary=repeat('x',501)",CheckViolation),
-        ("update import_task_attempts set end_reason='ended'",CheckViolation),
+    with db.transaction() as cursor:
+        audit_before = cursor.execute('''select * from import_task_attempts
+            where task_id=%s and lease_version=%s''',
+            (attempt.task.task_id,attempt.lease_version)).fetchone()
+    for statement,error,message in [
+        ('update import_tasks set lease_version=-1',CheckViolation,None),
+        ('update import_task_attempts set lease_version=0',RaiseException,
+         'Import audit identity is immutable'),
+        ("update import_task_attempts set worker_id=' '",RaiseException,
+         'Import audit identity is immutable'),
+        ("update import_task_attempts set user_id='missing'",RaiseException,
+         'Import audit identity is immutable'),
+        ('insert into import_task_attempts select * from import_task_attempts',
+         UniqueViolation,None),
+        ("update import_task_attempts set error_summary=repeat('x',501)",
+         CheckViolation,None),
+        ("update import_task_attempts set end_reason='ended'",RaiseException,
+         'Import audit end fields must agree'),
     ]:
-        with pytest.raises(error):
+        with pytest.raises(error, match=message):
             with db.transaction() as cursor: cursor.execute(statement)
-    with pytest.raises(ForeignKeyViolation):
+        with db.transaction() as cursor:
+            assert cursor.execute('''select * from import_task_attempts
+                where task_id=%s and lease_version=%s''',
+                (attempt.task.task_id,attempt.lease_version)).fetchone() == audit_before
+    with pytest.raises(RaiseException,match='Import audit identity is immutable'):
         with db.transaction() as cursor:
             cursor.execute('update import_task_attempts set user_id=%s',(other,))
+    with db.transaction() as cursor:
+        assert cursor.execute('''select * from import_task_attempts
+            where task_id=%s and lease_version=%s''',
+            (attempt.task.task_id,attempt.lease_version)).fetchone() == audit_before
     migration=importlib.import_module('migrations.versions.20260928_09_import_leases')
     assert migration.down_revision=='20260928_08'
     with pytest.raises(RuntimeError,match='recovery'): migration.downgrade()

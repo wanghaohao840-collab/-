@@ -95,6 +95,7 @@ class _LiveIssue:
     document_repository: object
     pair: object
     imports: object
+    coordinator: object
     rag_service: object
     episode_service: object
     rag_authority: object
@@ -119,7 +120,7 @@ class _FixedTerminalWork:
         return service._run_fixed_terminal(cursor, admission, issue)
 
 
-@dataclass(frozen=True)
+@dataclass
 class _FixedTerminalIssue:
     live: _LivePublication
     prepared: object
@@ -127,6 +128,7 @@ class _FixedTerminalIssue:
     episode_sealed: object
     expected: object
     callback: object
+    consumed: bool = False
 
 
 _TERMINAL_ISSUERS = WeakKeyDictionary()
@@ -138,7 +140,8 @@ def _require_terminal_work(work):
     service = _TERMINAL_ISSUERS.get(work)
     issue = None if service is None else service._terminal_issues.get(work)
     if (issue is None or issue.callback.__self__ is not work
-            or issue.callback.__func__ is not _FixedTerminalWork.run):
+            or issue.callback.__func__ is not _FixedTerminalWork.run
+            or service._terminal_work_for_live.get(issue.live) is not work):
         raise ImportMemoryPublicationError('Fixed terminal callback issuer differs')
     service._require_live_issue(issue.live)
     return service, issue
@@ -152,6 +155,8 @@ class _TerminalAdmission:
 class _AdmissionIssue:
     service: object
     terminal_work: _FixedTerminalWork
+    original_issue: _LiveIssue
+    coordinator: object
     cursor: object
     evidence: object
     transaction_id: int
@@ -162,11 +167,16 @@ _ADMISSIONS = WeakKeyDictionary()
 
 
 def _create_terminal_admission(work, cursor, evidence):
-    service, _ = _require_terminal_work(work)
+    service, terminal = _require_terminal_work(work)
+    original_issue = service._require_live_issue(terminal.live)
+    with service._live_execution_lock:
+        if terminal.consumed:
+            raise ImportMemoryPublicationError('Fixed terminal work was already attempted')
+        terminal.consumed = True
     admission = _TerminalAdmission()
     transaction_id = cursor.execute('select txid_current() as id').fetchone()['id']
-    _ADMISSIONS[admission] = _AdmissionIssue(service, work, cursor, evidence,
-                                            transaction_id)
+    _ADMISSIONS[admission] = _AdmissionIssue(service, work, original_issue,
+        original_issue.coordinator, cursor, evidence, transaction_id)
     return admission
 
 
@@ -188,7 +198,10 @@ def _require_terminal_admission(admission, cursor, operation, *values):
     evidence = issued.evidence
     intent = evidence.intent
     user = intent['attempt']['user_id']
-    if (service is not issued.service or evidence.phase != 'pair_sealed'
+    if (service is not issued.service
+            or issued.original_issue is not service._require_live_issue(terminal.live)
+            or issued.coordinator is not issued.original_issue.coordinator
+            or evidence.phase != 'pair_sealed'
             or evidence.terminal_slot is not None):
         raise ImportMemoryPublicationError('Terminal admission evidence differs')
     if operation == 'terminal_entry':
@@ -248,8 +261,216 @@ def _require_terminal_admission(admission, cursor, operation, *values):
                         intent['document']['count'], intent['document']['digest'])
         if actual not in (expected_old, expected_new):
             raise ImportMemoryPublicationError('Admitted witness differs')
+    elif operation == 'vector_publish':
+        (repository, scope, authority, generation_id, expected_revision,
+         expected_index_revision, snapshot_version, expected_count,
+         content_digest) = values
+        issue = service._require_live_issue(terminal.live)
+        kind = scope.vector_kind
+        if kind not in ('rag', 'episode'):
+            raise ImportMemoryPublicationError('Vector publication kind differs')
+        vector = issue.rag_service if kind == 'rag' else issue.episode_service
+        sealed = terminal.rag_sealed if kind == 'rag' else terminal.episode_sealed
+        planned_scope = issue.plan.rag_scope if kind == 'rag' else service.episode_scope
+        frozen = intent['scopes'][kind]
+        saved = json.loads(getattr(evidence, kind + '_sealed_slot'))
+        if (repository is not vector.authority or scope is not planned_scope
+                or authority is not issue.original_attempt
+                or generation_id != sealed.generation_id
+                or str(generation_id) != frozen['candidate_id']
+                or expected_revision != sealed.expected_head.revision
+                or expected_revision != frozen['head']['revision']
+                or expected_index_revision != sealed.expected_index_revision
+                or expected_index_revision != frozen['index_revision']
+                or snapshot_version != sealed.snapshot_version
+                or expected_count is None or expected_count != sealed.expected_count
+                or content_digest is None or content_digest != sealed.content_digest
+                or saved['expected_count'] != expected_count
+                or saved['content_digest'] != content_digest
+                or saved['snapshot_version'] != snapshot_version):
+            raise ImportMemoryPublicationError('Admitted vector publication differs')
+        from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
+        repo = PostgresImportPublicationEvidenceRepository(service.database)
+        current = repo._read_exact_in_cursor(cursor, issue.key)
+        if current != evidence:
+            raise ImportMemoryPublicationError('Admitted vector evidence changed')
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            (issue.key.user_id,issue.key.task_id,issue.key.task_lease_version)).fetchone()
+        if gate is None or gate['status'] != 'unresolved':
+            raise ImportMemoryPublicationError('Admitted vector gate changed')
+        for candidate_kind in ('rag','episode'):
+            candidate = intent['scopes'][candidate_kind]
+            reservation = cursor.execute('''select state,owner,user_lease_token,
+                user_lease_version,task_id,task_lease_version,vector_kind,
+                namespace,index_key,base_revision from generation_reservations
+                where generation_id=%s''', (candidate['candidate_id'],)).fetchone()
+            if (reservation is None or reservation['state'] != 'reserved'
+                    or reservation['owner'] != issue.original_attempt.worker_id
+                    or str(reservation['user_lease_token']) != intent['attempt']['user_lease_token']
+                    or reservation['user_lease_version'] != intent['attempt']['user_lease_version']
+                    or reservation['task_id'] != issue.key.task_id
+                    or reservation['task_lease_version'] != issue.key.task_lease_version
+                    or reservation['vector_kind'] != candidate_kind
+                    or reservation['namespace'] != candidate['namespace']
+                    or reservation['index_key'] != candidate['index_key']
+                    or reservation['base_revision'] != candidate['head']['revision']):
+                raise ImportMemoryPublicationError('Admitted vector reservation changed')
     else:
         raise ImportMemoryPublicationError('Operation is outside terminal admission')
+
+
+class _TerminalReleaseBinding:
+    __slots__ = ('__weakref__',)
+
+
+@dataclass
+class _ReleaseIssue:
+    service: object
+    work: _FixedTerminalWork
+    admission: _TerminalAdmission
+    admission_issue: _AdmissionIssue
+    original_issue: _LiveIssue
+    coordinator: object
+    cursor: object
+    transaction_id: int
+    attempt: object
+    evidence: object
+    terminal_sha256: str
+    receipts: tuple
+    finish_done: bool = False
+    release_done: bool = False
+    active: bool = True
+
+
+_RELEASE_BINDINGS = WeakKeyDictionary()
+
+
+def _terminal_receipts(cursor, evidence):
+    from app.import_publication_evidence import _receipt_from_sql
+    terminal = json.loads(evidence.terminal_slot)
+    result = []
+    for kind in ('rag', 'episode'):
+        scope = evidence.intent['scopes'][kind]
+        row = cursor.execute('''select * from vector_generations
+            where generation_id=%s and tenant_id=%s and vector_kind=%s
+            and namespace=%s and index_key=%s''',
+            (scope['candidate_id'],evidence.key.user_id,kind,
+             scope['namespace'],scope['index_key'])).fetchone()
+        if row is None:
+            raise ImportMemoryPublicationError('Terminal vector receipt is missing')
+        projected = _receipt_from_sql(row)
+        if projected != terminal[kind + '_receipt']:
+            raise ImportMemoryPublicationError('Terminal vector receipt changed')
+        result.append(tuple(projected))
+    return tuple(result)
+
+
+def _issue_terminal_release_binding(admission, cursor, terminal_evidence):
+    _require_terminal_admission(admission, cursor, 'terminal_entry')
+    issued = _ADMISSIONS[admission]
+    service, terminal = _require_terminal_work(issued.terminal_work)
+    issue = service._require_live_issue(terminal.live)
+    if (service is not issued.service or service.database is not issue.database
+            or issued.cursor is not cursor or terminal_evidence.phase != 'terminal_committed'
+            or terminal_evidence.phase_version != issued.evidence.phase_version + 1
+            or terminal_evidence.key != issue.key):
+        raise ImportMemoryPublicationError('Terminal release issuer differs')
+    repository = PostgresImportPublicationEvidenceRepository(service.database)
+    current = repository._read_exact_in_cursor(cursor, issue.key)
+    if current != terminal_evidence or current.terminal_slot is None:
+        raise ImportMemoryPublicationError('Terminal release evidence differs')
+    receipts = _terminal_receipts(cursor, current)
+    binding = _TerminalReleaseBinding()
+    _RELEASE_BINDINGS[binding] = _ReleaseIssue(service,issued.terminal_work,
+        admission, issued, issued.original_issue, issued.coordinator,
+        cursor,issued.transaction_id,issue.original_attempt,current,
+        sha256(current.terminal_slot).hexdigest(),receipts)
+    return binding
+
+
+def _require_terminal_release_binding(binding, cursor, attempt, *, operation):
+    from psycopg.pq import TransactionStatus
+    issued = _RELEASE_BINDINGS.get(binding) if type(binding) is _TerminalReleaseBinding else None
+    if (issued is None or not issued.active or issued.cursor is not cursor
+            or issued.attempt is not attempt or operation not in ('finish','release')
+            or cursor.connection.info.transaction_status != TransactionStatus.INTRANS
+            or cursor.execute('select txid_current() as id').fetchone()['id'] != issued.transaction_id):
+        raise ImportMemoryPublicationError('Terminal release binding is invalid')
+    service, terminal = _require_terminal_work(issued.work)
+    admission_issue = _ADMISSIONS.get(issued.admission)
+    issue = service._require_live_issue(terminal.live)
+    if (service is not issued.service or admission_issue is not issued.admission_issue
+            or admission_issue.service is not service
+            or admission_issue.terminal_work is not issued.work
+            or admission_issue.original_issue is not issued.original_issue
+            or admission_issue.coordinator is not issued.coordinator
+            or issued.original_issue is not issue
+            or issued.coordinator is not issue.coordinator
+            or issued.coordinator is not issue.imports.coordinator
+            or issue.original_attempt is not attempt
+            or service.database is not issue.database
+            or service.pair.imports is not issue.imports
+            or service.pair.rag.authority is not issue.rag_authority
+            or service.pair.episode.authority is not issue.episode_authority
+            or terminal.callback.__self__ is not issued.work
+            or terminal.callback.__func__ is not _FixedTerminalWork.run):
+        raise ImportMemoryPublicationError('Terminal release provenance changed')
+    if operation == 'release' and (not issued.finish_done or issued.release_done
+                                   or admission_issue.active):
+        raise ImportMemoryPublicationError('Terminal release sequence differs')
+    if operation == 'finish' and (issued.finish_done or admission_issue.active):
+        raise ImportMemoryPublicationError('Terminal finish sequence differs')
+    repository = PostgresImportPublicationEvidenceRepository(service.database)
+    current = repository._read_exact_in_cursor(cursor, issue.key)
+    if (current != issued.evidence or current.terminal_slot is None
+            or sha256(current.terminal_slot).hexdigest() != issued.terminal_sha256
+            or _terminal_receipts(cursor, current) != issued.receipts):
+        raise ImportMemoryPublicationError('Terminal release proof changed')
+    gate = cursor.execute('''select status from user_publication_gates
+        where user_id=%s and task_id=%s and task_lease_version=%s''',
+        (issue.key.user_id,issue.key.task_id,issue.key.task_lease_version)).fetchone()
+    task = cursor.execute('''select * from import_tasks where id=%s and user_id=%s''',
+        (issue.key.task_id,issue.key.user_id)).fetchone()
+    audit = cursor.execute('''select * from import_task_attempts
+        where task_id=%s and lease_version=%s''',
+        (issue.key.task_id,issue.key.task_lease_version)).fetchone()
+    lease = cursor.execute('''select * from user_mutation_leases
+        where user_id=%s''', (issue.key.user_id,)).fetchone()
+    if (gate is None or gate['status'] != 'unresolved' or task is None
+            or audit is None or lease is None
+            or task['claimed_by'] != attempt.worker_id
+            or task['lease_token'] != attempt.lease_token
+            or task['lease_version'] != attempt.lease_version
+            or task['user_lease_token'] != attempt.user_lease.lease_token
+            or task['user_lease_version'] != attempt.user_lease.lease_version
+            or audit['worker_id'] != attempt.worker_id
+            or audit['lease_token'] != attempt.lease_token
+            or audit['user_lease_token'] != attempt.user_lease.lease_token
+            or audit['user_lease_version'] != attempt.user_lease.lease_version
+            or lease['owner'] != attempt.worker_id
+            or lease['lease_token'] != attempt.user_lease.lease_token
+            or lease['lease_version'] != attempt.user_lease.lease_version):
+        raise ImportMemoryPublicationError('Terminal release owner changed')
+    now = cursor.execute('select clock_timestamp() as now').fetchone()['now']
+    if lease['lease_expires_at'] <= now or task['lease_expires_at'] <= now:
+        raise ImportMemoryPublicationError('Terminal release owner expired')
+    if operation == 'finish':
+        if task['status'] != 'running' or task['stage'] != 'committing' or audit['ended_at'] is not None:
+            raise ImportMemoryPublicationError('Terminal finish task changed')
+        issued.finish_done = True
+    else:
+        if (task['status'] != 'succeeded' or task['stage'] != 'succeeded'
+                or task['progress'] != 100 or audit['end_reason'] != 'succeeded'
+                or audit['ended_at'] is None):
+            raise ImportMemoryPublicationError('Terminal release task changed')
+        issued.release_done = True
+
+
+def _close_terminal_release_binding(binding):
+    issued = _RELEASE_BINDINGS.get(binding)
+    if issued is not None:
+        issued.active = False
 
 
 @dataclass(frozen=True)
@@ -412,6 +633,7 @@ class ImportMemoryPublicationService:
         self._document_continuations = WeakKeyDictionary()
         self._sealed_continuations = WeakKeyDictionary()
         self._terminal_issues = WeakKeyDictionary()
+        self._terminal_work_for_live = WeakKeyDictionary()
         self._live_executions = WeakKeyDictionary()
         self._live_execution_lock = Lock()
 
@@ -425,7 +647,8 @@ class ImportMemoryPublicationService:
         live = _LivePublication()
         self._live_issues[live] = _LiveIssue(plan, attempt, key, encoded.digest,
             self.documents, self.documents.documents, self.pair,
-            self.pair.imports, self.pair.rag, self.pair.episode,
+            self.pair.imports, self.pair.imports.coordinator,
+            self.pair.rag, self.pair.episode,
             self.pair.rag.authority, self.pair.episode.authority,
             self.database, self.pair.rag.raw, self.pair.episode.raw)
         _LIVE_ISSUERS[live] = self
@@ -439,6 +662,8 @@ class ImportMemoryPublicationService:
                 or issue.document_service is not self.documents
                 or issue.document_repository is not self.documents.documents
                 or issue.pair is not self.pair or issue.imports is not self.pair.imports
+                or issue.coordinator is not issue.imports.coordinator
+                or issue.coordinator.database is not self.database
                 or issue.rag_service is not self.pair.rag
                 or issue.episode_service is not self.pair.episode
                 or issue.rag_authority is not self.pair.rag.authority
@@ -483,7 +708,7 @@ class ImportMemoryPublicationService:
         return continuation[1]
 
     def _issue_fixed_terminal(self, live, prepared, rag_sealed, episode_sealed,
-                              expected):
+                               expected):
         issue = self._require_live_issue(live)
         if (prepared.verified is not self._document_continuations[live][0]
                 or prepared.task != issue.plan.task
@@ -492,10 +717,14 @@ class ImportMemoryPublicationService:
             raise ImportMemoryPublicationError('Terminal work differs from issuance')
         issue.rag_service._require_issued_seal(rag_sealed)
         issue.episode_service._require_issued_seal(episode_sealed)
-        work = _FixedTerminalWork()
-        self._terminal_issues[work] = _FixedTerminalIssue(live, prepared,
-            rag_sealed, episode_sealed, deepcopy(expected), work.run)
-        _TERMINAL_ISSUERS[work] = self
+        with self._live_execution_lock:
+            if live in self._terminal_work_for_live:
+                raise ImportMemoryPublicationError('Fixed terminal work was already issued')
+            work = _FixedTerminalWork()
+            self._terminal_issues[work] = _FixedTerminalIssue(live, prepared,
+                rag_sealed, episode_sealed, deepcopy(expected), work.run)
+            self._terminal_work_for_live[live] = work
+            _TERMINAL_ISSUERS[work] = self
         return work
 
     def _bind_sealed(self, live, kind, sealed):
@@ -544,13 +773,13 @@ class ImportMemoryPublicationService:
                 ('rag', terminal.rag_sealed, issue.plan.rag_scope, issue.rag_service),
                 ('episode', terminal.episode_sealed, self.episode_scope,
                  issue.episode_service)):
-            service.authority._publish(cursor, scope, issue.plan.attempt,
+            service.authority._publish(cursor, scope, issue.original_attempt,
                 sealed.generation_id,
                 expected_revision=sealed.expected_head.revision,
                 expected_index_revision=sealed.expected_index_revision,
                 snapshot_version=sealed.snapshot_version,
                 expected_count=sealed.expected_count,
-                content_digest=sealed.content_digest)
+                content_digest=sealed.content_digest, admission=admission)
         receipts = {}
         self._terminal(cursor, issue.plan.rag_scope, issue.plan.attempt,
             terminal.prepared, issue.plan.old_rows, terminal.expected,
@@ -560,10 +789,11 @@ class ImportMemoryPublicationService:
             if UUID(receipts[kind][0]) != sealed.generation_id:
                 raise ImportMemoryPublicationError('Terminal receipt identity differs')
         repository = PostgresImportPublicationEvidenceRepository(self.database)
-        repository.append_terminal_in_transaction(cursor, live,
+        terminal_evidence = repository.append_terminal_in_transaction(cursor, live,
             receipts['rag'], receipts['episode'],
             expected_phase='pair_sealed',
             expected_version=issued.evidence.phase_version)
+        return _issue_terminal_release_binding(admission, cursor, terminal_evidence)
 
     def _execute_live_publication(self, live: _LivePublication):
         """One private forward-only attempt; any ambiguous external result stops."""

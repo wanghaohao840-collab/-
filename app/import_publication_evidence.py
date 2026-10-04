@@ -658,15 +658,47 @@ class PostgresImportPublicationEvidenceRepository:
                 cursor.execute('begin')
                 self._verify_current(cursor, attempt, frozen)
                 require_no_gate_in_transaction(cursor, key.user_id)
+                audit = cursor.execute('''select * from import_task_attempts
+                    where task_id=%s and user_id=%s and lease_version=%s
+                    and worker_id=%s and lease_token=%s and user_lease_token=%s
+                    and user_lease_version=%s and ended_at is null for share''',
+                    (key.task_id, key.user_id, key.task_lease_version,
+                     handle['worker_id'], handle['task_lease_token'],
+                     handle['user_lease_token'], handle['user_lease_version'])).fetchone()
+                source = cursor.execute('''select * from import_objects
+                    where task_id=%s and user_id=%s and bucket=%s and object_key=%s
+                    and version_id=%s and sha256=%s and size_bytes=%s for share''',
+                    (key.task_id, key.user_id, frozen['source']['bucket'],
+                     frozen['source']['key'], frozen['source']['version_id'],
+                     frozen['source']['sha256'], frozen['source']['size_bytes'])).fetchone()
+                clock = cursor.execute('''select t.lease_expires_at as task_expiry,
+                    u.lease_expires_at as user_expiry from import_tasks t
+                    join user_mutation_leases u on u.user_id=t.user_id
+                    where t.id=%s and t.user_id=%s and t.lease_version=%s
+                    and t.lease_token=%s and t.user_lease_token=%s
+                    and t.user_lease_version=%s and u.owner=%s
+                    and u.lease_token=%s and u.lease_version=%s''',
+                    (key.task_id, key.user_id, key.task_lease_version,
+                     handle['task_lease_token'], handle['user_lease_token'],
+                     handle['user_lease_version'], handle['worker_id'],
+                     handle['user_lease_token'], handle['user_lease_version'])).fetchone()
+                if audit is None or source is None or clock is None:
+                    raise PublicationEvidenceError('Original task, audit or source changed')
                 cursor.execute('''insert into import_publication_evidence
                     (user_id,task_id,task_lease_version,document_id,worker_id,
                      task_lease_token,user_lease_token,user_lease_version,
-                     schema_version,intent_format,intent_payload,canonical_bytes,intent_hash)
-                    values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                     schema_version,intent_format,intent_hash)
+                    values(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     (*key.__dict__.values(), handle['document_id'], handle['worker_id'],
                      handle['task_lease_token'], handle['user_lease_token'],
                      handle['user_lease_version'], SCHEMA_VERSION, INTENT_FORMAT,
-                     encoded.payload, encoded.canonical_bytes, encoded.digest))
+                     encoded.digest))
+                cursor.execute('''insert into import_publication_private_payloads
+                    (user_id,task_id,task_lease_version,intent_payload,
+                     canonical_bytes,payload_phase_version)
+                    values(%s,%s,%s,%s,%s,1)''',
+                    (key.user_id,key.task_id,key.task_lease_version,
+                     encoded.payload,encoded.canonical_bytes))
                 cursor.execute('''insert into user_publication_gates
                     (user_id,task_id,task_lease_version) values(%s,%s,%s)''',
                     (key.user_id, key.task_id, key.task_lease_version))
@@ -685,6 +717,14 @@ class PostgresImportPublicationEvidenceRepository:
                          scope['index_key'], scope['head']['revision'],
                          handle['worker_id'], handle['user_lease_token'],
                          handle['user_lease_version']))
+                cursor.execute('''insert into import_publication_recovery_schedule
+                    (user_id,last_claimed_at) values(%s,'epoch'::timestamptz)
+                    on conflict(user_id) do nothing''', (key.user_id,))
+                cursor.execute('''insert into import_publication_recovery_queue
+                    (user_id,task_id,task_lease_version,due_at,state,queue_version,
+                     reason_code) values(%s,%s,%s,greatest(%s,%s),'pending',1,'seed')''',
+                    (key.user_id,key.task_id,key.task_lease_version,
+                     clock['task_expiry'],clock['user_expiry']))
                 self.imports._live(cursor, attempt)
         except psycopg.IntegrityError as error:
             raise PublicationEvidenceError('Intent identity or candidate is already reserved') from error
@@ -786,11 +826,17 @@ class PostgresImportPublicationEvidenceRepository:
         _text(key.user_id)
         _text(key.task_id)
         _int(key.task_lease_version, minimum=1)
-        row = cursor.execute('''select * from import_publication_evidence
-            where user_id=%s and task_id=%s and task_lease_version=%s''',
+        row = cursor.execute('''select e.*,p.intent_payload,p.canonical_bytes,
+            p.document_slot,p.rag_sealed_slot,p.episode_sealed_slot,
+            p.terminal_slot,p.payload_phase_version
+            from import_publication_evidence e left join
+            import_publication_private_payloads p using(user_id,task_id,task_lease_version)
+            where e.user_id=%s and e.task_id=%s and e.task_lease_version=%s''',
             (key.user_id, key.task_id, key.task_lease_version)).fetchone()
         if row is None:
             return None
+        if row['intent_payload'] is None or row['payload_phase_version'] != row['phase_version']:
+            raise PublicationEvidenceError('Private evidence is missing or out of phase')
         if row['schema_version'] != SCHEMA_VERSION or row['intent_format'] != INTENT_FORMAT:
             raise PublicationEvidenceError('Unsupported stored evidence format')
         intent = decode_intent(bytes(row['intent_payload']),
@@ -886,14 +932,29 @@ class PostgresImportPublicationEvidenceRepository:
         _validate_stored_slots(evidence.intent, evidence.intent_hash,
             next_phase, evidence.phase_version + 1, evidence.observation_reason,
             tuple(slots))
-        changed = cursor.execute(f'''update import_publication_evidence
-            set {slot_name}=%s,phase=%s,phase_version=phase_version+1
+        locked = cursor.execute('''select phase_version from import_publication_evidence
+            where user_id=%s and task_id=%s and task_lease_version=%s for update''',
+            (evidence.key.user_id,evidence.key.task_id,
+             evidence.key.task_lease_version)).fetchone()
+        if locked is None or locked['phase_version'] != evidence.phase_version:
+            raise PublicationEvidenceError('Evidence append CAS lost')
+        child = cursor.execute(f'''update import_publication_private_payloads
+            set {slot_name}=%s,payload_phase_version=payload_phase_version+1
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            and payload_phase_version=%s and {slot_name} is null
+            returning payload_phase_version''',
+            (raw,evidence.key.user_id,evidence.key.task_id,
+             evidence.key.task_lease_version,evidence.phase_version)).fetchone()
+        if child is None:
+            raise PublicationEvidenceError('Private evidence append CAS lost')
+        changed = cursor.execute('''update import_publication_evidence
+            set phase=%s,phase_version=phase_version+1
             where user_id=%s and task_id=%s and task_lease_version=%s
             and phase=%s and phase_version=%s and intent_hash=%s
-            and {slot_name} is null returning phase_version''',
-            (raw, next_phase, evidence.key.user_id, evidence.key.task_id,
-             evidence.key.task_lease_version, evidence.phase,
-             evidence.phase_version, evidence.intent_hash)).fetchone()
+            returning phase_version''',
+            (next_phase,evidence.key.user_id,evidence.key.task_id,
+             evidence.key.task_lease_version,evidence.phase,
+             evidence.phase_version,evidence.intent_hash)).fetchone()
         if changed is None:
             raise PublicationEvidenceError('Evidence append CAS lost')
         return FrozenEvidence(evidence.key, deepcopy(evidence.intent), next_phase,

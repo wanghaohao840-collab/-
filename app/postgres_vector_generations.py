@@ -87,14 +87,9 @@ class PostgresVectorGenerationAuthority:
         return lease, task
 
     @staticmethod
-    def _index(cursor, scope, *, create=False):
+    def _index(cursor, scope):
         row = cursor.execute('''select identity,index_revision from vector_indexes
             where tenant_id=%s and vector_kind=%s and namespace=%s and index_key=%s''', scope.key).fetchone()
-        if row is None and create:
-            cursor.execute('''insert into vector_indexes
-                (tenant_id,vector_kind,namespace,index_key,identity)
-                values (%s,%s,%s,%s,%s::jsonb)''', (*scope.key, _canonical(scope.identity.to_dict())))
-            return 1
         if row is None or row['identity'] != scope.identity.to_dict():
             raise VectorAuthorityError('Missing or incompatible index identity')
         return row['index_revision']
@@ -170,6 +165,9 @@ class PostgresVectorGenerationAuthority:
             if live is None:
                 from app.import_publication_evidence import require_no_gate_in_transaction
                 require_no_gate_in_transaction(cursor, scope.tenant_id)
+                if cursor.execute('''select 1 from generation_reservations
+                    where generation_id=%s''',(generation_id,)).fetchone() is not None:
+                    raise VectorAuthorityError('Candidate UUID is permanently reserved')
             else:
                 from app.import_memory_publication import _require_live_issuer
                 from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
@@ -179,7 +177,15 @@ class PostgresVectorGenerationAuthority:
                 evidence_repository.require_candidate_in_transaction(cursor, live,
                     scope.vector_kind, scope, generation_id, operation='stage_before',
                     expected_phase=evidence.phase, expected_version=evidence.phase_version)
-            index_revision = self._index(cursor, scope, create=True)
+            index = cursor.execute('''select identity,index_revision from vector_indexes
+                where tenant_id=%s and vector_kind=%s and namespace=%s
+                and index_key=%s''', scope.key).fetchone()
+            if index is None:
+                cursor.execute('''insert into vector_indexes
+                    (tenant_id,vector_kind,namespace,index_key,identity)
+                    values (%s,%s,%s,%s,%s::jsonb)''',
+                    (*scope.key,_canonical(scope.identity.to_dict())))
+            index_revision = self._index(cursor, scope)
             head = self._head_row(cursor, scope, lock=True)
             if (None if head is None else head['revision']) != expected_revision:
                 raise VectorAuthorityError('Head revision changed')
@@ -239,6 +245,9 @@ class PostgresVectorGenerationAuthority:
         """Permanently revoke a candidate after failed or ambiguous external I/O."""
         with self.database.transaction() as cursor:
             cursor.execute('begin')
+            self._owner(cursor, authority, scope)
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor, scope.tenant_id)
             self._candidate(cursor, scope, authority, generation_id, states=('staging', 'sealed'))
             cursor.execute("""update vector_generations set state='abandoned',
                 abandoned_at=clock_timestamp() where generation_id=%s""", (generation_id,))
@@ -246,13 +255,21 @@ class PostgresVectorGenerationAuthority:
 
     def _publish(self, cursor, scope, authority, generation_id, *, expected_revision,
                  expected_index_revision, snapshot_version, expected_count=None,
-                 content_digest=None):
+                 content_digest=None, admission=None):
         _check_revision(expected_revision)
         if type(expected_index_revision) is not int or expected_index_revision < 1:
             raise ValueError('Expected index revision is required')
         if snapshot_version is not None and (type(snapshot_version) is not int or snapshot_version < 0):
             raise ValueError('Invalid snapshot version')
         self._owner(cursor, authority, scope)
+        if admission is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,scope.tenant_id)
+        else:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission,cursor,'vector_publish',self,
+                scope,authority,generation_id,expected_revision,
+                expected_index_revision,snapshot_version,expected_count,content_digest)
         index_revision = self._index(cursor, scope)
         if index_revision != expected_index_revision:
             raise VectorAuthorityError('Index revision changed')
@@ -260,6 +277,14 @@ class PostgresVectorGenerationAuthority:
         if (None if head is None else head['revision']) != expected_revision:
             raise VectorAuthorityError('Head revision changed')
         candidate = self._candidate(cursor, scope, authority, generation_id, states=('sealed',))
+        if admission is None:
+            from app.import_publication_evidence import require_no_gate_in_transaction
+            require_no_gate_in_transaction(cursor,scope.tenant_id)
+        else:
+            from app.import_memory_publication import _require_terminal_admission
+            _require_terminal_admission(admission,cursor,'vector_publish',self,
+                scope,authority,generation_id,expected_revision,
+                expected_index_revision,snapshot_version,expected_count,content_digest)
         if (candidate['base_revision'] != expected_revision
                 or candidate['index_revision'] != expected_index_revision
                 or (expected_count is not None and candidate['expected_count'] != expected_count)
