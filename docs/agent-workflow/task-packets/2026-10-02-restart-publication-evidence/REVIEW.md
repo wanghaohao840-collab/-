@@ -3,7 +3,7 @@
 - Source plan: `docs/superpowers/plans/2026-10-02-restart-publication-evidence.md`
 - Reviewed source commit: `bc3176387ec4e41d452c5cac6e07bce1ba5fbc20`
 - Review date: 2026-10-02
-- Verdict: Packet 1 accepted at `bc6aa90`; Packet 2 exact implementation accepted at `2f39378` with independent Spec/Quality/Delivery PASS; Packet 3 remains an unassignable preparation draft.
+- Verdict: Packet 1 accepted at `bc6aa90`; Packet 2 exact implementation accepted at `2f39378` with independent Spec/Quality/Delivery PASS; Packet 3 is independently READY for serial Sol High implementation; product acceptance remains pending.
 
 ## Repository evidence
 
@@ -27,7 +27,7 @@ The later fixed-source Astra inventory (`.runtime/distributed-cutover/restart-mu
 | --- | --- | --- | --- | --- |
 | `01-evidence-foundation.md` | Approved structure and completed sizing | false | Bounded codec, additive evidence/gate/reservations, guarded direct entries, read-only plan | Done; Sol implementation `bc6aa90`, Astra exact Spec/Quality/Delivery PASS |
 | `02-live-publication-proof.md` | Accepted Packet 1 `bc6aa90` and exact eight hashes | false | Live write-once publication slots and detached strong proof | Done; source `2f39378`, 382 final cases, Astra exact Spec/Quality/Delivery PASS |
-| `03-bounded-recovery.md` | Packet 2 exact acceptance | false | Recovery-only lease/queue, permanent exact revocation and all remaining guards | Draft; proposed contract persisted, accepted Packet 2 bindings and independent revised-contract review pending |
+| `03-bounded-recovery.md` | Packet 2 exact acceptance | false | Recovery-only lease/queue, permanent exact revocation and all remaining guards | Ready; corrected actual-packet Astra READY, complete v3 SQL, full baseline ownership and prescribed service/test boundaries; serial Sol implementation assigned |
 
 Packet 1 has completed verification and exact-commit review. Packet 2 freezes its new private signatures, type homes, wire hash, UUID conversion, issued callback and transaction/value admission, candidate operation checks, and detached proof service in a self-contained packet. These new APIs are to be implemented in Packet 2, rather than available baseline APIs. Packets overlap C files and must be serial.
 
@@ -52,3 +52,26 @@ The actual Packet 2 source-only commit is `2f39378e2228a65ee68dd2a1e3b06d38a31a9
 The next preparation proposal `restart-packet3-7836-contract-revision-sol.md`, SHA256 `1F0021A0629211B3EBB173B1C1B01D3AEC5150B480B98FDE172CC12AFA4ABA73`, addresses the fresh inventory's three serial interface gaps. Astra's delta report `restart-packet3-7836-contract-delta-astra.md`, SHA256 `468A001000BBF8E9DEE6BB0EC8BE139BFBC8602E87FE9073D2CD1FC6CACBAED2`, finds no new concrete P1/P2 and marks only that proposal READY-CONDITIONAL. Root must synchronize actual accepted commit/hash bindings, narrow C ownership, separate terminal-release capability, precise vector admission, coherent `_15`/evidence/queue first slice, runnable commands and migration/helper constraints into the tracked packet/plan, then obtain independent final READY. Packet 3 remains unassignable and unimplemented.
 
 After all implementation packets pass, root creates `FINAL_INTEGRATION_REVIEW.md` in this directory, assessing cross-packet interfaces, source/authority fences, immutability, compatibility, isolation, recovery schedules and combined regressions. No full feature acceptance is claimed yet. Runtime/API/bootstrap, authenticated restart journeys, historical vector provenance, compatible-image rollback and production cutover remain separate gates.
+
+The bound Packet 3 preparation now uses BASE `cb06adb`, accepted source `2f39378`,
+the exact 29-path table plus nine other owned baseline blobs, declared absent new
+files, actual durable types and four prescribed commands. This closes the old
+dependency/type/base placeholders without granting implementation. The first
+precise SQL design was independently challenged for renewal-version and implicit
+FK lock-order conflicts plus the child/header abandonment history rule. Sol is
+preparing a separately preserved corrected contract; final actual-packet READY
+is still pending. The historical proposal and intermediate review statements
+above remain checkpoints, not current source acceptance or test counts.
+
+The precise v3 SQL design is independently READY at raw SHA256 `86824AE3E8C182360092A31AD38C0916337F18232A806E1B55C547B3A0E5946B`, report `restart-packet3-15-sql-contract-v3-astra.md` SHA256 `4A223815FB3370E903151211EF1B9E720FEE5C35A3DB9FE301A8DF79716326EB`. Root includes the full contract in actual 03, preserves the previous rejected drafts/reports, and binds fresh restored disposable PG/S3/target Qdrant identities (target dynamic port now 60266). Protected source Qdrant remains exited and untouched. The actual packet/plan/REVIEW still require independent final READY; no migration or source/test implementation has run.
+
+The BC45 actual-packet review `restart-packet3-actual-ready-astra.md` (SHA256
+`8BC1B718675F0A1D810EC4A10621F3B56394CFA38912C2BDA8D0F21900983062`)
+found only F1/P2: four old queue-interface sentences conflicted with the fully
+accepted embedded SQL. Root corrected pending-versus-expired-claim eligibility,
+allowed queue reason codes, strictly extending atomic dual renewal, and the
+committed queue-capture versus later recovery-grant transaction boundary.
+The embedded v3 SQL is unchanged. Packet 3 remains draft pending a finite
+independent delta on these corrected actual bytes; no implementation is claimed.
+
+Packet 3 actual-packet finite delta is independently READY at `FAD7FF49...DB9A8`, report `restart-packet3-actual-ready-delta-astra.md` SHA256 `3A26038CA7F9C60E1F1A8540808A44837510DF3F8436481F322F919EF5A389F9`. Root promotes only status/owner/readiness records, retaining the exact accepted contract and all future implementation criteria. Sol High owns the sole serial implementation lane beginning with coherent Task 7; Astra High reviews the resulting code and evidence before delivery. No new SQL/test/product/runtime acceptance is claimed.
