@@ -1,7 +1,7 @@
 ---
 id: "restart-publication-evidence-03"
 title: "Bounded restart recovery and remaining mutation guards"
-status: "ready"
+status: "in_progress"
 parallel-safe: false
 depends-on: ["restart-publication-evidence-02"]
 base-commit: "cb06adb31be518d465eefdf70cbe3be36d458214"
@@ -10,7 +10,7 @@ owner: "GPT-6 Sol High (serial implementation)"
 
 # Task Packet: Bounded restart recovery and remaining mutation guards
 
-> Independently READY for serial Sol High implementation. Packet 2 is accepted at `2f39378`, with source/base bindings at documentation descendant `cb06adb`. The complete corrected `_15` SQL/trigger contract and this actual packet have passed independent Astra design review. Implementation, SQL/test and runtime/production acceptance remain separate.
+> Serial Sol High implementation is in progress. Packet 2 is accepted at `2f39378`; coherent Task 7 is accepted at `686ec52` with 303 complete passing cases and independent Astra Spec/Quality/Delivery PASS. The original approved contract and historical base bindings below are retained. The current Task 8 source boundary is specified in the accepted Task 7 handoff; Task 8/9, whole Packet 3 and runtime/production acceptance remain pending.
 
 ## Goal
 
@@ -1071,9 +1071,23 @@ Stop and report a workflow reality conflict before editing further if Packet 2 i
 - Implementer: GPT-6 Sol High, sole serial source/test owner and sole pytest lane. Root manages documentation/Git/evidence. GPT-6 Astra High independently reviews concurrency/consistency and exact delivery after meaningful implementation boundaries. Luna High may prepare mechanical logs/snapshots with disjoint ignored output paths.
 - Execute Task 7's coherent migration/evidence/queue/fixed-completion slice first, obtain independent implementation review before advancing the subsequent serial Task 8/9 boundaries. Current prescribed services/basetemps must be freshly verified by the implementer. Every product acceptance checkbox stays unchecked until actual corresponding evidence is returned.
 
+## Accepted Task 7 and serial Task 8 handoff (2026-10-05)
+
+- Task 7 source commit: `686ec5279c44bb01324c6154d819af5af41d4b9b`; sole tested parent `317bfa07f7e090974cdba30ff38657c1264b2426`. All 41 current/committed raw source inputs match `.runtime/distributed-cutover/restart-packet3-task7-n1-freeze-manifest.json`, SHA256 `F88078A1EA9501041DC5DACC4E3C9862095594560B8AD9CD5E73BAFF5865A935`. Fifteen actual changed paths comprise 11 semantic changes and four preexisting line-ending differences; no documentation/runtime artifact was committed with the source.
+- Complete prescribed first command: 303 passed in 1779.02 seconds; meta, passive resource ledger and detached wrapper child exit 0; zero failures/errors/skips. Prefix `.runtime/distributed-cutover/restart-packet3-task7-migrate-n1`; meta SHA256 `8F5C15D4E2C8C1C6CDDB2852F46D2C3346DB49474AECA176FD46280DC6422C07`, XML `4E2C1CF832A734CC377B33EA37688EC8B910CC529A5B8EE418FBE84BE71D9833`, log `193337C3BA86F600D84CF2F91394326420DE32919C15541861A6BB48CD105528`, ledger `1F4BA0D38F9FC64B023416ECD27A6333F5BC81A906E71E660FC11A09E5C3BCE8`. Historical/focused counts are not added.
+- Final independent Spec/Quality PASS: `.runtime/distributed-cutover/restart-packet3-task7-static-f88078a1-resume-astra.md`, SHA256 `DBC7DA4D2B56E46D2BD4DD415C85048CF2B3E0B73BCF3F399A5EC0F0F66883A8`; complete audit `35E1BF065319CCE5A9CA27A74DDB04DDFF1562DB002088646123BBBB0F8C136B`.
+- Actual source-commit Delivery PASS: `.runtime/distributed-cutover/restart-packet3-task7-686ec52-delivery-astra.md`, SHA256 `7DC063E83267531C294938704DB9DF7B823FC13F76245A94747442E846439C7E`; complete audit `88E80DE2B3D6A24A7E219441871ADA82DCC4CA694A1AEDFB824E6AD0C7D386CA`. Root read the complete reports and captured zero before/after errors, 41 actual Git raw blobs/modes, unchanged evidence and all stability predicates true. Raw commit binder `restart-packet3-task7-686ec52-raw-commit-binding.json` is `99D70D303C41B2D33FDA16E43E6C98421C4CFDD8C46E0260E658A3FB2E074117`.
+- This closes Task 7's coherent migration/private-payload adaptation, recovery queue/claim/expiry closure, B1/B2 and fixed-completion verification boundary only. The whole-packet criteria above remain unchecked pending Task 8/9 and final integration review.
+
+Root authorizes the next serial **Task 8** from accepted source `686ec52` or a verified documentation-only descendant whose 41 raw inputs are unchanged. The old `cb06adb`/Packet 2 table remains historical design input, not a baseline to restore. Sol High owns only `app/import_publication_recovery.py`, `app/import_publication_evidence.py`, `app/postgres_vector_generations.py`, and `tests/integration/test_import_publication_recovery.py`; the other three modules in the prescribed revoke command are verification inputs. Additional edits require a finite reviewed ownership amendment. Root owns documents/Git/evidence; Astra High independently reviews concurrency/consistency; Luna High may write disjoint ignored mechanical evidence.
+
+Implement the approved `prove_or_hold`, `ack_success`, `ack_proved_in_transaction`, `abandon_exact`, and `abandon_exact_in_transaction` interfaces above. Detached proof runs first for every phase, including absent generation rows. Exact already-succeeded proof permits only atomic metadata acknowledgement; unproved qualifying preterminal evidence permits atomic revocation of both permanent UUID reservations, including absent rows, and exact ordinary closure/resolution. Fresh clocks after blocking locks, original tuple/audit/hash/receipt checks, caller-owned READ COMMITTED cores, manual hold and the persisted finite transient policy are unchanged approved requirements. No callback replay, ordinary-writer recovery authority, terminal demotion or external outcome inference is supplied.
+
+Task 8 must include both real SQL barrier schedules, old/new-owner refusal of revoked IDs after optional physical cleanup, another user's progress, and all-or-none rollback negatives. Use the exact second command above with `.pytest-tmp-p3-revoke`, fresh verified disposable PG/S3/target identities and the sole pytest lane. Preserve all prior basetemps/evidence; use exclusive outputs, record full exit/log/meta/XML/passive ledger and before/after raw source hashes, then freeze source/tests for independent Astra review and actual commit binding. Task 9 cannot start before Task 8 acceptance. Runtime/API/bootstrap remain OFF; historical text/metadata preservation and vector recall pending proof remain unchanged.
+
 ## Implementation handoff
 
-Replace this placeholder only after implementation and independent review:
+Replace this whole-packet placeholder only after Tasks 8/9 and final independent integration review:
 
 ```markdown
 ## Implementation handoff

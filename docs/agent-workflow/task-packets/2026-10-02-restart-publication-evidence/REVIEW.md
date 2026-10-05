@@ -3,7 +3,7 @@
 - Source plan: `docs/superpowers/plans/2026-10-02-restart-publication-evidence.md`
 - Reviewed source commit: `bc3176387ec4e41d452c5cac6e07bce1ba5fbc20`
 - Review date: 2026-10-02
-- Verdict: Packet 1 accepted at `bc6aa90`; Packet 2 exact implementation accepted at `2f39378` with independent Spec/Quality/Delivery PASS; Packet 3 is independently READY for serial Sol High implementation; product acceptance remains pending.
+- Verdict: Packet 1 accepted at `bc6aa90`; Packet 2 exact implementation accepted at `2f39378` with independent Spec/Quality/Delivery PASS; Packet 3 Task 7 is accepted at `686ec52` with independent Spec/Quality/Delivery PASS, and Task 8 is assigned to serial Sol High implementation; whole Packet 3 and product acceptance remain pending.
 
 ## Repository evidence
 
@@ -27,7 +27,7 @@ The later fixed-source Astra inventory (`.runtime/distributed-cutover/restart-mu
 | --- | --- | --- | --- | --- |
 | `01-evidence-foundation.md` | Approved structure and completed sizing | false | Bounded codec, additive evidence/gate/reservations, guarded direct entries, read-only plan | Done; Sol implementation `bc6aa90`, Astra exact Spec/Quality/Delivery PASS |
 | `02-live-publication-proof.md` | Accepted Packet 1 `bc6aa90` and exact eight hashes | false | Live write-once publication slots and detached strong proof | Done; source `2f39378`, 382 final cases, Astra exact Spec/Quality/Delivery PASS |
-| `03-bounded-recovery.md` | Packet 2 exact acceptance | false | Recovery-only lease/queue, permanent exact revocation and all remaining guards | Ready; corrected actual-packet Astra READY, complete v3 SQL, full baseline ownership and prescribed service/test boundaries; serial Sol implementation assigned |
+| `03-bounded-recovery.md` | Packet 2 exact acceptance | false | Recovery-only lease/queue, permanent exact revocation and all remaining guards | In progress; coherent Task 7 accepted at `686ec52`, 303 complete cases and independent Spec/Quality/Delivery PASS; Task 8 serial Sol High implementation assigned; Task 9 pending |
 
 Packet 1 has completed verification and exact-commit review. Packet 2 freezes its new private signatures, type homes, wire hash, UUID conversion, issued callback and transaction/value admission, candidate operation checks, and detached proof service in a self-contained packet. These new APIs are to be implemented in Packet 2, rather than available baseline APIs. Packets overlap C files and must be serial.
 
@@ -75,3 +75,5 @@ The embedded v3 SQL is unchanged. Packet 3 remains draft pending a finite
 independent delta on these corrected actual bytes; no implementation is claimed.
 
 Packet 3 actual-packet finite delta is independently READY at `FAD7FF49...DB9A8`, report `restart-packet3-actual-ready-delta-astra.md` SHA256 `3A26038CA7F9C60E1F1A8540808A44837510DF3F8436481F322F919EF5A389F9`. Root promotes only status/owner/readiness records, retaining the exact accepted contract and all future implementation criteria. Sol High owns the sole serial implementation lane beginning with coherent Task 7; Astra High reviews the resulting code and evidence before delivery. No new SQL/test/product/runtime acceptance is claimed.
+
+Task 7 source delivery is now accepted at `686ec5279c44bb01324c6154d819af5af41d4b9b`, sole parent `317bfa07f7e090974cdba30ff38657c1264b2426`. The prescribed seven-module migration group passed 303 cases in 1779.02 seconds, exit 0, zero failures/errors/skips. Root read the complete final Astra Spec/Quality report (`DBC7DA4D...883A8`) and actual-commit Delivery report (`7DC063E8...39C7E`), then verified complete audits, 41 committed raw blobs, source/snapshot stability and actual parent/change boundaries. All gates PASS for Task 7 only. The next serial Task 8 handoff in `03-bounded-recovery.md` binds that accepted source; no Task 8/9 or whole Packet 3 acceptance follows.
