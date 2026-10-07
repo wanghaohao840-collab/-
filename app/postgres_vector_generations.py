@@ -22,6 +22,48 @@ class VectorAuthorityError(RuntimeError):
     """The requested generation transition or scope is not authorized."""
 
 
+def validate_import_pair_for_recovery_in_transaction(cursor, intent: dict) -> tuple:
+    """Lock and validate both candidates; this helper has no write authority."""
+    attempt = intent['attempt']
+    locked = []
+    for kind in ('rag', 'episode'):
+        scope = intent['scopes'][kind]
+        generation_id = UUID(scope['candidate_id'])
+        reservation = cursor.execute('''select * from generation_reservations
+            where generation_id=%s for update''', (generation_id,)).fetchone()
+        if (reservation is None or
+            tuple(reservation[name] for name in (
+                'user_id','task_id','task_lease_version','vector_kind',
+                'namespace','index_key','base_revision','owner',
+                'user_lease_token','user_lease_version','state')) !=
+            (attempt['user_id'],attempt['task_id'],attempt['task_lease_version'],
+             kind,scope['namespace'],scope['index_key'],scope['head']['revision'],
+             attempt['worker_id'],UUID(attempt['user_lease_token']),
+             attempt['user_lease_version'],'reserved') or
+            reservation['revoked_at'] is not None):
+            raise VectorAuthorityError('Exact generation reservation differs')
+        generation = cursor.execute('''select * from vector_generations
+            where generation_id=%s for update''', (generation_id,)).fetchone()
+        if generation is not None:
+            if (tuple(generation[name] for name in (
+                    'tenant_id','vector_kind','namespace','index_key',
+                    'base_revision','index_revision','owner',
+                    'user_lease_token','user_lease_version','task_id',
+                    'task_lease_token','task_lease_version')) !=
+                (attempt['user_id'],kind,scope['namespace'],scope['index_key'],
+                 scope['head']['revision'],scope['index_revision'],
+                 attempt['worker_id'],UUID(attempt['user_lease_token']),
+                 attempt['user_lease_version'],attempt['task_id'],
+                 UUID(attempt['task_lease_token']),attempt['task_lease_version'])
+                or generation['state'] not in ('staging','sealed')
+                or generation['publication_revision'] is not None
+                or generation['publication_snapshot_version'] is not None
+                or generation['published_at'] is not None):
+                raise VectorAuthorityError('Exact generation ownership or state differs')
+        locked.append((generation_id,generation is not None))
+    return tuple(locked)
+
+
 @dataclass(frozen=True)
 class VectorScope:
     tenant_id: str

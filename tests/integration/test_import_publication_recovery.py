@@ -32,9 +32,12 @@ from app.import_publication_recovery import (
     PostgresImportPublicationRecoveryRepository, RecoveryLeaseLost,
     RecoveryUnavailable, seed_missing_queue_in_transaction,
 )
+from app.import_publication_proof import (
+    ImportPublicationProofService, PublicationProofUnknown,
+)
 from app.postgres_import_leases import ImportLeaseLost, PostgresImportLeaseRepository
 from app.postgres_coordination import PostgresUserMutationCoordinator
-from app.postgres_vector_generations import VectorScope
+from app.postgres_vector_generations import VectorAuthorityError, VectorScope
 from app.postgres_snapshots import PostgresSnapshotRepository
 from tests.integration.test_import_document_publication import _point, _task, publication
 from tests.integration.test_import_memory_publication import memory_publication
@@ -356,6 +359,820 @@ def test_fixed_completion_succeeds_under_15(memory_publication):
         user, attempt.task.task_id, attempt.lease_version)
     assert frozen is not None and frozen.phase == 'terminal_committed'
     assert frozen.terminal_slot is not None
+
+
+def _claim_due_exact(db, user, attempt, *, lease_seconds=60):
+    key = (user, attempt.task.task_id, attempt.lease_version)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_tasks set lease_expires_at=
+            clock_timestamp()-interval '1 second' where id=%s''', (key[1],))
+        cursor.execute('''update user_mutation_leases set lease_expires_at=
+            clock_timestamp()-interval '1 second' where user_id=%s''', (user,))
+        cursor.execute('''update import_publication_recovery_queue set
+            due_at=clock_timestamp(),reason_code='unknown',
+            queue_version=queue_version+1 where user_id=%s and task_id=%s
+            and task_lease_version=%s''', key)
+    claim = PostgresImportPublicationRecoveryRepository(db).claim_next(
+        'task8',lease_seconds=lease_seconds)
+    assert claim is not None
+    return key, claim
+
+
+def test_task8_proof_first_revokes_both_absent_generations(memory_publication):
+    service, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db, user, attempt)
+    assert ImportPublicationProofService(db).prove_exact(*key) is None
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+    with db.transaction() as cursor:
+        rows = cursor.execute('''select vector_kind,state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            order by vector_kind''', key).fetchall()
+        header = cursor.execute('''select phase from import_publication_evidence
+            where user_id=%s and task_id=%s and task_lease_version=%s''', key).fetchone()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''', (user,)).fetchone()
+    assert [(r['vector_kind'], r['state']) for r in rows] == [
+        ('episode', 'revoked'), ('rag', 'revoked')]
+    assert header['phase'] == 'abandoned' and gate['status'] == 'resolved'
+
+
+def test_task8_lost_document_put_response_recovers_without_replay(
+        memory_publication,monkeypatch):
+    service, db, store, user, attempt, live = _issue(memory_publication)
+    original_put = store.put_immutable
+    put_results = []
+
+    def lost_response(*args,**kwargs):
+        put_results.append(original_put(*args,**kwargs))
+        raise ConnectionError('injected lost S3 put response')
+
+    monkeypatch.setattr(store,'put_immutable',lost_response)
+    with pytest.raises(DurablePublicationUnknown):
+        service._execute_live_publication(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    frozen = PostgresImportPublicationEvidenceRepository(db).read_exact(*key)
+    assert len(put_results) == 1 and frozen.phase == 'intent'
+    assert frozen.document_slot is None
+    _, claim = _claim_due_exact(db,user,attempt)
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+    assert len(put_results) == 1
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchall()
+    assert [row['state'] for row in reservations] == ['revoked','revoked']
+
+
+def test_task8_committed_response_loss_acknowledges_without_replay(memory_publication):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    completed = service._execute_live_publication(live)
+    assert completed.pair.import_task.status == 'succeeded'
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_publication_recovery_queue set
+            due_at=clock_timestamp(),reason_code='unknown',
+            queue_version=queue_version+1 where user_id=%s and task_id=%s
+            and task_lease_version=%s''', key)
+    proof = ImportPublicationProofService(db).prove_exact(*key)
+    assert proof is not None
+    claim = PostgresImportPublicationRecoveryRepository(db).claim_next('task8')
+    assert claim is not None
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'proved_succeeded'
+    with db.transaction() as cursor:
+        phase = cursor.execute('''select phase,observation_reason from
+            import_publication_evidence where user_id=%s and task_id=%s
+            and task_lease_version=%s''', key).fetchone()
+        task = cursor.execute('select status from import_tasks where id=%s',
+                              (key[1],)).fetchone()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''', (user,)).fetchone()
+    assert phase['phase'] == 'proved_succeeded' and phase['observation_reason'] is None
+    assert task['status'] == 'succeeded' and gate['status'] == 'resolved'
+
+
+def test_task8_caller_rollback_restores_every_success_ack_write(memory_publication):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    service._execute_live_publication(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_publication_recovery_queue set
+            due_at=clock_timestamp(),reason_code='unknown',
+            queue_version=queue_version+1 where user_id=%s and task_id=%s
+            and task_lease_version=%s''',key)
+    repository = PostgresImportPublicationRecoveryRepository(db)
+    claim = repository.claim_next('task8')
+    proof = ImportPublicationProofService(db).prove_exact(*key)
+    assert claim is not None and proof is not None
+
+    class RollbackProbe(RuntimeError):
+        pass
+
+    with pytest.raises(RollbackProbe):
+        with db.transaction() as cursor:
+            cursor.execute('begin')
+            repository.ack_proved_in_transaction(cursor,claim,proof)
+            assert cursor.execute('''select phase from import_publication_evidence
+                where user_id=%s and task_id=%s and task_lease_version=%s''',
+                key).fetchone()['phase'] == 'proved_succeeded'
+            raise RollbackProbe()
+    with db.transaction() as cursor:
+        header = cursor.execute('''select phase from import_publication_evidence
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''',(user,)).fetchone()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()
+        lease = cursor.execute('''select expires_at from import_publication_recovery_leases
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()
+    assert header['phase'] == 'terminal_committed'
+    assert gate['status'] == 'unresolved' and queue['state'] == 'claimed'
+    assert lease['expires_at'] == claim.recovery_expires_at
+    assert repository.prove_or_hold(claim) == 'proved_succeeded'
+
+
+def test_task8_rejects_tampered_detached_success_envelope(memory_publication):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    service._execute_live_publication(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_publication_recovery_queue set
+            due_at=clock_timestamp(),reason_code='unknown',
+            queue_version=queue_version+1 where user_id=%s and task_id=%s
+            and task_lease_version=%s''', key)
+    claim = PostgresImportPublicationRecoveryRepository(db).claim_next('task8')
+    proof = ImportPublicationProofService(db).prove_exact(*key)
+    assert claim is not None and proof is not None
+    forged = replace(proof, proof=replace(proof.proof,
+        final_expected_hash='0' * 64))
+    with pytest.raises(RuntimeError, match='Terminal receipt envelope changed'):
+        PostgresImportPublicationRecoveryRepository(db).ack_success(claim,forged)
+    assert PostgresImportPublicationEvidenceRepository(db).read_exact(*key).phase == 'terminal_committed'
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'proved_succeeded'
+
+
+def test_task8_revokes_present_and_absent_generation_together(
+        memory_publication,monkeypatch):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    issue = service._require_live_issue(live)
+    def stop_after_rag_stage(scope,owner,head,corpus,*,snapshot_version,
+                             generation_id,live):
+        issue.rag_authority.stage(scope,owner,expected_revision=head.revision,
+                                  generation_id=generation_id,live=live)
+        raise RuntimeError('stop after rag stage')
+    monkeypatch.setattr(issue.rag_service,'_prepare_sealed',stop_after_rag_stage)
+    with pytest.raises(DurablePublicationUnknown):
+        service._execute_live_publication(live)
+    key, claim = _claim_due_exact(db,user,attempt)
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select vector_kind,state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            order by vector_kind''',key).fetchall()
+        generation = cursor.execute('''select state from vector_generations
+            where generation_id=%s''',(issue.plan.candidate_ids[0],)).fetchone()
+    assert [(r['vector_kind'],r['state']) for r in reservations] == [
+        ('episode','revoked'),('rag','revoked')]
+    assert generation['state'] == 'abandoned'
+
+
+def test_task8_invalid_second_generation_rolls_back_first_id_and_closure(
+        memory_publication,monkeypatch):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    issue = service._require_live_issue(live)
+    def stop_after_episode_stage(scope,owner,head,corpus,*,snapshot_version,
+                                 generation_id,live):
+        issue.episode_authority.stage(scope,owner,expected_revision=head.revision,
+                                      generation_id=generation_id,live=live)
+        raise RuntimeError('stop after episode stage')
+    monkeypatch.setattr(issue.episode_service,'_prepare_sealed',
+                        stop_after_episode_stage)
+    with pytest.raises(DurablePublicationUnknown):
+        service._execute_live_publication(live)
+    with db.transaction() as cursor:
+        cursor.execute('''update vector_generations set state='abandoned',
+            abandoned_at=clock_timestamp() where generation_id=%s''',
+            (issue.plan.candidate_ids[1],))
+    key, claim = _claim_due_exact(db,user,attempt)
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'manual_hold'
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select vector_kind,state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            order by vector_kind''', key).fetchall()
+        rag = cursor.execute('''select state from vector_generations where generation_id=%s''',
+            (issue.plan.candidate_ids[0],)).fetchone()
+        task = cursor.execute('select status from import_tasks where id=%s',
+                              (key[1],)).fetchone()
+        audit = cursor.execute('''select ended_at from import_task_attempts
+            where task_id=%s and lease_version=%s''',key[1:]).fetchone()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''',(user,)).fetchone()
+    assert [(r['vector_kind'],r['state']) for r in reservations] == [
+        ('episode','reserved'),('rag','reserved')]
+    assert rag['state'] == 'sealed'
+    assert task['status'] == 'running' and audit['ended_at'] is None
+    assert gate['status'] == 'unresolved'
+
+
+@pytest.mark.parametrize('published_state', ['published','retired'])
+def test_task8_published_candidate_holds_before_audit_expiry(
+        memory_publication,monkeypatch,published_state):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    issue = service._require_live_issue(live)
+    monkeypatch.setattr(issue.imports,'try_begin_committing',
+        lambda *args,**kwargs: (_ for _ in ()).throw(
+            RuntimeError('stop after pair seal')))
+    with pytest.raises(DurablePublicationUnknown):
+        service._execute_live_publication(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    candidate = issue.plan.candidate_ids[0]
+    with db.transaction() as cursor:
+        exact = cursor.execute('''select * from vector_generations
+            where generation_id=%s''',(candidate,)).fetchone()
+        head = cursor.execute('''select * from vector_heads where tenant_id=%s
+            and vector_kind=%s and namespace=%s and index_key=%s for update''',
+            (exact['tenant_id'],exact['vector_kind'],exact['namespace'],
+             exact['index_key'])).fetchone()
+        assert exact['state'] == 'sealed' and head is not None
+        cursor.execute('''update vector_generations set state='retired'
+            where generation_id=%s''',(head['last_generation_id'],))
+        cursor.execute('''update vector_generations set state='published',
+            publication_revision=%s,publication_snapshot_version=1,
+            published_at=clock_timestamp() where generation_id=%s''',
+            (head['revision']+1,candidate))
+        cursor.execute('''update vector_heads set revision=%s,
+            generation_id=%s,last_generation_id=%s,snapshot_version=1
+            where tenant_id=%s and vector_kind=%s and namespace=%s
+            and index_key=%s''',
+            (head['revision']+1,candidate,candidate,exact['tenant_id'],
+             exact['vector_kind'],exact['namespace'],exact['index_key']))
+    if published_state == 'retired':
+        successor = uuid4()
+        with db.transaction() as cursor:
+            cursor.execute('''insert into vector_generations
+                (generation_id,tenant_id,vector_kind,namespace,index_key,
+                 base_revision,index_revision,owner,user_lease_token,
+                 user_lease_version,task_id,task_lease_token,
+                 task_lease_version,state)
+                select %s,tenant_id,vector_kind,namespace,index_key,%s,
+                       index_revision,owner,user_lease_token,user_lease_version,
+                       task_id,task_lease_token,task_lease_version,'staging'
+                from vector_generations where generation_id=%s''',
+                (successor,head['revision']+1,candidate))
+            cursor.execute('''update vector_generations set state='sealed',
+                expected_count=%s,content_digest=%s,
+                sealed_at=clock_timestamp() where generation_id=%s''',
+                (exact['expected_count'],exact['content_digest'],successor))
+            cursor.execute('''update vector_generations set state='retired'
+                where generation_id=%s''',(candidate,))
+            cursor.execute('''update vector_generations set state='published',
+                publication_revision=%s,publication_snapshot_version=2,
+                published_at=clock_timestamp() where generation_id=%s''',
+                (head['revision']+2,successor))
+            cursor.execute('''update vector_heads set revision=%s,
+                generation_id=%s,last_generation_id=%s,snapshot_version=2
+                where tenant_id=%s and vector_kind=%s and namespace=%s
+                and index_key=%s''',
+                (head['revision']+2,successor,successor,exact['tenant_id'],
+                 exact['vector_kind'],exact['namespace'],exact['index_key']))
+    key, claim = _claim_due_exact(db,user,attempt)
+    assert ImportPublicationProofService(db).prove_exact(*key) is None
+    with db.transaction() as cursor:
+        original = tuple(cursor.execute(query,params).fetchall() for query,params in (
+            ('select * from import_tasks where id=%s',(key[1],)),
+            ('''select * from import_task_attempts where task_id=%s
+                and lease_version=%s''',key[1:]),
+            ('''select * from generation_reservations where user_id=%s
+                and task_id=%s and task_lease_version=%s
+                order by vector_kind''',key),
+            ('''select * from vector_generations where generation_id=%s''',
+             (candidate,)),
+            ('''select * from user_publication_gates where user_id=%s''',
+             (user,)),
+        ))
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'manual_hold'
+    with db.transaction() as cursor:
+        current = tuple(cursor.execute(query,params).fetchall() for query,params in (
+            ('select * from import_tasks where id=%s',(key[1],)),
+            ('''select * from import_task_attempts where task_id=%s
+                and lease_version=%s''',key[1:]),
+            ('''select * from generation_reservations where user_id=%s
+                and task_id=%s and task_lease_version=%s
+                order by vector_kind''',key),
+            ('''select * from vector_generations where generation_id=%s''',
+             (candidate,)),
+            ('''select * from user_publication_gates where user_id=%s''',
+             (user,)),
+        ))
+        header = cursor.execute('''select phase,observation_reason from
+            import_publication_evidence where user_id=%s and task_id=%s
+            and task_lease_version=%s''',key).fetchone()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()
+    assert current == original
+    assert header['phase'] == 'pair_sealed'
+    assert header['observation_reason'] == queue['state'] == 'manual_hold'
+
+
+def test_task8_caller_rollback_restores_every_abandonment_write(memory_publication):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    repository = PostgresImportPublicationRecoveryRepository(db)
+    class RollbackProbe(RuntimeError):
+        pass
+    with pytest.raises(RollbackProbe):
+        with db.transaction() as cursor:
+            cursor.execute('begin')
+            repository.abandon_exact_in_transaction(cursor,claim)
+            assert cursor.execute('''select count(*) as n from generation_reservations
+                where user_id=%s and task_id=%s and task_lease_version=%s
+                and state='revoked' ''',key).fetchone()['n'] == 2
+            raise RollbackProbe()
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchall()
+        task = cursor.execute('select status from import_tasks where id=%s',
+                              (key[1],)).fetchone()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone()
+    assert [r['state'] for r in reservations] == ['reserved','reserved']
+    assert task['status'] == 'running' and queue['state'] == 'claimed'
+    assert repository.prove_or_hold(claim) == 'abandoned'
+
+
+@pytest.mark.parametrize('live_side', ['task','user'])
+def test_task8_d1_one_live_ordinary_lease_defers_after_capture(
+        memory_publication,live_side):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    with db.transaction() as cursor:
+        if live_side == 'task':
+            cursor.execute('''update import_tasks set lease_expires_at=
+                clock_timestamp()+interval '90 seconds' where id=%s''',(key[1],))
+        else:
+            cursor.execute('''update user_mutation_leases set lease_expires_at=
+                clock_timestamp()+interval '90 seconds' where user_id=%s''',(user,))
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'retry_later'
+    with db.transaction() as cursor:
+        queue = cursor.execute('''select state,due_at,transient_count from
+            import_publication_recovery_queue where user_id=%s and task_id=%s
+            and task_lease_version=%s''',key).fetchone()
+        task = cursor.execute('select status,lease_expires_at from import_tasks where id=%s',
+                              (key[1],)).fetchone()
+        ordinary = cursor.execute('''select lease_expires_at from user_mutation_leases
+            where user_id=%s''',(user,)).fetchone()
+        reservation_count = cursor.execute('''select count(*) as n from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s
+            and state='reserved' ''',key).fetchone()['n']
+    assert queue['state'] == 'pending' and queue['transient_count'] == 0
+    assert queue['due_at'] > max(task['lease_expires_at'],ordinary['lease_expires_at'])
+    assert task['status'] == 'running' and reservation_count == 2
+
+
+def test_task8_six_persisted_transients_then_seventh_manual_hold(
+        memory_publication,monkeypatch):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    def unavailable(*args):
+        raise PublicationProofUnknown(AttemptKey(*key),'evidence')
+    monkeypatch.setattr(ImportPublicationProofService,'prove_exact',unavailable)
+    repository = PostgresImportPublicationRecoveryRepository(db)
+    for count in range(1,8):
+        result = repository.prove_or_hold(claim)
+        assert result == ('manual_hold' if count == 7 else 'retry_later')
+        with db.transaction() as cursor:
+            queue = cursor.execute('''select state,transient_count,due_at,
+                reason_code from import_publication_recovery_queue
+                where user_id=%s and task_id=%s and task_lease_version=%s''',
+                key).fetchone()
+        assert queue['transient_count'] == count
+        if count == 7:
+            assert queue['state'] == 'manual_hold' and queue['due_at'] is None
+            assert queue['reason_code'] == 'manual_hold'
+            break
+        assert queue['state'] == 'pending' and queue['reason_code'] == 'transient'
+        with db.transaction() as cursor:
+            cursor.execute('''update import_publication_recovery_queue
+                set due_at=clock_timestamp(),queue_version=queue_version+1
+                where user_id=%s and task_id=%s and task_lease_version=%s
+                and state='pending' ''',key)
+        claim = repository.claim_next('task8')
+        assert claim is not None
+
+
+def test_task8_transient_without_safe_database_cas_preserves_capture(
+        memory_publication,monkeypatch):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    def unavailable(*args):
+        raise PublicationProofUnknown(AttemptKey(*key),'evidence')
+    monkeypatch.setattr(ImportPublicationProofService,'prove_exact',unavailable)
+    class BrokenDatabase:
+        def transaction(self):
+            raise psycopg.OperationalError('disposable unavailable')
+    with pytest.raises(RecoveryUnavailable):
+        PostgresImportPublicationRecoveryRepository(BrokenDatabase()).prove_or_hold(claim)
+    with db.transaction() as cursor:
+        queue = cursor.execute('''select state,claim_token,queue_version,
+            transient_count from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()
+    assert queue['state'] == 'claimed' and queue['claim_token'] == claim.queue_claim_token
+    assert queue['queue_version'] == claim.queue_version and queue['transient_count'] == 0
+
+
+def test_task8_stale_recovery_lease_cannot_write_result(memory_publication):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_publication_recovery_leases
+            set expires_at=clock_timestamp()-interval '1 second'
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key)
+    with pytest.raises(RecoveryLeaseLost):
+        PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim)
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchall()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone()
+    assert [r['state'] for r in reservations] == ['reserved','reserved']
+    assert queue['state'] == 'claimed'
+
+
+def test_task8_revoked_ids_remain_forbidden_after_physical_cleanup_and_new_owner(
+        memory_publication,monkeypatch):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    issue = service._require_live_issue(live)
+    def stop_after_rag_stage(scope,owner,head,corpus,*,snapshot_version,
+                             generation_id,live):
+        issue.rag_authority.stage(scope,owner,expected_revision=head.revision,
+                                  generation_id=generation_id,live=live)
+        raise RuntimeError('stop after rag stage')
+    monkeypatch.setattr(issue.rag_service,'_prepare_sealed',stop_after_rag_stage)
+    with pytest.raises(DurablePublicationUnknown):
+        service._execute_live_publication(live)
+    key, claim = _claim_due_exact(db,user,attempt)
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+    assert service.pair.rag.cleanup_abandoned(issue.plan.rag_scope,
+        issue.plan.candidate_ids[0]) >= 0
+    new_attempt = PostgresImportLeaseRepository(db).claim_next('new-owner')
+    assert new_attempt is not None and new_attempt.lease_version > attempt.lease_version
+    for scope,authority,generation_id in (
+            (issue.plan.rag_scope,issue.rag_authority,issue.plan.candidate_ids[0]),
+            (service.episode_scope,issue.episode_authority,issue.plan.candidate_ids[1])):
+        expected = authority.read_head(scope).revision
+        with pytest.raises(ImportLeaseLost):
+            authority.stage(scope,attempt,expected_revision=expected,
+                            generation_id=generation_id)
+        with pytest.raises(VectorAuthorityError, match='permanently reserved'):
+            authority.stage(scope,new_attempt,expected_revision=expected,
+                            generation_id=generation_id)
+
+
+@pytest.mark.parametrize('stage_commits', [False,True])
+def test_task8_old_stage_user_lock_barrier_rechecks_after_commit_or_rollback(
+        memory_publication,monkeypatch,stage_commits):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    issue = service._require_live_issue(live)
+    authority = issue.rag_authority
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    locked = Event()
+    release = Event()
+    original_owner = authority._owner
+    called = []
+    def owner_barrier(cursor,owner,scope):
+        result = original_owner(cursor,owner,scope)
+        if not called:
+            called.append(True)
+            locked.set()
+            assert release.wait(12)
+        return result
+    monkeypatch.setattr(authority,'_owner',owner_barrier)
+    def stop_after_stage(scope,owner,head,corpus,*,snapshot_version,
+                         generation_id,live):
+        with db.transaction() as cursor:
+            seconds = 8 if stage_commits else 1
+            cursor.execute('''update import_tasks set lease_expires_at=
+                clock_timestamp()+%s * interval '1 second' where id=%s''',
+                (seconds,key[1]))
+            cursor.execute('''update user_mutation_leases set lease_expires_at=
+                clock_timestamp()+%s * interval '1 second' where user_id=%s''',
+                (seconds,user))
+            cursor.execute('''update import_publication_recovery_queue set
+                due_at=clock_timestamp(),reason_code='unknown',
+                queue_version=queue_version+1 where user_id=%s and task_id=%s
+                and task_lease_version=%s''',key)
+        authority.stage(scope,owner,expected_revision=head.revision,
+                        generation_id=generation_id,live=live)
+        raise RuntimeError('stop after stage')
+    monkeypatch.setattr(issue.rag_service,'_prepare_sealed',stop_after_stage)
+    def old_stage():
+        with pytest.raises((DurablePublicationUnknown,ImportLeaseLost)):
+            service._execute_live_publication(live)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stage_future = pool.submit(old_stage)
+        assert locked.wait(15)
+        if not stage_commits:
+            time.sleep(1.2)
+        recovery_future = pool.submit(
+            PostgresImportPublicationRecoveryRepository(db).claim_next,'task8')
+        deadline = time.monotonic()+8
+        while time.monotonic()<deadline:
+            with db.transaction() as cursor:
+                capture = cursor.execute('''select state,claim_token from
+                    import_publication_recovery_queue where user_id=%s
+                    and task_id=%s and task_lease_version=%s''',key).fetchone()
+            if capture['state']=='claimed':
+                break
+            time.sleep(.05)
+        else:
+            pytest.fail('Queue capture did not commit while old stage held user lock')
+        assert not recovery_future.done()
+        release.set()
+        stage_future.result(timeout=15)
+        claim = recovery_future.result(timeout=15)
+    with db.transaction() as cursor:
+        generation = cursor.execute('''select state from vector_generations
+            where generation_id=%s''',(issue.plan.candidate_ids[0],)).fetchone()
+    if stage_commits:
+        assert generation is not None and generation['state']=='staging'
+        assert claim is None
+        _, claim = _claim_due_exact(db,user,attempt)
+    else:
+        assert generation is None and claim is not None
+    assert ImportPublicationProofService(db).prove_exact(*key) is None
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select vector_kind,state from
+            generation_reservations where user_id=%s and task_id=%s
+            and task_lease_version=%s order by vector_kind''',key).fetchall()
+        task = cursor.execute('''select status from import_tasks where id=%s''',
+                              (key[1],)).fetchone()
+        audit = cursor.execute('''select end_reason from import_task_attempts
+            where task_id=%s and lease_version=%s''',key[1:]).fetchone()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''',(user,)).fetchone()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()
+        after = cursor.execute('''select state from vector_generations
+            where generation_id=%s''',(issue.plan.candidate_ids[0],)).fetchone()
+        head = cursor.execute('''select last_generation_id from vector_heads
+            where tenant_id=%s and vector_kind=%s and namespace=%s
+            and index_key=%s''',issue.plan.rag_scope.key).fetchone()
+    assert [(r['vector_kind'],r['state']) for r in reservations] == [
+        ('episode','revoked'),('rag','revoked')]
+    assert task['status']=='retry_wait' and audit['end_reason']=='lease_expired'
+    assert gate['status']=='resolved' and queue['state']=='resolved'
+    assert (None if after is None else after['state']) == (
+        'abandoned' if stage_commits else None)
+    assert head['last_generation_id'] != issue.plan.candidate_ids[0]
+    new_attempt = PostgresImportLeaseRepository(db).claim_next('new-owner')
+    assert new_attempt is not None and new_attempt.lease_version > attempt.lease_version
+    for scope, candidate_authority, generation_id in (
+            (issue.plan.rag_scope,issue.rag_authority,issue.plan.candidate_ids[0]),
+            (service.episode_scope,issue.episode_authority,
+             issue.plan.candidate_ids[1])):
+        expected = candidate_authority.read_head(scope).revision
+        with pytest.raises(ImportLeaseLost):
+            candidate_authority.stage(scope,attempt,
+                expected_revision=expected,generation_id=generation_id)
+        with pytest.raises(VectorAuthorityError,match='permanently reserved'):
+            candidate_authority.stage(scope,new_attempt,
+                expected_revision=expected,generation_id=generation_id)
+        with pytest.raises(VectorAuthorityError):
+            with db.transaction() as cursor:
+                candidate_authority._publish(cursor,scope,new_attempt,
+                    generation_id,expected_revision=expected,
+                    expected_index_revision=1,snapshot_version=1)
+
+
+def test_task8_absent_uuid_revocation_commits_before_old_and_new_stage(
+        memory_publication,monkeypatch):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    other = memory_publication[-1]
+    issue = service._require_live_issue(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    stage_ready = Event()
+    release_stage = Event()
+    def old_stage_after_barrier(scope,owner,head,corpus,*,snapshot_version,
+                                generation_id,live):
+        stage_ready.set()
+        assert release_stage.wait(15)
+        issue.rag_authority.stage(scope,owner,expected_revision=head.revision,
+                                  generation_id=generation_id,live=live)
+        raise RuntimeError('old stage unexpectedly committed')
+    monkeypatch.setattr(issue.rag_service,'_prepare_sealed',old_stage_after_barrier)
+    def old_worker():
+        with pytest.raises((DurablePublicationUnknown,ImportLeaseLost,
+                            PublicationEvidenceError)):
+            service._execute_live_publication(live)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(old_worker)
+        try:
+            assert stage_ready.wait(15)
+            with db.transaction() as cursor:
+                absent = cursor.execute('''select count(*) as n from vector_generations
+                    where generation_id in (%s,%s)''',issue.plan.candidate_ids).fetchone()
+            assert absent['n'] == 0
+            other_lease = PostgresUserMutationCoordinator(db).acquire(
+                other,'unrelated-progress',lease_seconds=10)
+            assert other_lease is not None
+            assert PostgresUserMutationCoordinator(db).release(other_lease)
+            _, claim = _claim_due_exact(db,user,attempt)
+            assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+            with db.transaction() as cursor:
+                states = cursor.execute('''select vector_kind,state from generation_reservations
+                    where user_id=%s and task_id=%s and task_lease_version=%s
+                    order by vector_kind''',key).fetchall()
+            assert [(r['vector_kind'],r['state']) for r in states] == [
+                ('episode','revoked'),('rag','revoked')]
+        finally:
+            release_stage.set()
+        future.result(timeout=15)
+    new_attempt = PostgresImportLeaseRepository(db).claim_next('new-owner')
+    assert new_attempt is not None
+    for scope,authority,generation_id in (
+            (issue.plan.rag_scope,issue.rag_authority,issue.plan.candidate_ids[0]),
+            (service.episode_scope,issue.episode_authority,issue.plan.candidate_ids[1])):
+        with pytest.raises(VectorAuthorityError, match='permanently reserved'):
+            authority.stage(scope,new_attempt,
+                expected_revision=authority.read_head(scope).revision,
+                generation_id=generation_id)
+
+
+def test_task8_fault_after_gate_write_rolls_back_closure_both_ids_and_metadata(
+        memory_publication,monkeypatch):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    assert ImportPublicationProofService(db).prove_exact(*key) is None
+    repository = PostgresImportPublicationRecoveryRepository(db)
+    original = repository._resolve_gate
+    def fault_after_gate(cursor, exact_claim):
+        original(cursor,exact_claim)
+        raise RuntimeError('injected after gate write')
+    monkeypatch.setattr(repository,'_resolve_gate',fault_after_gate)
+    with pytest.raises(RuntimeError, match='injected after gate write'):
+        repository.abandon_exact(claim)
+    with db.transaction() as cursor:
+        task = cursor.execute('select status from import_tasks where id=%s',
+                              (key[1],)).fetchone()
+        audit = cursor.execute('''select ended_at from import_task_attempts
+            where task_id=%s and lease_version=%s''',key[1:]).fetchone()
+        states = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchall()
+        header = cursor.execute('''select phase from import_publication_evidence
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''',(user,)).fetchone()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone()
+    assert task['status'] == 'running' and audit['ended_at'] is None
+    assert [r['state'] for r in states] == ['reserved','reserved']
+    assert header['phase'] == 'intent' and gate['status'] == 'unresolved'
+    assert queue['state'] == 'claimed'
+    monkeypatch.setattr(repository,'_resolve_gate',original)
+    assert repository.prove_or_hold(claim) == 'abandoned'
+
+
+def test_task8_direct_writers_reject_forged_capture_and_premature_resolution(
+        memory_publication):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt)
+    repository = PostgresImportPublicationRecoveryRepository(db)
+    with db.transaction() as cursor:
+        frozen = PostgresImportPublicationEvidenceRepository(
+            db)._read_exact_in_cursor(cursor,AttemptKey(*key))
+
+    def state():
+        with db.transaction() as cursor:
+            return tuple(cursor.execute(query,key).fetchall() for query in (
+                '''select * from import_publication_evidence where user_id=%s
+                   and task_id=%s and task_lease_version=%s''',
+                '''select * from import_publication_private_payloads where user_id=%s
+                   and task_id=%s and task_lease_version=%s''',
+                '''select * from user_publication_gates where user_id=%s
+                   and task_id=%s and task_lease_version=%s''',
+                '''select * from import_publication_recovery_leases where user_id=%s
+                   and task_id=%s and task_lease_version=%s''',
+                '''select * from import_publication_recovery_queue where user_id=%s
+                   and task_id=%s and task_lease_version=%s''',
+                '''select * from generation_reservations where user_id=%s
+                   and task_id=%s and task_lease_version=%s order by vector_kind''',
+            ))
+
+    before = state()
+    forged = replace(claim,recovery_token=uuid4())
+    for exact_claim, operation in (
+            (forged,lambda cursor,c: repository._close_capture(
+                cursor,c,'manual_hold','manual_hold')),
+            (forged,lambda cursor,c: repository._resolve_gate(cursor,c)),
+            (forged,lambda cursor,c: repository._transition_metadata(
+                cursor,c,frozen,'abandoned')),
+            (claim,lambda cursor,c: repository._close_capture(
+                cursor,c,'abandoned')),
+            (claim,lambda cursor,c: repository._resolve_gate(cursor,c)),
+            (claim,lambda cursor,c: repository._transition_metadata(
+                cursor,c,frozen,'abandoned'))):
+        with pytest.raises(RuntimeError):
+            with db.transaction() as cursor:
+                operation(cursor,exact_claim)
+        assert state() == before
+
+
+def test_task8_terminal_without_complete_proof_stays_succeeded_and_held(
+        memory_publication,monkeypatch):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    service._execute_live_publication(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_publication_recovery_queue set
+            due_at=clock_timestamp(),reason_code='unknown',
+            queue_version=queue_version+1 where user_id=%s and task_id=%s
+            and task_lease_version=%s''',key)
+    claim = PostgresImportPublicationRecoveryRepository(db).claim_next('task8')
+    assert claim is not None
+    monkeypatch.setattr(ImportPublicationProofService,'prove_exact',
+                        lambda *args: None)
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'manual_hold'
+    with db.transaction() as cursor:
+        task = cursor.execute('select status from import_tasks where id=%s',
+                              (key[1],)).fetchone()
+        header = cursor.execute('''select phase,observation_reason from
+            import_publication_evidence where user_id=%s and task_id=%s
+            and task_lease_version=%s''',key).fetchone()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone()
+        reservations = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchall()
+    assert task['status'] == 'succeeded'
+    assert header['phase'] == 'terminal_committed'
+    assert header['observation_reason'] == 'manual_hold'
+    assert queue['state'] == 'manual_hold'
+    assert [r['state'] for r in reservations] == ['reserved','reserved']
+
+
+def test_task8_expiry_during_user_lock_wait_loses_before_any_write(
+        memory_publication):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key, claim = _claim_due_exact(db,user,attempt,lease_seconds=1)
+    repository = PostgresImportPublicationRecoveryRepository(db)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with db.transaction() as cursor:
+            cursor.execute('select id from users where id=%s for update',(user,))
+            waiting = pool.submit(repository.prove_or_hold,claim)
+            time.sleep(1.2)
+            assert not waiting.done()
+        # The worker remains blocked until the transaction releases the user.
+        with pytest.raises(RecoveryLeaseLost):
+            waiting.result(timeout=15)
+    with db.transaction() as cursor:
+        states = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchall()
+        queue = cursor.execute('''select state from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone()
+    assert [r['state'] for r in states] == ['reserved','reserved']
+    assert queue['state'] == 'claimed'
+
+
+@pytest.mark.parametrize('crash_at', ['document_verified','pair_sealed',
+                                      'terminal_rollback'])
+def test_task8_preterminal_crash_rows_prove_first_then_revoke(
+        memory_publication,monkeypatch,crash_at):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    issue = service._require_live_issue(live)
+    if crash_at == 'document_verified':
+        monkeypatch.setattr(issue.rag_service,'_prepare_sealed',
+                            lambda *args,**kwargs: (_ for _ in ()).throw(
+                                RuntimeError('after document result')))
+    elif crash_at == 'pair_sealed':
+        monkeypatch.setattr(issue.imports,'try_begin_committing',
+                            lambda *args,**kwargs: (_ for _ in ()).throw(
+                                RuntimeError('after both seals')))
+    else:
+        monkeypatch.setattr(service,'_terminal',
+                            lambda *args,**kwargs: (_ for _ in ()).throw(
+                                RuntimeError('terminal transaction rollback')))
+    with pytest.raises(DurablePublicationUnknown):
+        service._execute_live_publication(live)
+    key = (user,attempt.task.task_id,attempt.lease_version)
+    frozen = PostgresImportPublicationEvidenceRepository(db).read_exact(*key)
+    assert frozen.phase == ('document_verified' if crash_at == 'document_verified'
+                            else 'pair_sealed')
+    assert ImportPublicationProofService(db).prove_exact(*key) is None
+    _, claim = _claim_due_exact(db,user,attempt)
+    assert PostgresImportPublicationRecoveryRepository(db).prove_or_hold(claim) == 'abandoned'
+    with db.transaction() as cursor:
+        reservations = cursor.execute('''select state from generation_reservations
+            where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchall()
+        gate = cursor.execute('''select status from user_publication_gates
+            where user_id=%s''',(user,)).fetchone()
+    assert [r['state'] for r in reservations] == ['revoked','revoked']
+    assert gate['status'] == 'resolved'
 
 
 @pytest.mark.parametrize('candidate_state', ['staging','sealed'])
