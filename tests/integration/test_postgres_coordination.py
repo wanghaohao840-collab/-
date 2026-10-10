@@ -7,7 +7,12 @@ import time
 from uuid import uuid4
 
 import pytest
+from psycopg.pq import TransactionStatus
 
+from app.import_persistence import ImportStore
+from app.import_publication_evidence import (
+    PublicationEvidenceError, require_no_gate_in_transaction,
+)
 from app.postgres_coordination import MutationLeaseLost, PostgresUserMutationCoordinator
 from app.postgres import PostgresDatabase
 from app.postgres_snapshots import PostgresSnapshotRepository
@@ -304,6 +309,19 @@ def test_autocommit_pool_fails_closed_without_explicit_transaction(coordination)
                 pytest.fail('autocommit publication is unsafe')
     finally:
         isolated.close()
+
+
+def test_idle_non_autocommit_cursor_cannot_become_a_mutation_transaction(coordination):
+    database, _, _, _ = coordination
+    with database.connection() as connection:
+        with connection.cursor() as cursor:
+            assert cursor.connection.info.transaction_status == TransactionStatus.IDLE
+            with pytest.raises(PublicationEvidenceError, match='Active'):
+                require_no_gate_in_transaction(cursor, 'owner')
+            assert cursor.connection.info.transaction_status == TransactionStatus.IDLE
+            with pytest.raises(ValueError, match='Active'):
+                ImportStore(cursor, postgres=True).touch_batch('owner', 'missing', 'now')
+            assert cursor.connection.info.transaction_status == TransactionStatus.IDLE
 
 
 def test_caller_owned_live_heartbeat_release_are_atomic(coordination):

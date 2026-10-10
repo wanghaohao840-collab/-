@@ -6,6 +6,7 @@ cursor, without committing. External artifacts need their own generation fence.
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
+from psycopg.pq import TransactionStatus
 
 from app.import_models import ImportTaskRecord
 from app.import_repository import InvalidImportTransition, _task_from_row
@@ -68,8 +69,23 @@ class PostgresImportLeaseRepository:
 
     @staticmethod
     def _touch(cursor, row):
-        cursor.execute('update import_batches set updated_at=%s where id=%s and user_id=%s',
-                       (_text(_now(cursor)), row['batch_id'], row['user_id']))
+        if (not isinstance(row, dict) or any(
+                field not in row for field in ('id', 'batch_id', 'user_id'))
+                or cursor.connection.info.transaction_status != TransactionStatus.INTRANS):
+            raise ImportLeaseLost('Active exact import batch row required')
+        PostgresUserMutationCoordinator._isolation(cursor)
+        PostgresUserMutationCoordinator._lock_user(cursor, row['user_id'])
+        from app.import_publication_evidence import require_no_gate_in_transaction
+        require_no_gate_in_transaction(cursor, row['user_id'])
+        task = cursor.execute('''select batch_id from import_tasks where id=%s
+            and user_id=%s for update''', (row['id'], row['user_id'])).fetchone()
+        if task is None or task['batch_id'] != row['batch_id']:
+            raise ImportLeaseLost('Exact import batch row changed')
+        changed = cursor.execute('''update import_batches set updated_at=%s
+            where id=%s and user_id=%s returning id''',
+            (_text(_now(cursor)), row['batch_id'], row['user_id'])).fetchone()
+        if changed is None:
+            raise ImportLeaseLost('Import batch changed before touch')
 
     def claim_next(self, worker_id, lease_seconds=60):
         _duration(lease_seconds)
@@ -215,6 +231,15 @@ class PostgresImportLeaseRepository:
             return self._progress(cursor,attempt,row,stage,progress)
 
     def _progress(self,cursor,attempt,row,stage,progress,*,live=None):
+        fresh = self._live(cursor, attempt)
+        consumed = ('id', 'user_id', 'lease_version', 'batch_id',
+                    'lease_token', 'user_lease_token', 'user_lease_version',
+                    'started_at', 'stage', 'progress')
+        if (not isinstance(row, dict) or any(
+                field not in row or row[field] != fresh[field]
+                for field in consumed)):
+            raise ImportLeaseLost('Original import progress row required')
+        row = fresh
         if live is None:
             from app.import_publication_evidence import require_no_gate_in_transaction
             require_no_gate_in_transaction(cursor,attempt.task.user_id)
@@ -222,7 +247,6 @@ class PostgresImportLeaseRepository:
             from app.import_memory_publication import _require_live_issuer
             from app.import_publication_evidence import PostgresImportPublicationEvidenceRepository
             service, issue = _require_live_issuer(live)
-            fresh = self._live(cursor,attempt)
             if (self is not issue.imports or attempt is not issue.original_attempt
                     or fresh['id'] != issue.key.task_id
                     or fresh['lease_version'] != issue.key.task_lease_version
@@ -245,7 +269,12 @@ class PostgresImportLeaseRepository:
                        (stage,progress,_text(_now(cursor)),row['id']))
         cursor.execute('update import_task_attempts set last_stage=%s where task_id=%s and lease_version=%s',
                        (stage,row['id'],row['lease_version']))
-        self._touch(cursor,row)
+        if live is None:
+            self._touch(cursor,row)
+        else:
+            cursor.execute('''update import_batches set updated_at=%s
+                where id=%s and user_id=%s''',
+                (_text(_now(cursor)), row['batch_id'], row['user_id']))
         return _task_from_row(self._live(cursor,attempt))
 
     def try_begin_committing(self,attempt,*,live: object | None = None):
@@ -354,14 +383,18 @@ class PostgresImportLeaseRepository:
             if (status,reason,progress,error_code,error_summary,delay,unstarted) != (
                     'succeeded','succeeded',100,None,None,None,False):
                 raise ImportLeaseLost('Fixed terminal finish arguments differ')
-            fresh = self._live(cursor,attempt)
-            consumed = ('id','user_id','lease_version','batch_id',
-                        'started_at','progress')
-            if (not isinstance(row,dict) or any(
-                    field not in row or row[field] != fresh[field]
-                    for field in consumed)):
+        fresh = self._live(cursor, attempt)
+        consumed = ('id', 'user_id', 'lease_version', 'batch_id',
+                    'lease_token', 'user_lease_token', 'user_lease_version',
+                    'started_at', 'stage', 'progress')
+        if (not isinstance(row, dict) or any(
+                field not in row or row[field] != fresh[field]
+                for field in consumed)):
+            if terminal_release is not None:
                 raise ImportMemoryPublicationError('Original terminal task row required')
-            row = fresh
+            raise ImportLeaseLost('Original import terminal row required')
+        row = fresh
+        if terminal_release is not None:
             _require_terminal_release_binding(terminal_release,cursor,attempt,
                                               operation='finish')
         else:
@@ -381,7 +414,12 @@ class PostgresImportLeaseRepository:
         cursor.execute('''update import_task_attempts set ended_at=%s,end_reason=%s,error_code=%s,
             error_summary=%s,last_stage=%s where task_id=%s and lease_version=%s''',
             (now,reason,error_code,error_summary,stage,row['id'],row['lease_version']))
-        self._touch(cursor,row)
+        if terminal_release is None:
+            self._touch(cursor,row)
+        else:
+            cursor.execute('''update import_batches set updated_at=%s
+                where id=%s and user_id=%s''',
+                (_text(_now(cursor)), row['batch_id'], row['user_id']))
         result = self._live(cursor,attempt,status=status,ended=True)
         try:
             self.coordinator.release_in_transaction(cursor,attempt.user_lease,

@@ -220,6 +220,10 @@ class PostgresHistoryDocumentWitnessRepository:
         if admission is None:
             from app.import_publication_evidence import require_no_gate_in_transaction
             from app.postgres_coordination import PostgresUserMutationCoordinator
+            from psycopg.pq import TransactionStatus
+            if cursor.connection.info.transaction_status != TransactionStatus.INTRANS:
+                raise ValueError('Active caller-owned transaction required')
+            PostgresUserMutationCoordinator._isolation(cursor)
             PostgresUserMutationCoordinator._lock_user(cursor, scope.tenant_id)
             require_no_gate_in_transaction(cursor, scope.tenant_id)
         else:

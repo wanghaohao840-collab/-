@@ -5,15 +5,18 @@ from __future__ import annotations
 from copy import copy
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from hashlib import sha256
+import importlib
 from threading import Event
 import time
 from uuid import uuid4
 
 import pytest
 import psycopg
+from psycopg import IsolationLevel
 from sqlalchemy.exc import DBAPIError
 from alembic import command
 from alembic.config import Config
@@ -27,6 +30,9 @@ from app.import_memory_publication import (
     DurablePublicationUnknown, ImportMemoryPublicationError,
     ImportMemoryPublicationService,
 )
+from app.import_models import ImportTaskCreate
+from app.import_persistence import ImportPersistence, ImportStore
+from app.import_repository import PostgresImportTaskRepository
 from app.history import EMPTY_HISTORY
 from app.import_publication_recovery import (
     PostgresImportPublicationRecoveryRepository, RecoveryLeaseLost,
@@ -45,6 +51,345 @@ from tests.integration.test_import_publication_proof import _issue
 from tests.integration.test_postgres_auth_sessions import shared_database
 from tests.integration.test_published_episode_reads import _publish as publish_episode_baseline
 from tests.integration.test_s3_object_store import store
+
+
+def test_fresh_16_upgrade_has_separate_source_isolation_guard(shared_database):
+    open_pool, _ = shared_database
+    db = open_pool()
+    with db.transaction() as cursor:
+        assert cursor.execute('select version_num from alembic_version').fetchone()[
+            'version_num'] == '20261007_16'
+        definitions = cursor.execute('''select tgname,
+            pg_get_triggerdef(oid) as definition from pg_trigger
+            where tgrelid='import_objects'::regclass and not tgisinternal
+            order by tgname''').fetchall()
+        by_name = {row['tgname']: row['definition'] for row in definitions}
+        assert 'import_object_dependency_guard_15' in by_name
+        assert 'aa_import_object_isolation_guard_16' in by_name
+        assert 'BEFORE DELETE OR UPDATE' in by_name[
+            'aa_import_object_isolation_guard_16']
+        assert 'publication_dependency_isolation_guard_16()' in by_name[
+            'aa_import_object_isolation_guard_16']
+        audit = cursor.execute('''select tgname,pg_get_triggerdef(oid) as definition
+            from pg_trigger where tgrelid='import_task_attempts'::regclass
+            and not tgisinternal''').fetchall()
+        audit_by_name = {row['tgname']: row['definition'] for row in audit}
+        assert 'import_attempt_dependency_guard_15' in audit_by_name
+        assert 'aa_import_attempt_isolation_guard_16' in audit_by_name
+        assert 'BEFORE DELETE OR UPDATE' in audit_by_name[
+            'aa_import_attempt_isolation_guard_16']
+        assert 'publication_dependency_isolation_guard_16()' in audit_by_name[
+            'aa_import_attempt_isolation_guard_16']
+        function = cursor.execute('''select pg_get_functiondef(
+            'publication_dependency_isolation_guard_16()'::regprocedure)
+            as definition''').fetchone()['definition']
+        assert "current_setting('transaction_isolation')" in function
+        assert "'read committed'" in function
+
+
+@pytest.mark.parametrize('shared_database', ['20261002_15'], indirect=True)
+@pytest.mark.parametrize('phase', ['intent', 'terminal_committed'],
+                         ids=['intent', 'terminal_committed'])
+def test_populated_15_to_16_preserves_source_and_recovery_bytes(
+        shared_database, memory_publication, phase):
+    service, db, store, _, _, rag_scope, _, profile, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    live = service._issue_live_publication(rag_scope, attempt,
+        [_point(rag_scope, attempt.task.document_id, 'migration-preservation')],
+        event_vector=[1., 0., 0., 0.], event_profile=profile)
+    assert live is not None
+    if phase == 'terminal_committed':
+        result = service._execute_live_publication(live)
+        assert result.proof.phase == 'terminal_committed'
+    tables = ('import_objects', 'import_task_attempts', 'import_tasks',
+              'import_batches', 'import_publication_evidence',
+              'import_publication_private_payloads',
+              'import_publication_recovery_queue', 'user_publication_gates',
+              'generation_reservations', 'document_objects',
+              'history_document_witnesses', 'vector_indexes',
+              'vector_generations', 'vector_heads', 'user_snapshots',
+              'memory_documents')
+    def snapshot_rows(cursor):
+        return {table: sorted(cursor.execute(f'select * from {table}').fetchall(),
+                              key=lambda row: repr(sorted(row.items())))
+                for table in tables}
+    with db.transaction() as cursor:
+        before = snapshot_rows(cursor)
+        header = before['import_publication_evidence'][0]
+        assert header['phase'] == phase
+        if phase == 'terminal_committed':
+            assert before['import_publication_private_payloads'][0]['terminal_slot']
+            assert any(row['state'] == 'published'
+                       for row in before['vector_generations'])
+        assert cursor.execute('select version_num from alembic_version').fetchone()[
+            'version_num'] == '20261002_15'
+    command.upgrade(Config('alembic.ini'), '20261007_16')
+    command.upgrade(Config('alembic.ini'), 'head')
+    with db.transaction() as cursor:
+        after = snapshot_rows(cursor)
+        assert after == before
+        assert cursor.execute('select version_num from alembic_version').fetchone()[
+            'version_num'] == '20261007_16'
+        assert cursor.execute('''select 1 from pg_trigger where tgname =
+            'aa_import_object_isolation_guard_16' and not tgisinternal''').fetchone()
+    migration = importlib.import_module(
+        'migrations.versions.20261007_16_publication_dependency_isolation')
+    with pytest.raises(RuntimeError, match='cannot be removed'):
+        migration.downgrade()
+
+
+@pytest.mark.parametrize('shared_database', ['20261002_15'], indirect=True)
+def test_15_to_16_failed_second_trigger_rolls_back_transactional_ddl(
+        shared_database, memory_publication):
+    _, db, store, _, _, _, _, _, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    with db.transaction() as cursor:
+        cursor.execute('''create trigger aa_import_attempt_isolation_guard_16
+            before update on import_task_attempts for each row
+            execute function import_attempt_dependency_guard_15()''')
+        original = cursor.execute('select * from import_objects where task_id=%s',
+                                  (attempt.task.task_id,)).fetchone()
+    with pytest.raises(DBAPIError, match='aa_import_attempt_isolation_guard_16'):
+        command.upgrade(Config('alembic.ini'), '20261007_16')
+    with db.transaction() as cursor:
+        assert cursor.execute('select version_num from alembic_version').fetchone()[
+            'version_num'] == '20261002_15'
+        assert cursor.execute('''select to_regprocedure(
+            'publication_dependency_isolation_guard_16()') as name''').fetchone()[
+            'name'] is None
+        assert cursor.execute('''select 1 from pg_trigger where tgname=
+            'aa_import_object_isolation_guard_16' and not tgisinternal
+            and tgrelid='import_objects'::regclass''').fetchone() is None
+        assert cursor.execute('select * from import_objects where task_id=%s',
+                              (attempt.task.task_id,)).fetchone() == original
+
+
+@pytest.mark.parametrize('isolation', ['repeatable read', 'serializable',
+                                       'read uncommitted'])
+def test_source_mutation_requires_read_committed_even_without_gate(
+        memory_publication, isolation):
+    _, db, store, _, _, _, _, _, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    with pytest.raises(psycopg.errors.RaiseException, match='READ COMMITTED'):
+        with db.transaction() as cursor:
+            cursor.execute(f'set transaction isolation level {isolation}')
+            cursor.execute('''update import_objects set size_bytes=size_bytes
+                where task_id=%s and user_id=%s''',
+                (attempt.task.task_id, user))
+    with db.transaction() as cursor:
+        original = cursor.execute('select size_bytes from import_objects '
+                                  'where task_id=%s',
+                                  (attempt.task.task_id,)).fetchone()['size_bytes']
+        cursor.execute('''update import_objects set size_bytes=size_bytes+1
+            where task_id=%s and user_id=%s''', (attempt.task.task_id, user))
+    with db.transaction() as cursor:
+        assert cursor.execute('select size_bytes from import_objects '
+                              'where task_id=%s',
+                              (attempt.task.task_id,)).fetchone()['size_bytes'] == original + 1
+
+
+@pytest.mark.parametrize('isolation', ['repeatable read', 'serializable',
+                                       'read uncommitted'])
+@pytest.mark.parametrize('mutation', ['delete', 'illegal_end_update'])
+def test_audit_mutation_requires_read_committed_even_without_gate(
+        memory_publication, isolation, mutation):
+    _, db, store, _, _, _, _, _, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    args = (attempt.task.task_id, attempt.lease_version)
+    sql = ('delete from import_task_attempts where task_id=%s and lease_version=%s'
+           if mutation == 'delete' else '''update import_task_attempts
+             set ended_at=clock_timestamp(),end_reason='failed'
+             where task_id=%s and lease_version=%s''')
+    with db.transaction() as cursor:
+        before = cursor.execute('''select * from import_task_attempts where
+            task_id=%s and lease_version=%s''', args).fetchone()
+    with pytest.raises(psycopg.errors.RaiseException, match='READ COMMITTED') as blocked:
+        with db.transaction() as cursor:
+            cursor.execute(f'set transaction isolation level {isolation}')
+            cursor.execute(sql, args)
+    assert blocked.value.sqlstate == 'P0001'
+    with db.transaction() as cursor:
+        assert cursor.execute('''select * from import_task_attempts where
+            task_id=%s and lease_version=%s''', args).fetchone() == before
+
+
+def test_audit_read_committed_legacy_heartbeat_update_is_allowed(
+        memory_publication):
+    _, db, store, _, _, _, _, _, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    args = (attempt.task.task_id, attempt.lease_version)
+    with db.transaction() as cursor:
+        before = cursor.execute('''select * from import_task_attempts where
+            task_id=%s and lease_version=%s''', args).fetchone()
+        cursor.execute('''update import_task_attempts set
+            heartbeat_at=clock_timestamp() where task_id=%s and lease_version=%s''', args)
+    with db.transaction() as cursor:
+        after = cursor.execute('''select * from import_task_attempts where
+            task_id=%s and lease_version=%s''', args).fetchone()
+    assert after['heartbeat_at'] >= before['heartbeat_at']
+    assert {key: value for key, value in after.items() if key != 'heartbeat_at'} == {
+        key: value for key, value in before.items() if key != 'heartbeat_at'}
+
+
+def _gated_mutation_rows(db, user):
+    tables = ('import_batches', 'import_tasks', 'import_task_attempts',
+              'import_objects', 'import_publication_evidence',
+              'import_publication_private_payloads',
+              'user_publication_gates', 'import_publication_recovery_queue',
+              'generation_reservations', 'user_mutation_leases')
+    with db.transaction() as cursor:
+        return {table: sorted((repr(dict(row)) for row in cursor.execute(
+            f'select * from {table} where user_id=%s', (user,)).fetchall()))
+            for table in tables}
+
+
+def _ordinary_publish_rows(db, user):
+    """Capture the database authorities an ordinary import could change."""
+    tables = (
+        'users', 'user_mutation_leases', 'import_batches', 'import_tasks',
+        'import_task_attempts', 'import_objects', 'import_publication_evidence',
+        'import_publication_private_payloads', 'user_publication_gates',
+        'import_publication_recovery_queue', 'generation_reservations',
+        'document_objects', 'history_document_witnesses', 'vector_indexes',
+        'vector_generations', 'vector_heads', 'user_snapshots',
+        'memory_documents',
+    )
+    with db.transaction() as cursor:
+        return {table: sorted((repr(dict(row)) for row in cursor.execute(
+            f'select * from {table}').fetchall())) for table in tables}
+
+
+def test_ordinary_publish_refuses_unresolved_gate_before_planning_or_io(
+        memory_publication, monkeypatch):
+    service, db, store, _, _, rag_scope, _, profile, user, _ = memory_publication
+    _, _, _, _, attempt, _ = _issue(memory_publication)
+    key = (user, attempt.task.task_id, attempt.lease_version)
+    before = _ordinary_publish_rows(db, user)
+    monkeypatch.setattr(service, '_plan_intent', lambda *args, **kwargs:
+                        pytest.fail('Unresolved gate reached publication planning'))
+    monkeypatch.setattr(store, 'put_immutable', lambda *args, **kwargs:
+                        pytest.fail('Unresolved gate reached external document I/O'))
+
+    with pytest.raises(PublicationEvidenceError,
+                       match='^Unresolved import publication gates this user$'):
+        service.publish(rag_scope, attempt,
+            [_point(rag_scope, attempt.task.document_id, 'blocked-gate')],
+            event_vector=[1., 0., 0., 0.], event_profile=profile)
+
+    assert _ordinary_publish_rows(db, user) == before
+    with db.transaction() as cursor:
+        assert cursor.execute('''select status from user_publication_gates
+            where user_id=%s and task_id=%s and task_lease_version=%s''',
+            key).fetchone()['status'] == 'unresolved'
+
+
+def test_ordinary_publish_rejects_non_read_committed_before_planning_or_io(
+        memory_publication, monkeypatch):
+    service, db, store, _, _, rag_scope, _, profile, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    before = _ordinary_publish_rows(db, user)
+    monkeypatch.setattr(service, '_plan_intent', lambda *args, **kwargs:
+                        pytest.fail('Unsupported isolation reached publication planning'))
+    monkeypatch.setattr(store, 'put_immutable', lambda *args, **kwargs:
+                        pytest.fail('Unsupported isolation reached external document I/O'))
+
+    with db.connection() as connection:
+        original_isolation = connection.isolation_level
+        try:
+            assert connection.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+            connection.isolation_level = IsolationLevel.REPEATABLE_READ
+            with monkeypatch.context() as patch:
+                patch.setattr(db, 'connection', lambda: nullcontext(connection))
+                with pytest.raises(ValueError,
+                                   match='^User mutation leases require READ COMMITTED$'):
+                    service.publish(rag_scope, attempt,
+                        [_point(rag_scope, attempt.task.document_id, 'blocked-rr')],
+                        event_vector=[1., 0., 0., 0.], event_profile=profile)
+                assert connection.isolation_level == IsolationLevel.REPEATABLE_READ
+                assert connection.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
+        finally:
+            connection.rollback()
+            connection.isolation_level = original_isolation
+
+    assert _ordinary_publish_rows(db, user) == before
+
+
+@pytest.mark.parametrize('mutation', [
+    'insert_batch', 'insert_tasks', 'cancel_queued', 'request_running_cancel',
+    'retry_task', 'retry_batch', 'touch_batch', 'direct_touch',
+    'inherited_request_cancel', 'inherited_retry_task',
+    'inherited_retry_failed_in_batch', 'inherited_create_batch',
+    'inherited_create_batch_in_transaction', 'escaped_caller_owned',
+    'coordinator_acquire',
+])
+def test_task9_direct_import_mutators_refuse_unresolved_user_without_writes(
+        memory_publication, mutation):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    new_batch = 'batch-' + uuid4().hex
+    new_task = ImportTaskCreate('task-' + uuid4().hex, new_batch, user,
+        'doc-' + uuid4().hex, 'file.txt', '.txt', 3, 'imports/file.txt')
+    task_id, batch_id = attempt.task.task_id, attempt.task.batch_id
+    before = _gated_mutation_rows(db, user)
+    repository = PostgresImportTaskRepository(db)
+    controls = {
+        'inherited_request_cancel': lambda: repository.request_cancel(
+            user, batch_id, task_id, now='T2'),
+        'inherited_retry_task': lambda: repository.retry_task(
+            user, task_id, now='T2'),
+        'inherited_retry_failed_in_batch': lambda:
+            repository.retry_failed_in_batch(user, batch_id, now='T2'),
+        'inherited_create_batch': lambda: repository.create_batch(
+            user, [new_task], now='T2'),
+        'coordinator_acquire': lambda:
+            PostgresUserMutationCoordinator(db).acquire(user, 'other-worker'),
+    }
+    if mutation in controls:
+        with pytest.raises(PublicationEvidenceError, match='Unresolved'):
+            controls[mutation]()
+    else:
+        with db.transaction() as cursor:
+            cursor.execute('begin')
+            store = ImportStore(cursor, postgres=True)
+            methods = {
+                'insert_batch': lambda: store.insert_batch(new_batch,user,'T2'),
+                'insert_tasks': lambda: store.insert_tasks([new_task],'T2'),
+                'cancel_queued': lambda: store.cancel_queued(
+                    user,batch_id,task_id,'T2'),
+                'request_running_cancel': lambda: store.request_running_cancel(
+                    user,batch_id,task_id,'T2'),
+                'retry_task': lambda: store.retry_task(user,task_id,'T2'),
+                'retry_batch': lambda: store.retry_batch(user,batch_id,'T2'),
+                'touch_batch': lambda: store.touch_batch(user,batch_id,'T2'),
+                'direct_touch': lambda: PostgresImportLeaseRepository._touch(
+                    cursor,cursor.execute('select * from import_tasks where id=%s',
+                                          (task_id,)).fetchone()),
+                'inherited_create_batch_in_transaction': lambda:
+                    repository.create_batch_in_transaction(cursor,user,[new_task],now='T2'),
+                'escaped_caller_owned': lambda:
+                    ImportPersistence(db,postgres=True).caller_owned(cursor,user),
+            }
+            with pytest.raises(PublicationEvidenceError, match='Unresolved'):
+                methods[mutation]()
+    assert _gated_mutation_rows(db, user) == before
+
+
+@pytest.mark.parametrize('method', ['progress', 'finish'])
+def test_task9_direct_lease_helper_rejects_cross_row_before_any_dml(
+        memory_publication, method):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    before = _gated_mutation_rows(db, user)
+    leases = PostgresImportLeaseRepository(db)
+    with db.transaction() as cursor:
+        cursor.execute('begin')
+        original = leases._live(cursor, attempt)
+        other_row = dict(original)
+        other_row['batch_id'] = 'cross-row-' + uuid4().hex
+        with pytest.raises(ImportLeaseLost, match='Original import'):
+            if method == 'progress':
+                leases._progress(cursor, attempt, other_row, 'parsing', 1)
+            else:
+                leases._finish(cursor, attempt, other_row, 'failed', 'failed')
+    assert _gated_mutation_rows(db, user) == before
 
 
 @pytest.mark.parametrize('shared_database', ['20261002_14'], indirect=True)
@@ -1383,6 +1728,72 @@ def test_d2_seed_preserves_existing_queue_disposition(memory_publication,disposi
             where user_id=%s and task_id=%s and task_lease_version=%s''',args).fetchone() == before
 
 
+@pytest.mark.parametrize('disposition', ['claimed', 'manual_hold', 'resolved'])
+def test_schedule_unknown_requires_existing_exact_queue_and_preserves_nonpending(
+        memory_publication, disposition):
+    service, db, _, user, attempt, live = _issue(memory_publication)
+    key = AttemptKey(user, attempt.task.task_id, attempt.lease_version)
+    args = (key.user_id, key.task_id, key.task_lease_version)
+    recovery = PostgresImportPublicationRecoveryRepository(db)
+    with db.transaction() as cursor:
+        before_count = cursor.execute('''select count(*) as n from
+            import_publication_recovery_queue''').fetchone()['n']
+    with pytest.raises(RecoveryUnavailable):
+        recovery.schedule_unknown(AttemptKey(user, key.task_id,
+                                            key.task_lease_version + 1))
+    with db.transaction() as cursor:
+        assert cursor.execute('''select count(*) as n from
+            import_publication_recovery_queue''').fetchone()['n'] == before_count
+    if disposition == 'resolved':
+        assert service._execute_live_publication(live).pair.import_task.status == 'succeeded'
+    _, claim = _claim_due_exact(db, user, attempt)
+    assert claim is not None
+    if disposition == 'manual_hold':
+        assert recovery._manual_hold(claim) == 'manual_hold'
+    elif disposition == 'resolved':
+        assert recovery.prove_or_hold(claim) == 'proved_succeeded'
+    before_rows = _gated_mutation_rows(db, user)
+    with db.transaction() as cursor:
+        before = cursor.execute('''select * from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''', args).fetchone()
+    assert before['state'] == disposition
+    assert recovery.schedule_unknown(key) == disposition
+    with db.transaction() as cursor:
+        assert cursor.execute('''select * from import_publication_recovery_queue
+            where user_id=%s and task_id=%s and task_lease_version=%s''', args).fetchone() == before
+    assert _gated_mutation_rows(db, user) == before_rows
+
+
+def test_schedule_unknown_uses_fresh_clock_after_user_lock_wait(
+        memory_publication):
+    _, db, _, user, attempt, _ = _issue(memory_publication)
+    key = AttemptKey(user, attempt.task.task_id, attempt.lease_version)
+    args = (key.user_id, key.task_id, key.task_lease_version)
+    recovery = PostgresImportPublicationRecoveryRepository(db)
+    with db.transaction() as cursor:
+        cursor.execute('''update import_tasks set lease_expires_at=
+            clock_timestamp()-interval '1 second' where id=%s''', (key.task_id,))
+        cursor.execute('''update user_mutation_leases set lease_expires_at=
+            clock_timestamp()-interval '1 second' where user_id=%s''', (user,))
+        cursor.execute('''update import_publication_recovery_queue set
+            due_at=clock_timestamp()-interval '1 second',queue_version=queue_version+1
+            where user_id=%s and task_id=%s and task_lease_version=%s''', args)
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with db.transaction() as cursor:
+            cursor.execute('select id from users where id=%s for update', (user,))
+            scheduled = workers.submit(recovery.schedule_unknown, key)
+            time.sleep(.2)
+            assert not scheduled.done()
+            released_after = cursor.execute('select clock_timestamp() as now').fetchone()['now']
+        assert scheduled.result(timeout=20) == 'pending'
+    with db.transaction() as cursor:
+        queue = cursor.execute('''select state,due_at,reason_code from
+            import_publication_recovery_queue where user_id=%s and task_id=%s
+            and task_lease_version=%s''', args).fetchone()
+    assert queue['state'] == 'pending' and queue['reason_code'] == 'unknown'
+    assert queue['due_at'] >= released_after
+
+
 def test_recovery_renewal_is_all_or_nothing_and_expired_capture_takes_over(
         memory_publication):
     _, db, _, user, attempt, _ = _issue(memory_publication)
@@ -1623,31 +2034,27 @@ def test_fixed_terminal_failure_rolls_back_evidence_domain_and_lease(
         def refuse_finish(*args, **kwargs):
             raise RuntimeError('injected post-terminal failure')
         monkeypatch.setattr(PostgresImportLeaseRepository,'_finish',refuse_finish)
-    elif failure_point == 'batch_touch':
-        original_touch = PostgresImportLeaseRepository._touch
-        def refuse_success_touch(cursor, row):
-            status = cursor.execute('''select status from import_tasks
-                where id=%s''',(row['id'],)).fetchone()['status']
-            if status=='succeeded':
-                raise RuntimeError('injected batch touch failure')
-            return original_touch(cursor,row)
-        monkeypatch.setattr(PostgresImportLeaseRepository,'_touch',
-                            staticmethod(refuse_success_touch))
     else:
         table, predicate = {
             'task_success': ('import_tasks',
                 "new.status='succeeded' and old.status<>'succeeded'"),
             'audit_success': ('import_task_attempts',
                 "new.end_reason='succeeded' and old.end_reason is distinct from 'succeeded'"),
+            'batch_touch': ('import_batches', 'true'),
             'user_release': ('user_mutation_leases',
                 'new.lease_expires_at<old.lease_expires_at'),
             'task_expiry': ('import_tasks',
                 "new.status='succeeded' and new.lease_expires_at<old.lease_expires_at"),
         }[failure_point]
+        body = ('''if exists(select 1 from import_tasks where batch_id=new.id
+            and status='succeeded') then
+            raise exception 'injected fixed terminal failure'; end if;
+            return new;''' if failure_point == 'batch_touch' else
+            "raise exception 'injected fixed terminal failure';")
         with db.transaction() as cursor:
-            cursor.execute('''create function refuse_fixed_terminal_15()
+            cursor.execute(f'''create function refuse_fixed_terminal_15()
                 returns trigger language plpgsql as $$ begin
-                raise exception 'injected fixed terminal failure'; end $$''')
+                {body} end $$''')
             cursor.execute(f'''create trigger refuse_fixed_terminal_15
                 after update on {table} for each row when ({predicate})
                 execute function refuse_fixed_terminal_15()''')
@@ -1741,6 +2148,126 @@ def test_intent_serializes_with_direct_dependency_delete(
             where user_id=%s and task_id=%s and task_lease_version=%s
             and status='unresolved' ''',
             (user,attempt.task.task_id,attempt.lease_version)).fetchone()
+
+
+def _retained_publication_dependencies(cursor, key, batch_id):
+    retained = {
+        'import_objects': ('task_id=%s', (key[1],), 'task_id'),
+        'import_task_attempts': ('task_id=%s', (key[1],),
+                                 'task_id,lease_version'),
+        'import_tasks': ('id=%s', (key[1],), 'id'),
+        'import_batches': ('id=%s', (batch_id,), 'id'),
+        'users': ('id=%s', (key[0],), 'id'),
+        'import_publication_evidence': ('task_id=%s', (key[1],),
+                                        'user_id,task_id,task_lease_version'),
+        'import_publication_private_payloads': ('task_id=%s', (key[1],),
+                                                 'user_id,task_id,task_lease_version'),
+        'user_publication_gates': ('task_id=%s', (key[1],),
+                                   'user_id,task_id,task_lease_version'),
+        'import_publication_recovery_queue': ('task_id=%s', (key[1],),
+                                              'user_id,task_id,task_lease_version'),
+        'generation_reservations': ('task_id=%s', (key[1],), 'generation_id'),
+    }
+    return {table: cursor.execute(
+        f'select * from {table} where {where} order by {order}', values).fetchall()
+        for table, (where, values, order) in retained.items()}
+
+
+@pytest.mark.parametrize('mutation', ['delete', 'update'])
+def test_old_repeatable_read_snapshot_cannot_mutate_newly_gated_source(
+        memory_publication, mutation):
+    service, db, store, _, _, rag_scope, _, profile, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    key = (user, attempt.task.task_id, attempt.lease_version)
+
+    # Connection A establishes its old MVCC snapshot without taking the user
+    # lock. Connection B then commits the intent and gate before A's raw SQL.
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with db.transaction() as old:
+            old.execute('set transaction isolation level repeatable read')
+            old_pid = old.connection.info.backend_pid
+            assert old.execute('select 1 from import_objects where task_id=%s',
+                               (key[1],)).fetchone()
+            def reserve_new_gate():
+                with db.transaction() as current:
+                    new_pid = current.connection.info.backend_pid
+                live = service._issue_live_publication(rag_scope, attempt,
+                    [_point(rag_scope, attempt.task.document_id, 'old-snapshot')],
+                    event_vector=[1., 0., 0., 0.], event_profile=profile)
+                return new_pid, live
+            new_pid, live = workers.submit(reserve_new_gate).result(timeout=30)
+            assert new_pid != old_pid and live is not None
+            with db.transaction() as current:
+                before = _retained_publication_dependencies(
+                    current, key, attempt.task.batch_id)
+            assert all(before.values())
+            if mutation == 'delete':
+                sql = 'delete from import_objects where task_id=%s and user_id=%s'
+            else:
+                sql = '''update import_objects set size_bytes=size_bytes+1
+                    where task_id=%s and user_id=%s'''
+            with pytest.raises(psycopg.errors.RaiseException,
+                               match='READ COMMITTED') as blocked:
+                old.execute(sql, (key[1], user))
+            assert blocked.value.sqlstate == 'P0001'
+    with db.transaction() as cursor:
+        assert _retained_publication_dependencies(
+            cursor, key, attempt.task.batch_id) == before
+
+
+@pytest.mark.parametrize('dependency', ['audit', 'audit_update', 'task', 'batch', 'user'])
+def test_old_repeatable_read_snapshot_cannot_delete_newly_gated_parent(
+        memory_publication, dependency):
+    service, db, store, _, _, rag_scope, _, profile, user, _ = memory_publication
+    attempt = _task(db, store, user)
+    key = (user, attempt.task.task_id, attempt.lease_version)
+    delete = {
+        'audit': ('delete from import_task_attempts where task_id=%s '
+                  'and lease_version=%s', key[1:]),
+        'audit_update': ('''update import_task_attempts set
+            ended_at=clock_timestamp(),end_reason='failed' where task_id=%s
+            and lease_version=%s''', key[1:]),
+        'task': ('delete from import_tasks where id=%s and user_id=%s',
+                 (key[1], user)),
+        'batch': ('delete from import_batches where id=%s and user_id=%s',
+                  (attempt.task.batch_id, user)),
+        'user': ('delete from users where id=%s', (user,)),
+    }[dependency]
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        with db.transaction() as old:
+            old.execute('set transaction isolation level repeatable read')
+            old_pid = old.connection.info.backend_pid
+            assert old.execute('select 1 from import_task_attempts '
+                               'where task_id=%s and lease_version=%s',
+                               key[1:]).fetchone()
+            def issue_current():
+                with db.transaction() as current:
+                    new_pid = current.connection.info.backend_pid
+                live = service._issue_live_publication(rag_scope, attempt,
+                    [_point(rag_scope, attempt.task.document_id,
+                            'old-parent-snapshot')], event_vector=[1., 0., 0., 0.],
+                    event_profile=profile)
+                return new_pid, live
+            new_pid, live = workers.submit(issue_current).result(timeout=30)
+            assert new_pid != old_pid and live is not None
+            with db.transaction() as current:
+                before = _retained_publication_dependencies(
+                    current, key, attempt.task.batch_id)
+            assert all(before.values())
+            with pytest.raises((psycopg.errors.RaiseException,
+                                psycopg.errors.ForeignKeyViolation,
+                                psycopg.errors.SerializationFailure)) as blocked:
+                old.execute(*delete)
+            if dependency in ('audit', 'audit_update'):
+                assert blocked.value.sqlstate == 'P0001'
+                assert 'READ COMMITTED' in str(blocked.value)
+            elif dependency in ('task', 'batch') and blocked.value.sqlstate == 'P0001':
+                assert 'READ COMMITTED' in str(blocked.value)
+            else:
+                assert blocked.value.sqlstate in ('23503', '40001')
+    with db.transaction() as cursor:
+        assert _retained_publication_dependencies(
+            cursor, key, attempt.task.batch_id) == before
 
 
 @pytest.mark.parametrize('dependency',['source','audit'])

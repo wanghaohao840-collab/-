@@ -19,7 +19,7 @@ from app.import_document_publication import (
 from app.import_models import ImportTaskCreate
 from app.import_repository import PostgresImportTaskRepository
 from app.object_store import artifact_key
-from app.postgres_coordination import PostgresUserMutationCoordinator
+from app.postgres_coordination import PostgresUserMutationCoordinator, UserMutationLease
 from app.postgres_document_objects import DocumentPublicationError
 from app.postgres_history_document_witnesses import document_evidence
 from app.postgres_import_leases import PostgresImportLeaseRepository
@@ -57,14 +57,23 @@ def publication(shared_database, store):
     vectors = VectorGenerationService(PostgresVectorGenerationAuthority(db), raw)
     snapshots = PostgresSnapshotRepository(db)
     coordinator = PostgresUserMutationCoordinator(db)
-    lease = coordinator.acquire(user, 'bootstrap', lease_seconds=120)
-    assert lease is not None
     with db.transaction() as cursor:
         legacy_revision = cursor.execute(
             'select version_num from alembic_version').fetchone()['version_num']
     if legacy_revision == '20260929_12':
         # Build the rev-12 paired empty head using that revision's real SQL.
         # The current writer requires the rev-14 gate table.
+        with db.transaction() as cursor:
+            assert cursor.execute('select id from users where id=%s for update',
+                                  (user,)).fetchone() is not None
+            row = cursor.execute('''with t as materialized (select clock_timestamp() as now)
+                insert into user_mutation_leases
+                (user_id,owner,lease_token,lease_version,heartbeat_at,lease_expires_at)
+                select %s,%s,%s,1,t.now,t.now + interval '120 seconds' from t
+                returning user_id,owner,lease_token,lease_version,lease_expires_at''',
+                (user, 'bootstrap', uuid4())).fetchone()
+        lease = UserMutationLease(row['user_id'], row['owner'], row['lease_token'],
+                                  row['lease_version'], row['lease_expires_at'])
         generation = uuid4()
         empty_digest = hashlib.sha256(b'[]').hexdigest()
         with db.transaction() as cursor:
@@ -97,13 +106,27 @@ def publication(shared_database, store):
                 values (%s,%s,%s,%s,1,null,%s,1,1)''',
                 (*scope.key, generation))
     else:
+        lease = coordinator.acquire(user, 'bootstrap', lease_seconds=120)
+        assert lease is not None
         def bootstrap_history(cursor):
             snapshots.compare_and_swap_in_transaction(
                 cursor, user, 'history', dict(EMPTY_HISTORY), expected_version=0)
         vectors.publish_complete(scope, lease, vectors.authority.read_head(scope), [],
             domain_publish=bootstrap_history,
             snapshot_version=1)
-    coordinator.release(lease)
+    if legacy_revision == '20260929_12':
+        with db.transaction() as cursor:
+            assert cursor.execute('select id from users where id=%s for update',
+                                  (user,)).fetchone() is not None
+            released = cursor.execute('''with t as materialized (select clock_timestamp() as now)
+                update user_mutation_leases set lease_expires_at=t.now from t
+                where user_id=%s and owner=%s and lease_token=%s and lease_version=%s
+                and lease_expires_at > t.now returning user_id''',
+                (lease.user_id, lease.owner, lease.lease_token,
+                 lease.lease_version)).fetchone()
+            assert released is not None and released['user_id'] == user
+    else:
+        coordinator.release(lease)
     service = ImportDocumentPublicationService(db, store, vectors)
     try:
         yield service, db, store, vectors, snapshots, scope, user, other

@@ -1083,6 +1083,9 @@ class ImportMemoryPublicationService:
     def publish(self, rag_scope, attempt, new_rag_points, *, event_vector,
                 event_profile) -> ImportMemoryPublication:
         with self.database.transaction() as cursor:
+            cursor.execute('begin')
+            self.pair.imports.coordinator._isolation(cursor)
+            self.pair.imports.coordinator._lock_user(cursor, attempt.task.user_id)
             require_no_gate_in_transaction(cursor, attempt.task.user_id)
         plan = self._plan_intent(rag_scope, attempt, new_rag_points,
                                  event_vector=event_vector, event_profile=event_profile)

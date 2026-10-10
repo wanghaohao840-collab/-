@@ -620,6 +620,13 @@ def _validate_stored_slots(intent: dict, intent_hash: str, phase: str,
 
 def require_no_gate_in_transaction(cursor, user_id: str) -> None:
     """Call after locking the user row; missing authority tables fail closed."""
+    from psycopg.pq import TransactionStatus
+
+    if cursor.connection.info.transaction_status != TransactionStatus.INTRANS:
+        raise PublicationEvidenceError('Active caller-owned transaction required')
+    isolation = cursor.execute('show transaction_isolation').fetchone()
+    if isolation['transaction_isolation'] != 'read committed':
+        raise PublicationEvidenceError('READ COMMITTED mutation transaction required')
     if cursor.execute('''select 1 from user_publication_gates
         where user_id=%s and status='unresolved' limit 1''', (user_id,)).fetchone():
         raise PublicationEvidenceError('Unresolved import publication gates this user')

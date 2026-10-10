@@ -89,6 +89,8 @@ class PostgresUserMutationCoordinator:
         if not self._lock_user(cursor, user_id, skip=True):
             return None
         cursor.execute('select user_id from user_mutation_leases where user_id=%s for update', (user_id,))
+        from app.import_publication_evidence import require_no_gate_in_transaction
+        require_no_gate_in_transaction(cursor, user_id)
         row = cursor.execute(
             'select *, lease_expires_at > clock_timestamp() as live from user_mutation_leases where user_id=%s',
             (user_id,),

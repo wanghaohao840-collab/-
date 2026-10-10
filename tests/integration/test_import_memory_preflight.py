@@ -105,6 +105,7 @@ def _publish_old_history(service, db, store, rag_scope, user, document_id,
         coordinator.release(lease)
     pairing = service.documents.witnesses.read_current(rag_scope)
     with db.transaction() as cursor:
+        cursor.execute('begin')
         service.documents.witnesses.insert(cursor, rag_scope, pairing,
                                             document_evidence(user, changed))
     assert service.documents.witnesses.read_current(rag_scope).has_witness

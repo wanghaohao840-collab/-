@@ -15,7 +15,7 @@ from psycopg.types.json import Jsonb
 
 from app.import_models import ImportTaskCreate
 from app.import_repository import PostgresImportTaskRepository
-from app.postgres_coordination import PostgresUserMutationCoordinator
+from app.postgres_coordination import PostgresUserMutationCoordinator, UserMutationLease
 from app.postgres_coordination import MutationLeaseLost
 from app.postgres import PostgresDatabase
 from app.postgres_import_leases import ImportLeaseLost, PostgresImportLeaseRepository
@@ -78,6 +78,18 @@ def lease(db, user, owner='worker'):
     result = PostgresUserMutationCoordinator(db).acquire(user, owner)
     assert result is not None
     return result
+
+
+def _legacy_lease(db, user):
+    """Seed a rev-10 lease without calling a rev-14 guarded writer."""
+    owner, token = 'worker', uuid4()
+    with db.transaction() as cursor:
+        cursor.execute('select id from users where id=%s for update', (user,))
+        row = cursor.execute('''insert into user_mutation_leases
+            (user_id,owner,lease_token,lease_version,heartbeat_at,lease_expires_at)
+            values(%s,%s,%s,1,clock_timestamp(),clock_timestamp()+interval '60 seconds')
+            returning lease_expires_at''', (user, owner, token)).fetchone()
+    return UserMutationLease(user, owner, token, 1, row['lease_expires_at'])
 
 
 def _legacy_stage(db, scope, handle):
@@ -191,7 +203,7 @@ def test_receipt_migration_upgrades_unpublished_candidate(shared_database):
     identity = IndexIdentity('qdrant', 'docs',
                              EmbeddingProfile('simple', '', 'SimpleEmbedding', 'v1', 4))
     scope = VectorScope(owner, 'rag', 'documents', identity)
-    generation = _legacy_stage(first, scope, lease(first, owner))
+    generation = _legacy_stage(first, scope, _legacy_lease(first, owner))
     command.upgrade(Config('alembic.ini'), '20260929_11')
     with first.transaction() as cursor:
         row = cursor.execute('''select state,publication_revision,
@@ -216,7 +228,7 @@ def test_receipt_migration_rejects_existing_publication(shared_database, histori
                              EmbeddingProfile('simple', '', 'SimpleEmbedding', 'v1', 4))
     scope = VectorScope(owner, 'rag', 'documents', identity)
     authority = PostgresVectorGenerationAuthority(first)
-    handle = lease(first, owner)
+    handle = _legacy_lease(first, owner)
     old = _legacy_stage(first, scope, handle)
     _legacy_seal(first, old)
     with first.transaction() as cursor:

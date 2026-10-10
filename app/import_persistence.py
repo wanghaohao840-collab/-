@@ -15,12 +15,29 @@ class ImportStore:
         self.bind = "%s" if postgres else "?"
         self.postgres = postgres
 
+    def _guard_mutation(self, user_id):
+        if self.postgres:
+            from psycopg.pq import TransactionStatus
+            from app.import_publication_evidence import require_no_gate_in_transaction
+
+            if self.cursor.connection.info.transaction_status != TransactionStatus.INTRANS:
+                raise ValueError('Active caller-owned transaction required')
+            ImportPersistence.lock_user(self.cursor, user_id)
+            require_no_gate_in_transaction(self.cursor, user_id)
+
     def insert_batch(self, batch_id, user_id, timestamp):
+        self._guard_mutation(user_id)
         b = self.bind
         self.cursor.execute(f"insert into import_batches(id,user_id,created_at,updated_at) values({b},{b},{b},{b})",
                      (batch_id, user_id, timestamp, timestamp))
 
     def insert_tasks(self, tasks, timestamp):
+        tasks = list(tasks)
+        if tasks:
+            user_id = tasks[0].user_id
+            if any(task.user_id != user_id for task in tasks):
+                raise ValueError('all import tasks must belong to one user')
+            self._guard_mutation(user_id)
         b = self.bind
         for task in tasks:
             self.cursor.execute(f"""insert into import_tasks
@@ -68,6 +85,7 @@ class ImportStore:
                             (task_id, user_id)).fetchone()
 
     def cancel_queued(self, user_id, batch_id, task_id, timestamp):
+        self._guard_mutation(user_id)
         b = self.bind
         return self.cursor.execute(f"""update import_tasks set status='cancelled',stage='cancelled',
             next_attempt_at=null,cancel_requested_at={b},finished_at={b},updated_at={b}
@@ -76,6 +94,7 @@ class ImportStore:
             (timestamp, timestamp, timestamp, task_id, batch_id, user_id)).rowcount
 
     def request_running_cancel(self, user_id, batch_id, task_id, timestamp):
+        self._guard_mutation(user_id)
         b = self.bind
         return self.cursor.execute(f"""update import_tasks set cancel_requested_at={b},updated_at={b}
             where id={b} and batch_id={b} and user_id={b}
@@ -83,6 +102,7 @@ class ImportStore:
             (timestamp, timestamp, task_id, batch_id, user_id)).rowcount
 
     def retry_task(self, user_id, task_id, timestamp):
+        self._guard_mutation(user_id)
         b = self.bind
         return self.cursor.execute(f"""update import_tasks set status='queued',stage='queued',progress=0,
             auto_retry_count=0,manual_retry_count=manual_retry_count+1,
@@ -92,6 +112,7 @@ class ImportStore:
             (timestamp, task_id, user_id)).rowcount
 
     def retry_batch(self, user_id, batch_id, timestamp):
+        self._guard_mutation(user_id)
         b = self.bind
         return self.cursor.execute(f"""update import_tasks set status='queued',stage='queued',progress=0,
             auto_retry_count=0,manual_retry_count=manual_retry_count+1,
@@ -101,6 +122,7 @@ class ImportStore:
             (timestamp, user_id, batch_id)).rowcount
 
     def touch_batch(self, user_id, batch_id, timestamp):
+        self._guard_mutation(user_id)
         b = self.bind
         self.cursor.execute(f"update import_batches set updated_at={b} where id={b} and user_id={b}",
                      (timestamp, batch_id, user_id))
@@ -133,7 +155,10 @@ class ImportPersistence:
     def write(self, user_id):
         if self.postgres:
             with self.database.transaction() as cursor:
+                cursor.execute('begin')
                 self.lock_user(cursor, user_id)
+                from app.import_publication_evidence import require_no_gate_in_transaction
+                require_no_gate_in_transaction(cursor, user_id)
                 yield ImportStore(cursor, postgres=True)
         else:
             with transaction(self.database) as conn:
@@ -142,6 +167,9 @@ class ImportPersistence:
 
     @staticmethod
     def lock_user(cursor, user_id):
+        from app.postgres_coordination import PostgresUserMutationCoordinator
+
+        PostgresUserMutationCoordinator._isolation(cursor)
         if cursor.execute("select id from users where id=%s for update", (user_id,)).fetchone() is None:
             raise KeyError("import user was not found")
 
@@ -151,6 +179,8 @@ class ImportPersistence:
         if not self.postgres or cursor.connection.info.transaction_status != TransactionStatus.INTRANS:
             raise ValueError("caller-owned transaction required")
         self.lock_user(cursor, user_id)
+        from app.import_publication_evidence import require_no_gate_in_transaction
+        require_no_gate_in_transaction(cursor, user_id)
         return ImportStore(cursor, postgres=True)
 
 

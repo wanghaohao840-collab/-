@@ -1,4 +1,5 @@
 """Real database authority for staged import attempts."""
+import hashlib
 import io
 from dataclasses import replace
 from uuid import uuid4
@@ -9,6 +10,7 @@ import psycopg
 from app.postgres_import_leases import ImportLeaseLost, PostgresImportLeaseRepository
 from app.postgres_import_artifacts import PostgresImportArtifactService
 from app.import_uploads import ImportUpload
+from app.object_store import artifact_key
 from tests.integration.test_postgres_import_artifacts import fixture
 from tests.integration.test_postgres_auth_sessions import shared_database
 from tests.integration.test_s3_object_store import store
@@ -399,10 +401,24 @@ def test_migration_preserves_legacy_rows_and_audit_constraints(fixture):
     from alembic import command
     from alembic.config import Config
     from psycopg.errors import CheckViolation,UniqueViolation,RaiseException
-    db,_,_,owner,other,_=fixture
-    task=submit(fixture).tasks[0]
+    db,_,store,owner,other,_=fixture
+    task_id,batch_id,document_id=(str(uuid4()) for _ in range(3))
+    content=b'source'
+    digest=hashlib.sha256(content).hexdigest()
+    ref=store.put_immutable(owner,artifact_key(owner,'imports',task_id,'.txt',digest),content).ref
     with db.transaction() as cursor:
-        cursor.execute("update import_tasks set status='running',total_attempt_count=7 where id=%s",(task.task_id,))
+        now=cursor.execute('select clock_timestamp() as now').fetchone()['now'].isoformat()
+        cursor.execute('''insert into import_batches(id,user_id,created_at,updated_at)
+            values(%s,%s,%s,%s)''',(batch_id,owner,now,now))
+        cursor.execute('''insert into import_tasks(id,batch_id,user_id,document_id,
+            original_name,file_suffix,size_bytes,staged_relative_path,status,stage,
+            progress,total_attempt_count,created_at,updated_at)
+            values(%s,%s,%s,%s,'0.txt','.txt',%s,'','running','queued',0,7,%s,%s)''',
+            (task_id,batch_id,owner,document_id,len(content),now,now))
+        cursor.execute('''insert into import_objects
+            (task_id,user_id,bucket,object_key,version_id,sha256,size_bytes)
+            values(%s,%s,%s,%s,%s,%s,%s)''',
+            (task_id,owner,store.bucket,ref.key,ref.version_id,ref.sha256,ref.size_bytes))
     command.upgrade(Config('alembic.ini'),'head')
     command.upgrade(Config('alembic.ini'),'head')
     repo=PostgresImportLeaseRepository(db)

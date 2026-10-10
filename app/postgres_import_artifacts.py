@@ -128,3 +128,5 @@ class PostgresImportArtifactService:
             "select id from users where id=%s and status='active' for update", (user_id,)
         ).fetchone() is None:
             raise FileNotFoundError(user_id)
+        from app.import_publication_evidence import require_no_gate_in_transaction
+        require_no_gate_in_transaction(cursor, user_id)

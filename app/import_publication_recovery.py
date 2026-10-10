@@ -94,7 +94,6 @@ def seed_missing_queue_in_transaction(cursor, key, task_expiry, user_expiry):
 
 def close_expired_evidence_attempt_in_transaction(cursor, key, frozen_tuple):
     """Close only the original expired ordinary tuple; leave proof and gate intact."""
-    from app.postgres_import_leases import PostgresImportLeaseRepository
 
     user, task_id, version = _exact_key(key)
     if (frozen_tuple['id'],frozen_tuple['user_id'],frozen_tuple['lease_version']) != (
@@ -163,7 +162,9 @@ def close_expired_evidence_attempt_in_transaction(cursor, key, frozen_tuple):
         lease_expires_at=least(lease_expires_at,%s) where id=%s and user_id=%s
         and lease_version=%s and lease_token=%s''',
         (now,task_id,user,version,audit['lease_token']))
-    PostgresImportLeaseRepository._touch(cursor,held)
+    cursor.execute('''update import_batches set updated_at=%s
+        where id=%s and user_id=%s''',
+        (now.isoformat(), held['batch_id'], user))
     return True
 
 
@@ -208,6 +209,57 @@ class PostgresImportPublicationRecoveryRepository:
                 or rows[3]['phase'] in ('proved_succeeded','abandoned')):
             raise RecoveryLeaseLost('Exact unresolved recovery authority changed')
         return rows
+
+    @_report_unavailable
+    def schedule_unknown(self, key: AttemptKey) -> str:
+        """Advance only an existing exact pending recovery queue observation."""
+        try:
+            _exact_key(key)
+            with self.database.transaction() as cursor:
+                ordinary, task, audit, header, gate, _, queue = self._capture_rows(
+                    cursor, key)
+                same_attempt = (
+                    (task['claimed_by'], task['lease_token'], task['lease_version'],
+                     task['user_lease_token'], task['user_lease_version']) ==
+                    (audit['worker_id'], audit['lease_token'], audit['lease_version'],
+                     audit['user_lease_token'], audit['user_lease_version'])
+                    and (header['worker_id'], header['task_lease_token'],
+                         header['user_lease_token'], header['user_lease_version']) ==
+                    (audit['worker_id'], audit['lease_token'],
+                     audit['user_lease_token'], audit['user_lease_version']))
+                unresolved = (gate['status'] == 'unresolved'
+                    and gate['resolved_at'] is None
+                    and header['phase'] not in ('proved_succeeded', 'abandoned'))
+                resolved = (gate['status'] == 'resolved'
+                    and gate['resolved_at'] is not None
+                    and header['phase'] in ('proved_succeeded', 'abandoned'))
+                if (not same_attempt or not (unresolved or resolved)
+                        or (queue['state'] == 'resolved') != resolved
+                        or (unresolved and
+                            (ordinary['owner'], ordinary['lease_token'],
+                             ordinary['lease_version']) !=
+                            (audit['worker_id'], audit['user_lease_token'],
+                             audit['user_lease_version']))):
+                    raise RecoveryUnavailable('Exact recovery queue is unavailable')
+                if queue['state'] != 'pending':
+                    return queue['state']
+                now = cursor.execute('select clock_timestamp() as now').fetchone()['now']
+                due = max(queue['due_at'], task['lease_expires_at'],
+                          ordinary['lease_expires_at'], now)
+                updated = cursor.execute('''update import_publication_recovery_queue
+                    set due_at=%s,queue_version=queue_version+1,
+                        reason_code='unknown'
+                    where user_id=%s and task_id=%s and task_lease_version=%s
+                      and state='pending' and queue_version=%s
+                      and due_at=%s and claim_token is null
+                      and claim_expires_at is null returning state''',
+                    (due, key.user_id, key.task_id, key.task_lease_version,
+                     queue['queue_version'], queue['due_at'])).fetchone()
+                if updated is None:
+                    raise RecoveryUnavailable('Exact recovery queue is unavailable')
+                return updated['state']
+        except RecoveryLeaseLost as error:
+            raise RecoveryUnavailable('Exact recovery queue is unavailable') from error
 
     @_report_unavailable
     def claim_next(self, worker_id: str, lease_seconds: int = 60) -> RecoveryClaim | None:
