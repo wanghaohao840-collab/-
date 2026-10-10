@@ -1,14 +1,24 @@
 ---
 id: "2026-10-10-isolated-import-runtime-01"
 title: "Filter PostgreSQL import authority by trusted tenant in SQL"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: []
 base-commit: "38bc8bcabd90e23a7518375d7e2087a399f0eec9"
-owner: "unassigned"
+owner: "Sol High"
 ---
 
 # Task Packet: SQL tenant selection for import and recovery
+
+## Accepted delivery — 2026-10-11
+
+- Task01 is done. Sol High implemented the three selectors and their tests. Astra High independently returned Spec PASS / Quality PASS for the final five-file snapshot; root independently verified the complete evidence and file boundary.
+- Final verification: expanded GREEN n3, 28 passed in 65.79 seconds; full three-file regression n3, 194 passed in 944.33 seconds. Both actual exits are 0 with zero failures, errors or skips. There are 222 unique test identities; the separate 15-pass environment-free unit run is already represented in GREEN and is not added again.
+- Evidence: `.runtime/isolated-import-runtime/p1-green-n3-completion.json`, `p1-regression-n3-completion.json`, and `p1-delivery-root-n3.json`. Independent final report: `p1-final-accepted-astra-n4.md`, SHA256 `d911fcc66e1c920034cf8e57752fe9836e8049fb03dffe846b14286f81004cd5`.
+- GREEN XML SHA256 `526df5564f8e84cd560a48b0551c50a3d6820fc8e1e0a608c014b083582b9b69`; regression XML SHA256 `b2f77f4b56095685bb5d81c7f2f4041f40897e5a1fff5e9d443c055cc618b419`.
+- Only the two authorized repositories differ from the accepted 74-file baseline; its other 72 files and all 15 pre-existing modified paths retain their raw bytes. The helper and two test files are the authorized additions.
+- Docker restoration retained all container and volume identities. Final target Qdrant port is 49742, PostgreSQL 59497 and S3 59498; protected source Qdrant remained exited. The original blocked/interrupted handoff below is historical and superseded by this completed verification.
+- Scope: SQL tenant selection only. Runtime configuration, authentication facades, API, Worker, complete feature integration and production acceptance remain pending. The source delivery commit is recorded in the root commit-binding receipt after this document is committed.
 
 ## Goal
 
@@ -55,7 +65,7 @@ The ordinary selector first ranks eligible active users, then runs one short tra
 
 ### External prerequisites
 
-- For implementation tests only: a disposable PG service on loopback 59497, versioned S3 on 59498, and target Qdrant on 59539. The recorded observation is `.runtime/distributed-cutover/isolated-runtime-services-root-20261010-n1.json`; recheck exact service identities, volumes, ports and health immediately before testing. Protected source Qdrant remains stopped and untouched.
+- For implementation tests only: a disposable PG service on loopback 59497, versioned S3 on 59498, and target Qdrant on 49742. The earlier recorded observation `.runtime/distributed-cutover/isolated-runtime-services-root-20261010-n1.json` used target port 59539; after Docker restoration the same target container ID and volume use loopback 49742. Recheck exact service identities, volumes, current ports and health immediately before testing. Protected source Qdrant remains stopped and untouched.
 - The test launcher/root must provide `POSTGRES_TEST_URL`, `S3_TEST_ENDPOINT`, `S3_TEST_ACCESS_KEY`, `S3_TEST_SECRET_KEY`, and `GENERATION_QDRANT_TEST_URL` through the existing private environment mechanism. Do not write secret values, `Config.Env`, or raw credential URLs to public documentation or logs.
 - Use only `D:\python_self_agent\venv\Scripts\python.exe`. The root grants the sole pytest lane; no worker or reviewer runs pytest before that GO.
 
@@ -139,7 +149,7 @@ If implementation requires anything outside this boundary, report a reality conf
 
 ## Test and verification commands
 
-Run serially from the repository root, only after root owns and grants the sole pytest lane. The private launcher must check exact disposable service IDs/volumes and set the five fixture environment keys for PG 59497, S3 59498 and **target** Qdrant 59539 without logging secret values. Create only the ignored XML output directory first: `New-Item -ItemType Directory -Force .runtime/isolated-import-runtime`. Do not use `-k` or a narrowed collection filter. Do not run an old fixture runner tied to a previous Qdrant port.
+Run serially from the repository root, only after root owns and grants the sole pytest lane. The new private launcher must check exact disposable service IDs/volumes and set the five fixture environment keys for PG 59497, S3 59498 and **target** Qdrant 49742 without logging secret values. Create only the ignored XML output directory first: `New-Item -ItemType Directory -Force .runtime/isolated-import-runtime`. Do not use `-k` or a narrowed collection filter. Do not run an old fixture runner tied to a previous Qdrant port.
 
 ```powershell
 D:\python_self_agent\venv\Scripts\python.exe -c 'import os,subprocess,sys; e=os.environ.copy(); [e.pop(k,None) for k in ("POSTGRES_TEST_URL","S3_TEST_ENDPOINT","S3_TEST_ACCESS_KEY","S3_TEST_SECRET_KEY","GENERATION_QDRANT_TEST_URL")]; sys.exit(subprocess.call([sys.executable,"-m","pytest","-q","tests/test_import_tenant_selection.py","--basetemp=.runtime/pytest-isolated-runtime-p1-unit-noenv-n1","--junitxml=.runtime/isolated-import-runtime/p1-unit-noenv-n1.xml"],env=e))'
@@ -181,32 +191,67 @@ Stop and report `blocked` if:
 
 Do not improvise around a conflict. Append the **Reality-conflict report** from `docs/agent-workflow/README.md` and wait for packet revision.
 
-## Implementation handoff
+## Resumption amendment, 2026-10-11
 
-Claude Code must replace this placeholder with:
+The user authorized restoration of the exact disposable services. Root observed the same four container identities and volumes, with PostgreSQL at 59497, S3 at 59498, target Qdrant now at 49742, and protected source Qdrant exited. This packet is back in progress. The new ignored private runner `run-p1-sol-n3.py` must recheck those identities, volumes, ports and health before each test run. Earlier blocked evidence remains historical; no prior XML or runner output is overwritten. The final expanded GREEN and full regression still require actual exit and zero-skip XML evidence.
 
-```markdown
 ## Implementation handoff
 
 - Packet: `2026-10-10-isolated-import-runtime-01`
-- Status: `done | blocked`
+- Status: `blocked` — external Docker prerequisite unavailable; implementation and final integration acceptance remain pending.
 - Delivered:
-  - concise description of the independently useful result
+  - Strict optional tenant allowlists for ordinary claim, ordinary expiry recovery, and publication recovery claim. Nonempty filters are parameter-bound in SQL before candidate lock; exact task/user pairs are rechecked before writes. Unfiltered calls retain their original public positional prefix.
 - Files changed:
-  - `path` — purpose of change
+  - `app/postgres_import_leases.py` — filter ordinary and expiry candidates, bind exact task/user locks and rereads.
+  - `app/import_publication_recovery.py` — filter ranked and final locked recovery queue selection.
+  - `app/import_tenant_selection.py` — pure strict allowlist validator.
+  - `tests/test_import_tenant_selection.py` — environment-free transaction-bomb validation.
+  - `tests/integration/test_isolated_import_tenant_selection.py` — disposable-service filter, drift, fairness, queue capture and fresh-clock cases.
+  - This assigned packet — status and evidence handoff only.
 - Interfaces added or changed:
-  - exact symbol/signature/data shape, or `none`
+  - `PostgresImportLeaseRepository.claim_next(worker_id, lease_seconds=60, *, allowed_user_ids: frozenset[str] | None = None)`.
+  - `PostgresImportLeaseRepository.recover_expired(limit=100, *, allowed_user_ids: frozenset[str] | None = None)`.
+  - `PostgresImportPublicationRecoveryRepository.claim_next(worker_id: str, lease_seconds: int = 60, *, allowed_user_ids: frozenset[str] | None = None) -> RecoveryClaim | None`.
+  - `validate_allowed_user_ids(value: frozenset[str] | None) -> frozenset[str] | None`.
 - Acceptance evidence:
-  - [x] criterion — evidence
+  - [x] Strict malformed/empty input validation before any transaction — unit-noenv n2, 15 passed, zero skipped.
+  - [x] Earlier integration set covering excluded ordinary/expiry and recovery rows, candidate-pair drift, capture and rotation — GREEN n1, 26 passed, zero skipped, against exact disposable resources before they became unavailable.
+  - [ ] Final expanded integration set with filtered expiry lock-wait/fresh-clock and two-allowed blocked-user fairness — tests added, currently unrun.
+  - [ ] Required unfiltered regression and final Astra review on frozen final tests — pending.
 - Verification:
-  - `exact command` — PASS/FAIL (actual exit, counts and XML path)
+  - `D:\python_self_agent\venv\Scripts\python.exe .runtime\isolated-import-runtime\run-p1-sol-n1.py red n3` — expected RED, actual exit 1; 26 failures due missing selector contract, zero errors/skips; `.runtime/isolated-import-runtime/p1-red-n3.xml`.
+  - `D:\python_self_agent\venv\Scripts\python.exe .runtime\isolated-import-runtime\run-p1-sol-n1.py unit-noenv n2` — PASS, actual exit 0; 15 passed, zero skipped; `.runtime/isolated-import-runtime/p1-unit-noenv-n2.xml`; five fixture environment keys removed only from child process.
+  - `D:\python_self_agent\venv\Scripts\python.exe .runtime\isolated-import-runtime\run-p1-sol-n1.py green` — PASS, actual exit 0; 26 passed, zero skipped; `.runtime/isolated-import-runtime/p1-green-n1.xml`. This precedes the two final concurrency cases; its integration test SHA256 was `481E496E0FD4E5D0E5A235F07F4CA635FC9D72219C0AB0AC923CC4422C21A382`.
+  - `D:\python_self_agent\venv\Scripts\python.exe .runtime\isolated-import-runtime\run-p1-sol-n1.py regression` — INTERRUPTED after start; no actual exit, XML or completion record, only `.runtime/isolated-import-runtime/p1-regression-n1-before.json` and three-byte log. It is not a passing regression.
+  - `D:\python_self_agent\venv\Scripts\python.exe .runtime\isolated-import-runtime\run-p1-sol-n1.py green n2` — PRETEST BLOCKED; `docker inspect` could not connect to the Docker Desktop Linux pipe. No pytest child, XML or completion record.
+  - `D:\python_self_agent\venv\Scripts\python.exe -m py_compile app/postgres_import_leases.py app/import_publication_recovery.py app/import_tenant_selection.py tests/test_import_tenant_selection.py tests/integration/test_isolated_import_tenant_selection.py` — actual exit 0.
+  - `git -c core.whitespace=cr-at-eol diff --check -- app/postgres_import_leases.py app/import_publication_recovery.py docs/agent-workflow/task-packets/2026-10-10-isolated-import-runtime/01-tenant-selection.md` — actual exit 0.
 - Scope confirmation:
-  - changed only allowed files: yes/no
-  - forbidden areas untouched: yes/no
+  - changed only allowed tracked/untracked packet files: yes; ignored private runner and evidence are outside the source diff.
+  - forbidden areas untouched: yes; the 15 pre-existing dirty paths remain intact by completed-run before/after raw SHA evidence.
 - Deviations:
-  - `none` or precise approved deviation
+  - GREEN n1 predates two added cases, and regression n1 was interrupted at a turn boundary. Neither is counted as final acceptance.
 - Residual risks/follow-ups:
-  - `none` or precise item not included in this packet
+  - Restore exact disposable Docker services, run expanded GREEN and full regression with unique outputs and zero skips, then obtain final independent Astra review.
+  - Current expanded integration file SHA256: `A319F2D9A558E6C07012983A86F100777EDEE9EE5807CB13B34FE9A45129C81D`. Source SHA256: ordinary `C27ECF41D3551BE3632DD761335D2EC314E0B73DB186A1CCAA33F0B8C8994BE3`; recovery `C14DE04DB0A036EEF0000A288989F9C5CADEFB0FC30E3910C92D1EA4F182ED37`; helper `801A1FA27C1F5189EB990A734E1CCFAB3B6F8D12F95EC5FB9BFB8240A6F4CB11`.
 - Commit:
-  - `<hash>` or `not committed`
-```
+  - `not committed`; no push. Product/runtime acceptance is not claimed.
+
+## Reality-conflict report
+
+- Packet: `2026-10-10-isolated-import-runtime-01`
+- Status: blocked
+- Expected by packet:
+  - The four recorded disposable Docker identities remain inspectable; PostgreSQL, versioned S3 and target Qdrant are healthy while protected source Qdrant is exited. All new and regression integration tests use those exact resources.
+- Observed in repository:
+  - The approved runner `.runtime/isolated-import-runtime/run-p1-sol-n1.py` could not begin GREEN n2 because `docker inspect` could not connect to `npipe:////./pipe/dockerDesktopLinuxEngine`; `docker info --format '{{.ServerVersion}}'` failed with the same missing pipe. No n2 GREEN XML or completion record exists.
+  - Earlier RED n3: exit 1, 26 selector-contract failures, zero fixture errors/skips; unit-noenv n2: exit 0, 15 passed, zero skips. GREEN n1: exit 0, 26 passed, zero skips, before the two added concurrency cases. Regression n1 has only its before snapshot and a three-character progress log, with no live runner process, XML or completion receipt; it is interrupted and cannot be counted.
+- Impact:
+  - The newly added filtered expiry lock-wait/fresh-clock and two-allowed recovery fairness cases, plus the required full regression, cannot be accepted without verifying exact disposable services. Starting or stopping services is outside this packet's change boundary.
+- Work completed before pause:
+  - Implemented strict validation and SQL-bound tenant selection in `app/postgres_import_leases.py`, `app/import_publication_recovery.py` and `app/import_tenant_selection.py`; added service-independent and integration tests in the two owned new test files.
+  - All five owned Python files passed `py_compile`; `git -c core.whitespace=cr-at-eol diff --check` passed. The 15 pre-existing dirty files were preserved by test-runner before/after SHA checks on completed runs.
+- Recommended resolution:
+  - Restore Docker availability and revalidate the exact recorded identities, volumes, ports and health; then set this packet back to `in_progress` and run new unique GREEN and regression outputs under the sole pytest lane. No plan or interface change is needed.
+- Decision required:
+  - Will the exact disposable Docker services be restored for completion of this packet's acceptance tests?

@@ -21,6 +21,7 @@ from app.import_publication_proof import (
 from app.import_memory_publication import ImportMemoryPublicationError
 from app.postgres_history_document_witnesses import HistoryDocumentWitnessError
 from app.postgres_coordination import PostgresUserMutationCoordinator, _duration, _identity
+from app.import_tenant_selection import validate_allowed_user_ids
 
 
 class RecoveryLeaseLost(RuntimeError):
@@ -262,28 +263,38 @@ class PostgresImportPublicationRecoveryRepository:
             raise RecoveryUnavailable('Exact recovery queue is unavailable') from error
 
     @_report_unavailable
-    def claim_next(self, worker_id: str, lease_seconds: int = 60) -> RecoveryClaim | None:
+    def claim_next(self, worker_id: str, lease_seconds: int = 60, *,
+                   allowed_user_ids: frozenset[str] | None = None) -> RecoveryClaim | None:
         _duration(lease_seconds)
         if not _identity(worker_id):
             raise ValueError('Recovery worker ID must be nonempty')
+        allowed_user_ids = validate_allowed_user_ids(allowed_user_ids)
+        if allowed_user_ids == frozenset():
+            return None
+        allowed = sorted(allowed_user_ids) if allowed_user_ids is not None else None
+        ranked_filter = ' and q.user_id = ANY(%s::text[])' if allowed is not None else ''
+        final_filter = ' and q.user_id = ANY(%s::text[])' if allowed is not None else ''
+        selection_params = (allowed, allowed) if allowed is not None else ()
         for _ in range(3):
             with self.database.transaction() as cursor:
                 self.coordinator._isolation(cursor)
-                candidate = cursor.execute('''with ranked as (
+                candidate = cursor.execute(f'''with ranked as (
                     select q.user_id,q.task_id,q.task_lease_version,
                       row_number() over(partition by q.user_id
                         order by q.queued_at,q.task_id,q.task_lease_version) as position,
                       s.last_claimed_at
                     from import_publication_recovery_queue q
                     join import_publication_recovery_schedule s on s.user_id=q.user_id
-                    where (q.state='pending' and q.due_at<=clock_timestamp())
+                    where ((q.state='pending' and q.due_at<=clock_timestamp())
                       or (q.state='claimed' and q.claim_expires_at<=clock_timestamp()))
+                      {ranked_filter})
                     select q.* from ranked r join import_publication_recovery_queue q
                       on q.user_id=r.user_id and q.task_id=r.task_id
                       and q.task_lease_version=r.task_lease_version
                     where r.position=1 and
                       ((q.state='pending' and q.due_at<=clock_timestamp())
                         or (q.state='claimed' and q.claim_expires_at<=clock_timestamp()))
+                      {final_filter}
                       and exists(select 1 from user_publication_gates g where
                         g.user_id=q.user_id and g.task_id=q.task_id
                         and g.task_lease_version=q.task_lease_version
@@ -293,9 +304,12 @@ class PostgresImportPublicationRecoveryRepository:
                         and l.task_lease_version=q.task_lease_version
                         and l.expires_at>clock_timestamp())
                     order by r.last_claimed_at,r.user_id
-                    for update of q skip locked limit 1''').fetchone()
+                    for update of q skip locked limit 1''', selection_params).fetchone()
                 if candidate is None:
                     return None
+                if (allowed_user_ids is not None
+                        and candidate['user_id'] not in allowed_user_ids):
+                    continue
                 now = cursor.execute('select clock_timestamp() as now').fetchone()['now']
                 if (candidate['state']=='pending' and candidate['due_at']>now
                     or candidate['state']=='claimed' and candidate['claim_expires_at']>now):

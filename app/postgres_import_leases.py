@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from psycopg.pq import TransactionStatus
 
 from app.import_models import ImportTaskRecord
+from app.import_tenant_selection import validate_allowed_user_ids
 from app.import_repository import InvalidImportTransition, _task_from_row
 from app.object_store import ObjectRef
 from app.postgres_coordination import (
@@ -87,20 +88,29 @@ class PostgresImportLeaseRepository:
         if changed is None:
             raise ImportLeaseLost('Import batch changed before touch')
 
-    def claim_next(self, worker_id, lease_seconds=60):
+    def claim_next(self, worker_id, lease_seconds=60, *,
+                   allowed_user_ids: frozenset[str] | None = None):
         _duration(lease_seconds)
         if not _identity(worker_id):
             raise ValueError('worker_id must be a nonempty string')
+        allowed_user_ids = validate_allowed_user_ids(allowed_user_ids)
+        if allowed_user_ids == frozenset():
+            return None
+        allowed = sorted(allowed_user_ids) if allowed_user_ids is not None else None
+        user_filter = ' and u.id = ANY(%s::text[])' if allowed is not None else ''
+        candidate_params = (allowed,) if allowed is not None else ()
         with self.database.transaction() as cursor:
             candidates = cursor.execute(f'''select u.id from users u
                 left join import_user_schedule s on s.user_id=u.id
-                where u.status='active' and exists(select 1 from import_tasks t
+                where u.status='active'{user_filter} and exists(select 1 from import_tasks t
                     where t.user_id=u.id and {_DUE})
                 and not exists(select 1 from import_tasks r where r.user_id=u.id and r.status='running')
-                order by s.last_claimed_at nulls first,u.id''').fetchall()
+                order by s.last_claimed_at nulls first,u.id''', candidate_params).fetchall()
         # Separate short transactions do not retain busy users' locks. No LIMIT:
         # a long prefix of busy mutation owners cannot starve an eligible user.
         for candidate in candidates:
+            if allowed_user_ids is not None and candidate['id'] not in allowed_user_ids:
+                continue
             with self.database.transaction() as cursor:
                 locked = cursor.execute('select id from users where id=%s for update skip locked',
                                         (candidate['id'],)).fetchone()
@@ -118,9 +128,14 @@ class PostgresImportLeaseRepository:
                 lease = self.coordinator.acquire_in_transaction(cursor, candidate['id'], worker_id, lease_seconds)
                 if lease is None:
                     continue
-                cursor.execute('select id from import_tasks where id=%s for update', (task['id'],))
-                row = cursor.execute(f'select t.* from import_tasks t where t.id=%s and {_DUE}', (task['id'],)).fetchone()
-                if row is None:
+                cursor.execute('select id from import_tasks where id=%s and user_id=%s for update',
+                               (task['id'], candidate['id']))
+                row = cursor.execute(f'''select t.* from import_tasks t where t.id=%s
+                    and t.user_id=%s and {_DUE}''',
+                    (task['id'], candidate['id'])).fetchone()
+                if (row is None or row['user_id'] != candidate['id']
+                        or (allowed_user_ids is not None
+                            and row['user_id'] not in allowed_user_ids)):
                     # Unexpected unfenced writer: roll back acquisition as well.
                     raise ImportLeaseLost('Import eligibility changed during claim')
                 now = _now(cursor)
@@ -465,16 +480,25 @@ class PostgresImportLeaseRepository:
                 raise InvalidImportTransition('Attempt already started')
             return self._finish(cursor,attempt,row,'queued','unstarted',progress=0,unstarted=True)
 
-    def recover_expired(self,limit=100):
+    def recover_expired(self,limit=100, *,
+                        allowed_user_ids: frozenset[str] | None = None):
         if type(limit) is not int or not 1 <= limit <= 10000:
             raise ValueError('limit must be an integer between 1 and 10000')
+        allowed_user_ids = validate_allowed_user_ids(allowed_user_ids)
+        if allowed_user_ids == frozenset():
+            return 0
+        allowed = sorted(allowed_user_ids) if allowed_user_ids is not None else None
+        candidate_filter = ' and user_id = ANY(%s::text[])' if allowed is not None else ''
         with self.database.transaction() as cursor:
             self.coordinator._isolation(cursor)
-            candidates = cursor.execute("select id,user_id from import_tasks where status='running' and lease_version>0 order by user_id,id").fetchall()
+            candidates = cursor.execute(f"select id,user_id from import_tasks where status='running' and lease_version>0{candidate_filter} order by user_id,id",
+                                        (allowed,) if allowed is not None else ()).fetchall()
         recovered = 0
         for candidate in candidates:
             if recovered>=limit:
                 break
+            if allowed_user_ids is not None and candidate['user_id'] not in allowed_user_ids:
+                continue
             with self.database.transaction() as cursor:
                 # A pool may return a different connection than the scan used.
                 # Reject autocommit/isolation drift before taking any locks.
@@ -484,9 +508,13 @@ class PostgresImportLeaseRepository:
                 if cursor.execute('select status from users where id=%s',(candidate['user_id'],)).fetchone()['status']!='active':
                     continue
                 cursor.execute('select user_id from user_mutation_leases where user_id=%s for update',(candidate['user_id'],))
-                cursor.execute('select id from import_tasks where id=%s for update',(candidate['id'],))
-                row = cursor.execute("select * from import_tasks where id=%s and status='running' and lease_version>0",(candidate['id'],)).fetchone()
-                if row is None:
+                cursor.execute('select id from import_tasks where id=%s and user_id=%s for update',
+                               (candidate['id'],candidate['user_id']))
+                row = cursor.execute("select * from import_tasks where id=%s and user_id=%s and status='running' and lease_version>0",
+                                     (candidate['id'],candidate['user_id'])).fetchone()
+                if (row is None or row['user_id'] != candidate['user_id']
+                        or (allowed_user_ids is not None
+                            and row['user_id'] not in allowed_user_ids)):
                     continue
                 audit = cursor.execute('''select * from import_task_attempts where task_id=%s and user_id=%s
                     and lease_version=%s and lease_token=%s and worker_id=%s and user_lease_token=%s
