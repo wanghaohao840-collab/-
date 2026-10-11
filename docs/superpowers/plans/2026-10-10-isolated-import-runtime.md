@@ -73,7 +73,7 @@ Use a separate unfiltered branch for `None` or a nullable bound array; do not in
 
 **Files:** Create `app/isolated_import_runtime.py`, `tests/test_isolated_import_runtime.py`.
 
-**Interfaces:** Produce immutable `IsolatedImportSettings.from_env(role: Literal['api','worker'])`, `trusted_user_ids: frozenset[str]`, `schema`, `bucket`, `rag_collection`, `episode_collection`, `rag_profile`, `episode_profile`, and numeric timing fields; `open_isolated_runtime(settings) -> IsolatedImportRuntime`; `runtime.recovery_ready() -> bool`; `runtime.ordinary_ready(user_id: str) -> bool`.
+**Interfaces:** Produce immutable `IsolatedImportSettings.from_env(role: Literal['api','worker'], env=None)`, `trusted_user_ids: frozenset[str]`, `schema`, `bucket`, `rag_collection`, `episode_collection`, `rag_profile`, `episode_profile`, and numeric timing fields; `ProviderReadiness`; `open_isolated_runtime(settings, *, provider_probe=None) -> IsolatedImportRuntime`; `runtime.recovery_ready() -> bool`; `runtime.ordinary_ready(user_id: str) -> bool`. The reviewed packet fixes the full types and environment keys.
 
 - [ ] Write red unit cases for disabled default, missing/contradictory schema, bucket, collection, profile or allowlist, empty allowlist, unsafe retained/protected resource IDs, timeout inequality, and API versus Worker resource ownership. Assert configuration errors before network calls.
 - [ ] Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/test_isolated_import_runtime.py --basetemp=.pytest-tmp-isolated-runtime-p2-n1`; expected RED on missing isolated module only.
@@ -83,13 +83,15 @@ Use a separate unfiltered branch for `None` or a nullable bound array; do not in
 database_identity_ok = check_schema_identity(settings.schema)
 recovery_ready = database_identity_ok
 ordinary_ready = (
-    recovery_ready and object_store.check_ready()
-    and rag_provider_ready() and episode_provider_ready()
+    recovery_ready and versioned_object_store_ready()
+    and exact_profile_provider_report_ready(provider_probe)
     and attested_paired_baseline(user_id, settings.rag_profile, settings.episode_profile)
 )
 ```
 
-The `attested_paired_baseline` function must read published heads/receipts, History witness, and Memory for the configured identity; missing is an error, never inferred empty. Document exact repository calls and errors in this task's packet after Task 01 is accepted. Recovery must remain available if ordinary providers or baseline are unavailable.
+These names describe the decision, not existing repository APIs. Task 02 supplies no embedding engine: a missing provider hook makes ordinary readiness false. Tasks 03/04 must supply a real provider adapter proving availability and exact profiles before ordinary admission. A synthetic hook verifies only the readiness composition contract. `S3ObjectStore.check_ready()` returns None on success, so its successful call must be mapped to a boolean rather than used directly in an `and` expression.
+
+The paired baseline proof reads published heads/receipts, History witness, and Memory for the configured identity; missing is an error, never inferred empty. Capture complete per-user database authority in short single-statement snapshots before and after external reads; validate final snapshot/document pairing itself and bind public episode membership/payloads to final receipt data. Versions alone and equal invalid before/after states cannot pass. The packet requires mutation and ABA tests plus an unfiltered full new-test-file run. Recovery remains available if ordinary providers or baseline are unavailable.
 - [ ] Run focused tests and a real-schema readiness integration test added to this task's owned test file; require active isolated PG identity and do not touch protected resources.
 
 ### Task 03: Shared auth and persisted import facades
