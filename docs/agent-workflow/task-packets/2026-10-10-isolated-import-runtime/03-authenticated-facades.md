@@ -1,7 +1,7 @@
 ---
 id: "2026-10-10-isolated-import-runtime-03"
 title: "Shared sessions and transaction-bound isolated import admission"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["2026-10-10-isolated-import-runtime-02"]
 base-commit: "44e97cf755da7360059342b7b9e9279062f8b9e1"
@@ -57,7 +57,7 @@ Create only:
 Modify only:
 
 - `app/isolated_import_runtime.py`: opaque readiness stamp, transaction-cursor comparison and public lazy storage-client accessor; retain accepted settings/ordinary/recovery semantics.
-- `app/postgres_import_artifacts.py`: optional keyword-only transaction callback at the existing active-user/gate-to-batch boundary. Defaults preserve all current calls.
+- `app/postgres_import_artifacts.py`: optional keyword-only transaction callback at the existing active-user/gate-to-batch boundary; narrow `InvalidImportUpload(ValueError)` subtype for known upload inspection/binary validation failures, preserving original messages, base catches and ImportLimitError. Defaults preserve all current calls and SQL/lock order.
 - `app/import_publication_evidence.py`: unresolved-gate exception subtype emitted only by the exact authoritative gate branch; preserve base exception compatibility and all SQL/lock/fence behavior.
 
 No other source/tests/routes, dependencies, schema, selectors or publication/recovery mechanics are owned. Existing test files may be run, never edited. Root owns packet/plan/progress bookkeeping. Return a reality conflict rather than expanding this boundary.
@@ -80,6 +80,7 @@ No other source/tests/routes, dependencies, schema, selectors or publication/rec
 ### Artifact and gate seams
 
 - Extend `PostgresImportArtifactService.submit_uploads(user_id,uploads, *, admission_recheck: Callable[[object,str],None] | None = None)`. If supplied, call it once after `_require_active_locked(cursor,user_id)` and before batch/task/reference mutation, inside the same cursor/transaction. Never consume streams again on callback failure or silently retry the whole request. None retains old behavior.
+- Static implementation correction S2 additionally permits `InvalidImportUpload(ValueError)` at known upload inspection/binary validation sites, retaining the existing exception message and ImportLimitError codes/status for direct artifact callers. The facade maps only this subtype to sanitized invalid_upload/400; runtime identity/configuration and storage/proof ValueError remain 503. Do not wrap S3 or SQL operations as upload validation or edit the shared import_uploads module.
 - Add `UnresolvedPublicationGate(PublicationEvidenceError)`. Emit it only where the existing exact-user unresolved gate query actually finds a row. No lock/query changes, no user data in its public error. Existing base catches still work.
 
 ### Import facade and readback
@@ -133,3 +134,11 @@ First Astra review `p3-plan-astra-n1.md` required four corrections: NOWAIT sessi
 ## Stop conditions and handoff
 
 Stop and report the repository reality-conflict template for stale constructors, unmet predecessor, lock-order conflict, invalid verification or required edits outside the six owned files. Draft status must not be bypassed. After ready implementation, handoff must enumerate exact source/test SHA, actual commands/counts/XML/log/exit hashes, generated resource IDs, acceptance observations, preserved dirt, deviations and residual provider/Worker/API limits. Root alone finalizes done/commit/push after independent acceptance.
+
+## Accepted implementation and verification
+
+Task03 is accepted on the six exact raw source/test hashes recorded by `p3-delivery-root-n1.json` (SHA256 `c6e0a490e706b594373b304f685ac48d8e390c76afca64d1e77e4ab433617c3b`). Independent Astra final `p3-final-accepted-astra-n4.md` is SPEC PASS / QUALITY PASS, SHA256 `75beedac1701b4a03a3a9f2367bb8ca63f65ab7daaad9156dca1afa532733e06`. Sol handoff `p3-sol-handoff-n1.md` SHA256 `18a6b84228fbb962e62d45188e964edfd1959e1630ac120f38f54d4a590fff2e` binds exact commands, logs, XML and actual exits.
+
+Final unit n3: 17 passed; real n3: 24 passed; unfiltered full n1: 41 passed; regression n1: 112 passed. All pytest/runner actual exits 0, zero failures/errors/skips; unit and real IDs are disjoint and their union exactly full. Full and regression total 153 unique tests, with identical source/test/runner bytes across stages and 15 preserved dirty paths unchanged. Genuine preimplementation RED n1 (two missing-module failures, actual exit 1), real n1 preflight failure and real n2 fixture SQL failure remain historical evidence, not acceptance.
+
+S1 close-during-final-cursor-proof and S2 identity/storage ValueError classification were corrected and independently reviewed. T1 close test now requires genuine stamp issuance, consumption and real callback entry before close. All 72 generated resource triples have created/removed receipt pairs; this is recorded lifecycle evidence, not a new live absence inventory. Controlled helper-level fence/reference ABA cases and synthetic provider hooks are labeled accordingly. No real provider, Worker/API, process restart, retained-vector migration or production acceptance follows. Source commit/push binding is recorded separately by root after this gate.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field, fields
 import json
 import os
@@ -13,6 +14,7 @@ from uuid import UUID
 
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.errors import InvalidSchemaName, UndefinedTable
+from psycopg.pq import TransactionStatus
 
 from app.object_store import S3ObjectStore
 from app.postgres import PostgresDatabase
@@ -342,7 +344,11 @@ _AUTHORITY_SQL = """select
 
 def _capture_authority(database: PostgresDatabase, user_id: str) -> dict:
     with database.transaction() as cursor:
-        return cursor.execute(_AUTHORITY_SQL, (user_id,) * 9).fetchone()
+        return _capture_authority_cursor(cursor, user_id)
+
+
+def _capture_authority_cursor(cursor, user_id: str) -> dict:
+    return cursor.execute(_AUTHORITY_SQL, (user_id,) * 9).fetchone()
 
 
 def _one(rows: list[dict], **selector) -> dict:
@@ -480,6 +486,18 @@ def _final_matches(final: dict, user_id: str, rag_scope: VectorScope,
         return False
 
 
+class IsolatedAdmissionRejected(RuntimeError):
+    """Admission proof is missing, stale, or not issued by this runtime."""
+
+    def __init__(self) -> None:
+        super().__init__("isolated_admission_rejected")
+
+
+@dataclass(frozen=True, eq=False)
+class IsolatedAdmissionStamp:
+    """Opaque, identity-bound one-attempt capability; authority stays in its owner."""
+
+
 class IsolatedImportRuntime:
     def __init__(self, settings: IsolatedImportSettings, database: PostgresDatabase,
                  provider_probe: Callable[[], ProviderReadiness] | None):
@@ -492,6 +510,7 @@ class IsolatedImportRuntime:
         self._raw: QdrantVectorStore | None = None
         self._closed = False
         self._lifecycle_lock = Lock()
+        self._admissions: dict[IsolatedAdmissionStamp, tuple[str, dict]] = {}
 
     def __enter__(self) -> IsolatedImportRuntime:
         return self
@@ -504,6 +523,7 @@ class IsolatedImportRuntime:
             if self._closed:
                 return
             self._closed = True
+            self._admissions.clear()
             for owned in (self._raw.client if self._raw is not None else None,
                           self._store.client if self._store is not None else None,
                           self.database):
@@ -555,21 +575,24 @@ class IsolatedImportRuntime:
                                               retry_delays=())
             return self._store, self._raw
 
-    def ordinary_ready(self, user_id: str) -> bool:
+    def storage_clients(self) -> tuple[S3ObjectStore, QdrantVectorStore]:
+        return self._providers()
+
+    def _validated_authority(self, user_id: str) -> dict | None:
         if not isinstance(user_id, str) or user_id not in self.trusted_user_ids or not self.recovery_ready():
-            return False
+            return None
         for _ in range(2):
             try:
                 before = _capture_authority(self.database, user_id)
                 if before["account"] is None or before["account"]["status"] != "active":
-                    return False
+                    return None
                 if self._provider_probe is None:
-                    return False
+                    return None
                 report = self._provider_probe()
                 if (type(report) is not ProviderReadiness or report.available is not True
                         or report.rag_profile != self.settings.rag_profile
                         or report.episode_profile != self.settings.episode_profile):
-                    return False
+                    return None
                 store, raw = self._providers()
                 store.check_ready()
                 rag_identity = IndexIdentity("qdrant", self.settings.rag_collection, self.settings.rag_profile)
@@ -581,7 +604,7 @@ class IsolatedImportRuntime:
                 episode_scope = VectorScope(user_id, "episode", "episodes", episode_identity)
                 history = PostgresSnapshotRepository(self.database).read(user_id, "history")
                 if history is None:
-                    return False
+                    return None
                 witness = PostgresHistoryDocumentWitnessRepository(self.database, store)
                 pairing = witness.read_current(rag_scope)
                 evidence = document_evidence(user_id, history.data)
@@ -594,10 +617,51 @@ class IsolatedImportRuntime:
                 after = _capture_authority(self.database, user_id)
                 if before == after and _final_matches(after, user_id, rag_scope, episode_scope,
                                                        history, pairing, evidence, retained, operation, points):
-                    return True
+                    return deepcopy(after)
             except Exception:
                 continue
-        return False
+        return None
+
+    def ordinary_ready(self, user_id: str) -> bool:
+        return self._validated_authority(user_id) is not None
+
+    def prepare_admission(self, user_id: str) -> IsolatedAdmissionStamp | None:
+        authority = self._validated_authority(user_id)
+        if authority is None:
+            return None
+        with self._lifecycle_lock:
+            if self._closed or len(self._admissions) >= 128:
+                return None
+            stamp = IsolatedAdmissionStamp()
+            self._admissions[stamp] = (user_id, authority)
+            return stamp
+
+    def discard_admission(self, stamp: IsolatedAdmissionStamp) -> None:
+        with self._lifecycle_lock:
+            if type(stamp) is IsolatedAdmissionStamp:
+                self._admissions.pop(stamp, None)
+
+    def recheck_admission(self, cursor, user_id: str,
+                          stamp: IsolatedAdmissionStamp) -> None:
+        with self._lifecycle_lock:
+            if self._closed or type(stamp) is not IsolatedAdmissionStamp:
+                raise IsolatedAdmissionRejected()
+            issued = self._admissions.pop(stamp, None)
+        if issued is None or issued[0] != user_id:
+            raise IsolatedAdmissionRejected()
+        try:
+            if cursor.connection.info.transaction_status != TransactionStatus.INTRANS:
+                raise IsolatedAdmissionRejected()
+            isolation = cursor.execute("show transaction_isolation").fetchone()
+            if isolation["transaction_isolation"] != "read committed":
+                raise IsolatedAdmissionRejected()
+            if _capture_authority_cursor(cursor, user_id) != issued[1]:
+                raise IsolatedAdmissionRejected()
+            with self._lifecycle_lock:
+                if self._closed:
+                    raise IsolatedAdmissionRejected()
+        except Exception as error:
+            raise IsolatedAdmissionRejected() from error
 
 
 def open_isolated_runtime(settings: IsolatedImportSettings, *,

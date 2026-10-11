@@ -4,7 +4,7 @@
 - Approved design: `docs/superpowers/specs/2026-10-10-isolated-import-runtime-design.md`
 - Reviewed commit: `38bc8bcabd90e23a7518375d7e2087a399f0eec9`
 - Review date: 2026-10-10
-- Verdict: Tasks 01–02 are accepted and done at source commits `d81f0c3494d02bca51fb312c602d215edf6f98a0` and `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`. Task03 corrective contract passed independent Astra n2 review and is ready for Sol High implementation. Tasks04–07 remain proposed work, not ready packets.
+- Verdict: Tasks 01–02 are accepted and done at source commits `d81f0c3494d02bca51fb312c602d215edf6f98a0` and `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`. Task03 exact six-file implementation passed independent Astra final SPEC PASS / QUALITY PASS and is done; root source-commit binding follows. Tasks04–07 remain proposed work, not ready packets.
 
 ## Repository evidence
 
@@ -59,7 +59,7 @@
 |---|---|---:|---|---|
 | `01-tenant-selection.md` | none | no | `app/postgres_import_leases.py`, `app/import_publication_recovery.py`, optional `app/import_tenant_selection.py`, `tests/test_import_tenant_selection.py`, `tests/integration/test_isolated_import_tenant_selection.py` | SQL tenant prefilter for ordinary claim, expiry, and recovery |
 | `02-runtime-readiness.md` | `01-tenant-selection.md` (done) | no | create `app/isolated_import_runtime.py`, `tests/test_isolated_import_runtime.py` | Reviewed explicit isolated configuration, resource ownership, and independent recovery/ordinary readiness |
-| `03-authenticated-facades.md` (ready) | `02-runtime-readiness.md` (done) | no | create sessions/service/new facade test; narrow runtime/artifact/evidence seams | Shared sessions, same-transaction admission proof and no-engine published-document readback; Astra n2 READY |
+| `03-authenticated-facades.md` (done) | `02-runtime-readiness.md` (done) | no | sessions/service/new facade test; narrow runtime/artifact/evidence seams | Shared sessions, atomic admission and no-engine published readback; Astra final SPEC/QUALITY PASS |
 | Tasks 04–07 | serial predecessors per source plan | no | not yet assigned | New packets only after predecessor acceptance and current-code review |
 
 ## Packet readiness audit

@@ -47,3 +47,31 @@ Task02 接受范围仅为只读就绪组合，synthetic provider hook 不能证�
 Astra High 首轮发现登录清理过期会话与导入用户锁之间的实际 FK 锁环，以及读回删除栅栏、对象引用 ABA、准入凭证失败回收和错误分类缺口。修订采用同事务 NOWAIT 会话重验、最终栅栏/引用/字节摘要证明、原对象身份的一次消费与 finally 回收，以及回滚释放锁后精确用户 gate 分类。六文件边界和 Task05 SharedSession/token 消费契约均已同步。
 
 独立 n2 报告 `p3-plan-astra-n2.md` 判定 READY，无剩余阻塞项，SHA256 `a67ed9ab4525eb59020cfce41ecc11039096ca5f49ade36c5184baca9a9c8994`。根实现前基线 `p3-baseline-root-n1.json` 核验 78 项源码、15 个预存改动原始字节以及三个新文件尚不存在。任务包已设 ready，分配 Sol High；下一步先生成新测试并记录真实缺模块 RED，再实现和验证。此处只有任务包验收，没有 Task03 源码或测试通过证据。
+
+任务包文档提交 `5646d155176902131db212d2310978cf9e46feb1` 已推送，实际退出 0，输出 `44e97cf..5646d15`；回执 `p3-ready-push-root-n1.json`，尚无独立远端读取核验。
+
+随后独立 `ls-remote` 实际退出 0，远端隔离分支精确匹配 `5646d155176902131db212d2310978cf9e46feb1`；回执 `p3-remote-check-root-n1.json`，`remote_read_verified=true`。这仅验证该文档提交与祖先在隔离分支的边界，不代表 main 合并或 Task03 未提交源码已交付。
+
+实施前 RED n1 已由 Sol 执行，两个新 facade 模块尚不存在。pytest 和 wrapper 实际退出 1，2 tests / 2 failures / 0 errors / 0 skipped；失败分别为两个缺模块导入。XML SHA256 `d8fbb6c8a5920588a69be859422c73d6972b24d8bc86c39ba0ccb59a2ea590f4`，日志 `a887bd778c06c7760e74bc969f40842906efeaef79cae019f5afcff313415e51`。根 checker 实际退出 0，`p3-red-root-n1.json` 绑定退出码、日志/XML/runner 和 81 项测试前后相同字节。没有 live fixture 调用。这是实际 RED 历史，不是 GREEN 通过证据；随后已授权 Sol 实现，仍须冻结后完整测试与独立实现审查。
+
+Task03 初始实现冻结 n1 后，无服务测试实际退出 0，11 passed、19 deselected，无失败/错误/跳过，根 `p3-unit-n1-root-check.json` 核验日志/XML/字节及 15 个预存改动。该轮只有局部证据，不覆盖随后修改的测试或源码。
+
+Astra 静态实现审查 `p3-implementation-astra-n1.md` 为 CHANGES REQUIRED，SHA256 `ee092a7bd1796563d6261b202cb94bf88c79c868394afb3f218393b06f4d9d34`：S1 要求 cursor 权威比较完成后重新以生命周期锁验证未关闭，防止已借出连接在 close 后完成准入；S2 要求身份漂移和非上传验证 ValueError 返回 503，收窄 400 上传错误边界。根另要求补强实际 manifest 不匹配、栅栏及引用 ABA 测试。已授权同一六文件范围内修正；尚未执行 Task03 真实服务测试、完整新文件或相关回归，未提交源码或验收 Task03。
+
+S1/S2 修正后冻结 n3，无服务 unit n2 实际退出 0，17 passed、24 deselected，无失败/错误/跳过；根 `p3-unit-n2-root-check.json` 核验原始收据。real n1 因 PG 已停止在 preflight 退出 1，没有 pytest/XML；模型额度中断后的进程核对无残留 pytest。后续核验四个容器 ID/name/volume 未变，仅恢复指定 PG/S3/目标 Qdrant，源 Qdrant 仍停止。real n2 before 收据记录 59497/59498/52565 及通过的服务前检，当前结果待实际完成。
+
+Astra 复审 `p3-implementation-astra-n2.md`（SHA256 `363f5eb55e0a3dfe8bcc0d837d812d709371f8e765ce39375ee01d51a854d811`）确认 S1/S2 源码静态通过，仍要求修正一项测试：真实 close 钩子在 prepare 阶段提前触发，未确保实际 stamp 已签发消费并进入最终事务回调。保持本轮测试字节冻结；结束后只修测试再复验。完整新文件和相关回归尚未运行；Task03 源码未提交、未验收。
+
+real n2 最终实际 pytest/runner 退出 1，24 tests 中 23 passed、1 failed，无 errors/skips，322.84 秒；before/after 六文件字节不变。XML SHA256 `4e548532713d20d22677768673d50bb9fb10139729ba39a48a0aaf623be9a155`，日志 `7418c5ae371664c908eaa4480e1d2bfad159f12026bbc7c7888f4f48a436db85`。唯一失败为 equal-invalid-fence 测试插入漏填 NOT NULL created_at，属于测试夹具 SQL；已授权只修新测试文件的时间字段、close 回调覆盖和拒绝前无 I/O 显式计数，再冻结复验。23 passed 不作为最终整包通过证据。
+
+最终测试修订冻结 n5（`p3-sol-freeze-n5.json`，SHA256 `6d22adba177b6c8639c8261789eea4c1027f0278a069b37b33dcd4c65a623f38`）；五源码不变，新测试 SHA256 `cb46a7899a8cf165d014ae727e96a9ad1e04618638f0e7b4391e6971a37cd205`。Astra 聚焦复核 n3 为 STATIC PASS（报告 `p3-implementation-astra-n3.md`，SHA256 `7f0a9be4e937af5911ef1ade3d7b85f53bcb0876712f37860d1a4b21770aece2`），T1/夹具/无 I/O 计数问题已闭合，仍不替代最终实际测试及验收。
+
+同 n5 字节的 unit n3 实际退出 0，17 passed；real n3 实际退出 0，24 passed，237.86 秒，无 failure/error/skip。根 `p3-unit-n3-root-check.json` / `p3-real-n3-root-check.json` 均实际退出 0。真实 XML SHA256 `7e3b799bd6bd1e471f6e29279a55a31b193632ff2e9835d989cb98b8150ae382`，日志 `dc8c2380c1d48aaf05e043c568e8b435c74dcbe28cfaf64e0a3503d662899e74`。完整新文件与相关回归待完成，源码仍未提交。
+
+full n1 完整新文件实际退出 0，41 passed，236.09 秒；regression n1 实际退出 0，112 passed，440.06 秒，均无失败/错误/跳过。根 stage checker 和合并 checker 均退出 0，`p3-delivery-root-n1.json` SHA256 `c6e0a490e706b594373b304f685ac48d8e390c76afca64d1e77e4ab433617c3b`：unit+real 精确等于 full，full 与 regression 不重叠，共 153 个不同测试；各阶段源/测试/runner 字节相同，15 个预存改动未变。完整 XML SHA256 `0d679cc68aa9cc4c886e5cfdc575eecc41a317645e9482d7b728fbbe04f8f89e`，回归 XML `d0dcbd3f5f9560b47b9af5eea3bb366e5fb44a1d02577a68e6472fa9ee872cd0`。
+
+资源生命周期根 checker 退出 0，`p3-resource-lifecycle-root-n1.json` 绑定 72 组 created/removed 对应收据，SHA256 `e3d573fc87031275b1ede24f4b67c3e83f4af397d8c2c3fc2108b1b9f6a2f0ac`。此项是清理记录核验，不是重新查询服务证明 live absence。完整证据已交 Astra 最终 Spec/Quality 验收；源码尚未提交。本阶段仅证明 synthetic provider 组合下的认证导入 facade，不证明真实嵌入 provider、独立 Worker/API、进程重启或生产切换。
+
+## 2026-10-11：Task03 独立验收通过
+
+Astra 最终 `p3-final-accepted-astra-n4.md` 为 SPEC PASS / QUALITY PASS，SHA256 `75beedac1701b4a03a3a9f2367bb8ca63f65ab7daaad9156dca1afa532733e06`。独立解析原始 XML/日志/pytest 及 wrapper 退出、83 项 before/after 字节与当前源码，确认 41 个完整新文件用例 + 112 个回归用例共 153 个不同用例，全部通过，15 个保护文件未变。S1/S2/T1 问题闭合，精确六文件 Task03 已验收并设 done。根接下来提交/推送授权源码与对应文档；Task04 独立 Worker 仍仅进行只读接口核对，尚无 ready 任务包或实现。

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app.import_models import ImportBatchSummary, ImportLimits, ImportTaskCreate
 from app.import_repository import PostgresImportTaskRepository
 from app.import_uploads import (
     STAGING_CHUNK_BYTES,
+    ImportLimitError,
     ImportUpload,
     StreamSizeCounter,
     inspect_upload,
@@ -21,6 +22,10 @@ from app.postgres import PostgresDatabase
 
 class ImportPublicationError(RuntimeError):
     """A task has no usable source object reference."""
+
+
+class InvalidImportUpload(ValueError):
+    """A caller-owned upload name, suffix, or binary stream is malformed."""
 
 
 class PostgresImportArtifactService:
@@ -36,14 +41,20 @@ class PostgresImportArtifactService:
         self.repository = PostgresImportTaskRepository(database)
 
     def submit_uploads(
-        self, user_id: str, uploads: Iterable[ImportUpload]
+        self, user_id: str, uploads: Iterable[ImportUpload], *,
+        admission_recheck: Callable[[object, str], None] | None = None,
     ) -> ImportBatchSummary:
         # The identity is supplied by the authorized caller. Deny it before
         # touching a caller-owned stream or object storage.
         self._require_active(user_id)
         upload_list = list(uploads or [])
         validate_file_count(len(upload_list), self.limits)
-        pending = [inspect_upload(upload) for upload in upload_list]
+        try:
+            pending = [inspect_upload(upload) for upload in upload_list]
+        except ImportLimitError:
+            raise
+        except ValueError as error:
+            raise InvalidImportUpload(str(error)) from None
         batch_id = str(uuid.uuid4())
         counter = StreamSizeCounter(self.limits)
         creates: list[ImportTaskCreate] = []
@@ -66,6 +77,8 @@ class PostgresImportArtifactService:
         with self.database.transaction() as cursor:
             # Keep user lock first; the repository reuses this same cursor.
             self._require_active_locked(cursor, user_id)
+            if admission_recheck is not None:
+                admission_recheck(cursor, user_id)
             now = cursor.execute("select clock_timestamp() as now").fetchone()["now"].isoformat()
             summary = self.repository.create_batch_in_transaction(
                 cursor, user_id, creates, now=now
@@ -86,7 +99,12 @@ class PostgresImportArtifactService:
             chunk = item.upload.stream.read(STAGING_CHUNK_BYTES)
             if not chunk and isinstance(chunk, (bytes, bytearray, memoryview)):
                 break
-            file_bytes = counter.check(chunk, file_bytes)
+            try:
+                file_bytes = counter.check(chunk, file_bytes)
+            except ImportLimitError:
+                raise
+            except ValueError as error:
+                raise InvalidImportUpload(str(error)) from None
             content.extend(bytes(chunk))
         raw = bytes(content)
         del content

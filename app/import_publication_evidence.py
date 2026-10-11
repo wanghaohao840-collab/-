@@ -49,6 +49,10 @@ class PublicationEvidenceError(ValueError):
     """A requested intent or durable proof is invalid or no longer current."""
 
 
+class UnresolvedPublicationGate(PublicationEvidenceError):
+    """This exact user's unresolved publication gate is present."""
+
+
 class PublicationEvidenceUnknown(RuntimeError):
     """A commit response was lost; callers must stop before external I/O."""
 
@@ -629,7 +633,7 @@ def require_no_gate_in_transaction(cursor, user_id: str) -> None:
         raise PublicationEvidenceError('READ COMMITTED mutation transaction required')
     if cursor.execute('''select 1 from user_publication_gates
         where user_id=%s and status='unresolved' limit 1''', (user_id,)).fetchone():
-        raise PublicationEvidenceError('Unresolved import publication gates this user')
+        raise UnresolvedPublicationGate('unresolved_publication_gate')
 
 
 class PostgresImportPublicationEvidenceRepository:
