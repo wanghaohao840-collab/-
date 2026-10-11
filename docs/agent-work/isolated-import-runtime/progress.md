@@ -28,7 +28,7 @@ Astra High 首轮独立审查为 Spec / Quality CHANGES REQUIRED，要求修复�
 
 Astra n2 复审仍为 CHANGES REQUIRED：查询参数覆盖和编码主机名可绕过普通 PostgreSQL 身份拒绝，直接构造非字符串 DSN 仍逃逸合同错误类型。报告 `.runtime/isolated-import-runtime/p2-implementation-astra-n2.md`，SHA256 `f1548973810fb2f27bb3e87331a6338a2fa03ab1d25ad476e12a4ce447fa9e02`。额外迁移头和客户端生命周期竞争已静态核销；新增真实 ABA、头变更、有界重试和固定对象版本测试仍需最终通过证据。下一轮须修正这些问题及夹具后，重新冻结、重跑和复审。
 
-## 2026-10-11：Task02 已验收，待精确源码提交
+## 2026-10-11：Task02 已验收并提交
 
 Sol High 完成显式隔离配置、独立 PG 资源所有权、恢复与普通就绪探针。配置按 libpq 有效身份拒绝普通资源重用，迁移 ledger 必须恰好一项；生命周期锁避免并发创建/关闭泄漏。单条 SQL 捕获完整数据库权威，外部读取后完整重验最多一次，最终数据校验拒绝 Memory 行丢失及 invalid-valid-invalid ABA。
 
@@ -39,3 +39,5 @@ Astra 最终独立 Spec PASS / Quality PASS：`p2-final-accepted-astra-n4.md`，
 n3 真实测试在 Docker 故障期间未进入 pytest。恢复中仅保留并重命名 Docker 的失效套接字目录，未重置配置或卷；原目录为 `run.p2-recovery-20261011-preserved`、`run.p2-recovery-n2-20261011-preserved` 和 `docker-secrets-engine.p2-recovery-20261011-preserved`。恢复收据 `p2-docker-recovery-root-n2.json`。最终 PG/S3/目标 Qdrant 端口为 59497/59498/49889；源 Qdrant 仍停止。此前失败记录继续保留。
 
 Task02 接受范围仅为只读就绪组合，synthetic provider hook 不能证明真实嵌入服务或原子 admission。下一步为 Task03 共享认证与导入 facade 的当前代码核对、任务包和独立审查；真实 provider、独立 Worker、进程重启、完整迁移及生产切换均未验收。
+
+源码提交为 `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`，父提交 `35d34888715b9a90bc5abfb8022353cd8f095ae3`，严格包含两个新源码/测试和三个 scoped 交付文档。`p2-commit-binding-root-n4.json` 确认源码 Git blob 与实际测试 raw SHA 完全一致。默认代理推送失败；仅对子进程去除失效代理后重试实际退出 0，输出确认 `d81f0c3..18e1f1b` 推送到授权分支。回执 `p2-push-direct-root-n5.json`。推送后独立远端读取退出 128（连接重置），`p2-remote-check-root-n5.json` 明确 `remote_read_verified=false`；不宣称独立远端 HEAD 核验成功。本进度更新的后续文档提交不改变验收源码。
