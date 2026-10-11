@@ -41,3 +41,9 @@ n3 真实测试在 Docker 故障期间未进入 pytest。恢复中仅保留并�
 Task02 接受范围仅为只读就绪组合，synthetic provider hook 不能证明真实嵌入服务或原子 admission。下一步为 Task03 共享认证与导入 facade 的当前代码核对、任务包和独立审查；真实 provider、独立 Worker、进程重启、完整迁移及生产切换均未验收。
 
 源码提交为 `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`，父提交 `35d34888715b9a90bc5abfb8022353cd8f095ae3`，严格包含两个新源码/测试和三个 scoped 交付文档。`p2-commit-binding-root-n4.json` 确认源码 Git blob 与实际测试 raw SHA 完全一致。默认代理推送失败；仅对子进程去除失效代理后重试实际退出 0，输出确认 `d81f0c3..18e1f1b` 推送到授权分支。回执 `p2-push-direct-root-n5.json`。推送后独立远端读取退出 128（连接重置），`p2-remote-check-root-n5.json` 明确 `remote_read_verified=false`；不宣称独立远端 HEAD 核验成功。本进度更新的后续文档提交不改变验收源码。
+
+## 2026-10-11：Task03 任务包已通过独立复审
+
+Astra High 首轮发现登录清理过期会话与导入用户锁之间的实际 FK 锁环，以及读回删除栅栏、对象引用 ABA、准入凭证失败回收和错误分类缺口。修订采用同事务 NOWAIT 会话重验、最终栅栏/引用/字节摘要证明、原对象身份的一次消费与 finally 回收，以及回滚释放锁后精确用户 gate 分类。六文件边界和 Task05 SharedSession/token 消费契约均已同步。
+
+独立 n2 报告 `p3-plan-astra-n2.md` 判定 READY，无剩余阻塞项，SHA256 `a67ed9ab4525eb59020cfce41ecc11039096ca5f49ade36c5184baca9a9c8994`。根实现前基线 `p3-baseline-root-n1.json` 核验 78 项源码、15 个预存改动原始字节以及三个新文件尚不存在。任务包已设 ready，分配 Sol High；下一步先生成新测试并记录真实缺模块 RED，再实现和验证。此处只有任务包验收，没有 Task03 源码或测试通过证据。

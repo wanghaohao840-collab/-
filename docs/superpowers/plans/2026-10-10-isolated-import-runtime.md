@@ -27,7 +27,7 @@ All implementation packets are serial (`parallel-safe: false`). Packet 01 is ind
 |---|---|---|
 | 01 — tenant SQL selection | Modify `app/postgres_import_leases.py`, `app/import_publication_recovery.py`; optionally create `app/import_tenant_selection.py`; create `tests/test_import_tenant_selection.py` and `tests/integration/test_isolated_import_tenant_selection.py` | SQL prefilter for ordinary, expiry, recovery; no predecessor |
 | 02 — trusted configuration/readiness | Create `app/isolated_import_runtime.py`, `tests/test_isolated_import_runtime.py` | Strict opt-in identity and separate ordinary/recovery readiness; after 01 |
-| 03 — PG auth and import facades | Create `app/distributed_import_sessions.py`, `app/distributed_import_service.py`, `tests/integration/test_distributed_import_facades.py` | Session-compatible auth, artifact submission, tenant-bound persisted reads and gate mapping; after 02 |
+| 03 — PG auth and import facades | Create sessions/service/facade test; draft additionally proposes narrow isolated runtime, artifact admission callback and typed evidence gate seams | Shared-session auth, transaction-bound artifact submission, tenant-bound persisted reads and precise gate mapping; after 02 and independent amendment review |
 | 04 — independent Worker | Create `app/distributed_import_worker.py`, `scripts/run_isolated_import_worker.py`, `tests/integration/test_distributed_import_worker.py` | One-shot C publication, bounded heartbeat/attempt, independent filtered recovery; after 03 |
 | 05 — restricted API | Create `api/isolated_import_app.py`, `tests/integration/test_isolated_import_api.py` | Exact route allowlist, cookie/CSRF, upload/readback; after 04 |
 | 06 — real process acceptance | Create `tests/integration/test_isolated_import_processes.py`, `scripts/verify_isolated_import_runtime.ps1`; evidence under a new `docs/agent-work/isolated-import-runtime/` directory | Actual two API/PID Worker restart and fault windows; after 05 |
@@ -96,9 +96,9 @@ The paired baseline proof reads published heads/receipts, History witness, and M
 
 ### Task 03: Shared auth and persisted import facades
 
-**Files:** Create `app/distributed_import_sessions.py`, `app/distributed_import_service.py`, `tests/integration/test_distributed_import_facades.py`.
+**Files:** Create `app/distributed_import_sessions.py`, `app/distributed_import_service.py`, `tests/integration/test_distributed_import_facades.py`. The current-code draft packet additionally proposes narrowly modifying `app/isolated_import_runtime.py` (opaque final-tuple admission stamp and cursor comparison), `app/postgres_import_artifacts.py` (optional transaction callback), and `app/import_publication_evidence.py` (typed unresolved gate). This amendment must pass independent review before implementation.
 
-**Interfaces:** Produce a session facade with `login(username: str, password: str) -> str`, `get_session(token: str | None) -> UserSession`, `validate_csrf(token: str | None, csrf_token: str | None) -> UserSession`, `logout(token: str | None) -> None`; an import facade with `submit_uploads(session: UserSession, uploads: list[ImportUpload]) -> ImportBatchSummary`, `list_batches(user_id: str, ...)`, `get_batch(user_id: str, batch_id: str)`, `get_task(user_id: str, task_id: str)`, and `read_published_document(user_id: str, document_id: str)`; typed fail-closed errors distinguish 403, 409 `needs_reconciliation`/`retryable=false`, and 503.
+**Interfaces:** The draft consumes existing `SharedSession`, because current `UserSession` requires local runtime/assistant fields. Produce `DistributedImportSessions(runtime)` with `login(username,password)->str`, `get_session(token)->SharedSession`, `validate_csrf(token,csrf_token)->SharedSession`, `logout(token)->None`; `DistributedImportService(runtime,sessions)` with `submit_uploads(token,csrf_token,uploads)->ImportBatchSummary`, token-resolved `list_batches/get_batch/get_task/read_published_document`. No client-supplied user ID grants authority. Runtime proposes `prepare_admission`, `recheck_admission` and lazy `storage_clients`; artifact callback defaults to None for compatibility. Typed errors distinguish 403, current exact-user gate 409 `needs_reconciliation`/`retryable=false`, and dependency/proof 503. Packet `03-authenticated-facades.md` remains draft until its session-revocation lock order, stamp and readback contracts pass review.
 
 - [ ] Write red two-pool tests: same cookie crosses pools, logout invalidates both, disabled/out-of-allowlist user refuses, CSRF refuses before `ImportUpload` stream consumption, tenant A cannot read tenant B task/document, unresolved gate maps only after authoritative per-user gate query, and non-gate `PublicationEvidenceError` maps to 503.
 - [ ] Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/integration/test_distributed_import_facades.py --basetemp=.pytest-tmp-isolated-runtime-p3-n1`; expected RED on new facade imports.
@@ -107,11 +107,19 @@ The paired baseline proof reads published heads/receipts, History witness, and M
 ```python
 session = sessions.validate_csrf(cookie_token, csrf_token)
 require_trusted_active_user(session.user_id, settings.trusted_user_ids)
-require_ordinary_ready(session.user_id)
-summary = artifacts.submit_uploads(session.user_id, uploads)
+stamp = runtime.prepare_admission(session.user_id)
+require_successful_stamp(stamp)
+summary = artifacts.submit_uploads(session.user_id, uploads,
+    admission_recheck=cursor_only_same_user_stamp_and_session_recheck)
 ```
 
-Do not expose `register` and do not use `SessionRegistry` local runtime. Gate recognition uses a fresh authoritative `user_publication_gates` read for that exact session user; never classify all evidence exceptions as gates. Readback verifies History/reference/witness, pinned source and published generation at the tenant scope before returning sanitized DTO data.
+The callback runs in the same READ COMMITTED transaction after the active-user/gate check and before SQL batch/reference mutation. First call `sessions.recheck_csrf_in_transaction(cursor, cookie_token, csrf_token, expected_user_id=session.user_id)`: hash the original token, select its session row FOR UPDATE NOWAIT, then obtain a fresh database clock and verify persisted user, allowlist, CSRF and expiry. Retain that row lock through commit. NOWAIT avoids the expired-token cleanup/login foreign-key lock cycle; conflicts abort with sanitized 503, without restaging or automatic retry. Logout committed first refuses; admission locked first linearizes before logout. Then consume/recheck the stamp on the same cursor, with no external I/O or new connection.
+
+`prepare_admission(user_id) -> IsolatedAdmissionStamp | None` retains the same fully validated final authority tuple, deep-frozen and registered by original object identity. `recheck_admission(cursor,user_id,stamp)` atomically consumes at most once before comparison; rollback cannot restore it. `discard_admission(stamp) -> None` is idempotent and owner-bound; the facade calls it in finally on every path after prepare, including stream/S3/gate/session failures before callback. Close invalidates all entries and prevents in-flight preparation publishing new stamps; no lifecycle lock spans external proof or acquisition of DB resources. `storage_clients()` exposes existing lifecycle-fenced lazy clients. Service construction requires `sessions.runtime is runtime` and the same API-role database identity.
+
+A failed SQL admission may leave unreferenced immutable staged objects. Preserve InvalidSessionError/InvalidCsrfTokenError: facade invalid/expired/revoked session maps to 401, CSRF/untrusted to 403, missing/foreign items to 404. Catch only `UnresolvedPublicationGate`, allow the failed transaction to roll back/release locks, then query the exact initially authenticated user's current unresolved gate: only present evidence yields 409 needs_reconciliation/retryable=false. Cleared/missing/wrong-user gate, failed classification, base evidence exceptions and uncertain proofs yield sanitized 503. Do not expose register or use SessionRegistry local runtime.
+
+Readback captures active user, exact RAG index/head/full receipt, full History payload/version and witness, all relevant references and all requested-document deletion fences in one bound SQL statement. Validate final data as well as equality: queued/running or failed attempt_count<3 fences prohibit visibility. Pin the no-engine generation view to the proven full head; scan the entire unfiltered corpus against receipt count/digest and require tenant-scoped document membership. Verify returned S3 bytes' size/SHA256 against the final proven reference, including reference ABA. Safe DTO fields are document_id, display filename, suffix, size and content bytes with repr=False. Use at most one complete retry, no authority lock across external I/O. Task04 supplies the real provider adapter before Task05 can expose ordinary admission; Task03's synthetic test hook is not live provider acceptance.
 - [ ] Rerun focused tests and existing PG auth/artifact suites; preserve old return defaults and no local fallback.
 
 ### Task 04: Single publication Worker and separate recovery loop
@@ -157,12 +165,13 @@ The actual event text and profile must match C's current contract; no fixed 4D t
 ```python
 @router.post('/api/v1/imports', status_code=202)
 def submit(request: Request, files: list[UploadFile] = File(...)):
-    session = sessions.validate_csrf(cookie(request), csrf(request))
+    token, csrf_token = cookie(request), csrf(request)
+    sessions.validate_csrf(token, csrf_token)  # SharedSession, server-resolved
     uploads = [ImportUpload(item.filename or '', item.file) for item in files]
-    return import_batch_response(imports.submit_uploads(session, uploads))
+    return import_batch_response(imports.submit_uploads(token, csrf_token, uploads))
 ```
 
-Resolve validation before reading bytes or issuing object writes; public errors omit SQL, source text and credentials. Do not include existing `api.app.create_api_app`, full `auth.router`, or full `imports.router` because they register excluded routes.
+Consume `DistributedImportSessions(runtime)` and `DistributedImportService(runtime,sessions)` from the same API-role runtime; session responses use SharedSession and its existing fields. Pass original tokens to every facade call, never a caller-provided user or SharedSession as admission authority. Resolve validation before reading bytes or issuing object writes; the facade repeats cursor-only NOWAIT session and stamp checks before commit and always discards the stamp. Preserve sanitized 401/403/404, exact current gate 409 and uncertainty 503 mappings. Public document responses expose only the safe DTO fields and approved bytes, no physical identity or proof snapshots. Task04's real exact-profile provider adapter is required before enabling ordinary admission. Public errors omit SQL, source text and credentials. Do not include existing `api.app.create_api_app`, full `auth.router`, or full `imports.router` because they register excluded routes.
 - [ ] Run focused tests, route-table check, and ordinary local API regression; verify `ApplicationServices.create()` still rejects ordinary distributed mode.
 
 ### Task 06: Isolated actual-process acceptance

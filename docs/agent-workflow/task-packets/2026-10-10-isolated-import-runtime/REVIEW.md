@@ -4,7 +4,7 @@
 - Approved design: `docs/superpowers/specs/2026-10-10-isolated-import-runtime-design.md`
 - Reviewed commit: `38bc8bcabd90e23a7518375d7e2087a399f0eec9`
 - Review date: 2026-10-10
-- Verdict: Task 01 is accepted and done at source commit `d81f0c3494d02bca51fb312c602d215edf6f98a0`. Task 02's complete implementation contract passed independent Astra High review and is ready; its source implementation and tests are pending. Tasks 03–07 remain proposed work, not reviewed or ready packets.
+- Verdict: Tasks 01–02 are accepted and done at source commits `d81f0c3494d02bca51fb312c602d215edf6f98a0` and `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`. Task03 corrective contract passed independent Astra n2 review and is ready for Sol High implementation. Tasks04–07 remain proposed work, not ready packets.
 
 ## Repository evidence
 
@@ -59,7 +59,8 @@
 |---|---|---:|---|---|
 | `01-tenant-selection.md` | none | no | `app/postgres_import_leases.py`, `app/import_publication_recovery.py`, optional `app/import_tenant_selection.py`, `tests/test_import_tenant_selection.py`, `tests/integration/test_isolated_import_tenant_selection.py` | SQL tenant prefilter for ordinary claim, expiry, and recovery |
 | `02-runtime-readiness.md` | `01-tenant-selection.md` (done) | no | create `app/isolated_import_runtime.py`, `tests/test_isolated_import_runtime.py` | Reviewed explicit isolated configuration, resource ownership, and independent recovery/ordinary readiness |
-| Tasks 03–07 | serial predecessors per source plan | no | not yet assigned | New packets only after predecessor acceptance and current-code review |
+| `03-authenticated-facades.md` (ready) | `02-runtime-readiness.md` (done) | no | create sessions/service/new facade test; narrow runtime/artifact/evidence seams | Shared sessions, same-transaction admission proof and no-engine published-document readback; Astra n2 READY |
+| Tasks 04–07 | serial predecessors per source plan | no | not yet assigned | New packets only after predecessor acceptance and current-code review |
 
 ## Packet readiness audit
 
@@ -67,6 +68,7 @@
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | `01-tenant-selection.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `02-runtime-readiness.md` | yes | yes | yes | yes | yes | yes | yes | yes |
+| `03-authenticated-facades.md` | yes | yes | yes | yes, six files | yes | yes | yes | yes |
 
 Task 01 passed its earlier ready gate, was implemented, then independently accepted. The completed packet records final GREEN 28 and regression 194 with actual exits 0; the root's accepted delivery binding is `.runtime/isolated-import-runtime/p1-delivery-root-n3.json`, and Astra's final Spec/Quality PASS report is `p1-final-accepted-astra-n4.md` (SHA256 `d911fcc66e1c920034cf8e57752fe9836e8049fb03dffe846b14286f81004cd5`). Task 02 passed independent plan review: `.runtime/isolated-import-runtime/p2-plan-astra-n2.md`, SHA256 `16130c01e2e8c57a4c4300eb8ed173838ec2cd19a8565af4312077331a686553`, binding the complete pre-bookkeeping packet `a8a89fb5bde13e528b8c32bfb3acd1a94b808e999808cc203327c8d83fd4c791` and source plan `7a05589b77990a8d0940b1b52628af7b52b30f3399e10fedaaae09405e38988c`. Task 02 is now implemented and accepted on the exact source/test bytes: Astra final Spec/Quality PASS report `p2-final-accepted-astra-n4.md` (SHA256 `1ee8dfa7a3bc225b88b42c6b15bb5f1eab73e0c1d14fe7e11f7d271b3c63cd26`) and root `p2-delivery-root-n4.json` verify complete new-file 71 plus regression 51 unique cases, actual exits 0 and zero failures/errors/skips. The earlier reviewed readiness contract remains unchanged; synthetic provider reports do not establish real provider/admission acceptance. Its source base is `d81f0c3`; root's later progress-document commit `181e2d9` is a descendant and changes no source interface. Readiness bookkeeping does not change the independently reviewed contract.
 
@@ -90,4 +92,4 @@ Task 01 passed its earlier ready gate, was implemented, then independently accep
 
 ## Open decisions
 
-- No unresolved plan findings for Tasks 01–02. Task 02 implementation requires the assigned Sol High model to be available; its last planning attempt ended on an explicit usage-limit error. Tasks 03–07 still require fresh packets and review after their predecessors are accepted.
+- Tasks01–02 are accepted. Task03 corrects the earlier local UserSession return type to SharedSession and adds three narrow current-source seams for atomic admission and typed gate errors. Astra n1 report `p3-plan-astra-n1.md` (SHA256 `63ed45e3268438d1d768715345f0491271d827a8a805d37d1143d0f38dbd5ab1`) required R1–R4: cursor-only NOWAIT session validation avoids login cleanup/FK lock cycle; final readback includes deletion fences and source-byte/reference binding; original-identity stamps have atomic consumption/discard/close lifecycle; precise errors and same-runtime constructors are specified. Independent n2 report `p3-plan-astra-n2.md` (SHA256 `a67ed9ab4525eb59020cfce41ecc11039096ca5f49ade36c5184baca9a9c8994`) closed all four and judged the revised packet plus Task05 consumer READY. Root assigns Sol High within the six-file boundary; runner review/GO still precedes pytest. This is implementation authorization, not source/test acceptance. Tasks04–07 still require fresh packets after accepted predecessors.
