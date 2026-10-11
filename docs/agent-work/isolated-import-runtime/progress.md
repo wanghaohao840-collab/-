@@ -75,3 +75,5 @@ full n1 完整新文件实际退出 0，41 passed，236.09 秒；regression n1 �
 ## 2026-10-11：Task03 独立验收通过
 
 Astra 最终 `p3-final-accepted-astra-n4.md` 为 SPEC PASS / QUALITY PASS，SHA256 `75beedac1701b4a03a3a9f2367bb8ca63f65ab7daaad9156dca1afa532733e06`。独立解析原始 XML/日志/pytest 及 wrapper 退出、83 项 before/after 字节与当前源码，确认 41 个完整新文件用例 + 112 个回归用例共 153 个不同用例，全部通过，15 个保护文件未变。S1/S2/T1 问题闭合，精确六文件 Task03 已验收并设 done。根接下来提交/推送授权源码与对应文档；Task04 独立 Worker 仍仅进行只读接口核对，尚无 ready 任务包或实现。
+
+源码提交 `913f7680c3a87691c2dd2d1eff5f2de54839e13f`，父提交 `5646d155176902131db212d2310978cf9e46feb1`，精确包含六个授权源码/测试和四个交付文档。根 `p3-commit-binding-root-n1.json` 实际退出 0，验证六个 Git blob 等于实际测试 raw SHA，15 个保护文件未变。`p3-source-push-root-n1.json` 记录实际推送退出 0（`5646d15..913f768`），随后独立 ls-remote 退出 0，精确匹配该源码提交，`remote_read_verified=true`。交付位于隔离分支，未合并 main 或进行生产切换。
