@@ -1,11 +1,11 @@
 ---
 id: "2026-10-10-isolated-import-runtime-02"
 title: "Open a trusted isolated runtime with separate recovery and ordinary readiness"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["2026-10-10-isolated-import-runtime-01"]
 base-commit: "d81f0c3494d02bca51fb312c602d215edf6f98a0"
-owner: "unassigned"
+owner: "GPT-6 Sol High; root-controlled test lane"
 ---
 
 # Task Packet: explicit isolated runtime identity and readiness
@@ -133,17 +133,17 @@ Task 01 added an optional SQL tenant filter to ordinary claim, ordinary expiry, 
 
 ## Acceptance criteria
 
-- [ ] Pure settings tests show default-off and every missing/contradictory/unsafe/timing case fails before any network constructor; direct dataclass construction cannot evade the same checks; `repr`/safe errors never include credential markers.
-- [ ] Exactly two canonical trusted UUIDs become a nonempty `frozenset`; both role values produce isolated runtime objects with separate resource ownership and idempotent cleanup. API role starts no Worker/publisher/embedding background activity.
-- [ ] An actual newly created, migrated isolated schema validates its own `current_schema`, search path and ledger; a wrong schema or ordinary/retained identity is rejected. Startup only needs PG.
-- [ ] An injected `PostgresDatabase.open()` half-open failure releases the underlying pool despite `_opened=False`; no provider constructor runs and no leaked pool remains. A test settings mapping retains a genuine ordinary identity while ignoring only the new test fixture's DSN substitution.
-- [ ] Real versioned bucket and both exact physical Qdrant collections plus two pre-attested user baselines yield `recovery_ready() is True`. With no provider hook, `ordinary_ready(user_id) is False` for each; an explicitly synthetic exact-profile hook makes the storage/baseline composition true. Record that this is **not** real provider readiness or admission acceptance. An absent or contradictory History/RAG/episode/Memory baseline yields ordinary false without creating substitute data.
-- [ ] With PG still healthy, unavailable S3 or Qdrant yields recovery true and ordinary false; with PG unavailable, both are false. All probe operations are read-only.
-- [ ] Absent/false/mismatched/throwing provider hooks yield ordinary false while recovery remains true; a correctly typed exact-profile synthetic hook is only a contract test. Task 03/04 remains responsible for real provider-key, provider-health and embedding-profile acceptance.
-- [ ] A forced RAG/episode head or snapshot change between baseline reads cannot make a mixed publication appear ordinary-ready; at most one complete recheck is attempted.
-- [ ] An independent Memory-document mutation with unchanged head/snapshot versions is observed by the complete authority tuple. A controlled row deletion during episode vector scroll either fails validation immediately or makes the whole bounded recheck return false; the old captured episode bundle cannot make readiness true.
-- [ ] An ABA test with equal invalid before/after row sets and a valid intermediate public episode capture cannot return true. Final-data validation binds all episodic entries, including negative importance, to the verified public operation without treating default-threshold results as the full corpus.
-- [ ] No existing ordinary application behavior or the 15 pre-existing dirty paths changes.
+- [x] Pure settings tests show default-off and every missing/contradictory/unsafe/timing case fails before any network constructor; direct dataclass construction cannot evade the same checks; `repr`/safe errors never include credential markers.
+- [x] Exactly two canonical trusted UUIDs become a nonempty `frozenset`; both role values produce isolated runtime objects with separate resource ownership and idempotent cleanup. API role starts no Worker/publisher/embedding background activity.
+- [x] An actual newly created, migrated isolated schema validates its own `current_schema`, search path and ledger; a wrong schema or ordinary/retained identity is rejected. Startup only needs PG.
+- [x] An injected `PostgresDatabase.open()` half-open failure releases the underlying pool despite `_opened=False`; no provider constructor runs and no leaked pool remains. A test settings mapping retains a genuine ordinary identity while ignoring only the new test fixture's DSN substitution.
+- [x] Real versioned bucket and both exact physical Qdrant collections plus two pre-attested user baselines yield `recovery_ready() is True`. With no provider hook, `ordinary_ready(user_id) is False` for each; an explicitly synthetic exact-profile hook makes the storage/baseline composition true. Record that this is **not** real provider readiness or admission acceptance. An absent or contradictory History/RAG/episode/Memory baseline yields ordinary false without creating substitute data.
+- [x] With PG still healthy, unavailable S3 or Qdrant yields recovery true and ordinary false; with PG unavailable, both are false. All probe operations are read-only.
+- [x] Absent/false/mismatched/throwing provider hooks yield ordinary false while recovery remains true; a correctly typed exact-profile synthetic hook is only a contract test. Task 03/04 remains responsible for real provider-key, provider-health and embedding-profile acceptance.
+- [x] A forced RAG/episode head or snapshot change between baseline reads cannot make a mixed publication appear ordinary-ready; at most one complete recheck is attempted.
+- [x] An independent Memory-document mutation with unchanged head/snapshot versions is observed by the complete authority tuple. A controlled row deletion during episode vector scroll either fails validation immediately or makes the whole bounded recheck return false; the old captured episode bundle cannot make readiness true.
+- [x] An ABA test with equal invalid before/after row sets and a valid intermediate public episode capture cannot return true. Final-data validation binds all episodic entries, including negative importance, to the verified public operation without treating default-threshold results as the full corpus.
+- [x] No existing ordinary application behavior or the 15 pre-existing dirty paths changes.
 
 ## Test and verification commands
 
@@ -179,20 +179,20 @@ Stop with the repository's reality-conflict report if a cited constructor, publi
 
 ## Implementation handoff
 
-After this packet is reviewed, assigned and implemented, replace this placeholder with:
+Implementation completed by the assigned Sol High worker; final root and Astra evidence review remains pending. This handoff records the frozen implementation and actual test results, without marking the packet accepted.
 
-```markdown
-## Implementation handoff
-
-- Packet: `2026-10-10-isolated-import-runtime-02`
-- Status: `done | blocked`
-- Delivered: <specific trusted configuration and readiness result>
-- Files changed: <only the two owned paths, with purpose>
-- Interfaces added or changed: <exact signatures and failure behavior>
-- Acceptance evidence: <criterion-by-criterion real observations>
-- Verification: <exact commands, exit, pass/fail/skip counts, XML hashes and resource identities>
-- Scope confirmation: changed only allowed files: yes/no; forbidden areas untouched: yes/no
-- Deviations: none or approved precise deviation
-- Residual risks/follow-ups: <specific limits>
-- Commit: <hash or not committed>
-```
+- Packet: `2026-10-10-isolated-import-runtime-02`.
+- Status: `done` — root accepted the bound source/test bytes after Astra's final independent evidence review.
+- Delivered: immutable, default-off, exact two-user isolated settings; libpq-effective configured PG identity rejection; owned PostgreSQL pool; PG-only recovery readiness; lazy S3/Qdrant and optional typed provider report for ordinary readiness; full before/candidate/after authority captures and final-data validation with at most one retry. No provider adapter, admission, Worker loop or embedding engine is installed.
+- Files changed for implementation: `app/isolated_import_runtime.py` (SHA256 `5ed6e0614596689969c97ac64f6754e9228b8a7128831da633ad550854fdb0a2`) and `tests/test_isolated_import_runtime.py` (SHA256 `b16832c62a591707534654692200a67a366d5dfe48d6f15038f0b518b0f87513`). This packet's status and handoff are workflow records; private ignored `.runtime/isolated-import-runtime/` files hold evidence.
+- Interfaces: `IsolatedImportSettings.from_env(role, env=None)` and direct construction reject malformed, ambiguous or reused identities with `IsolatedImportConfigurationError` codes only; `open_isolated_runtime(settings, *, provider_probe=None)` opens and verifies its own PG pool; `IsolatedImportRuntime.recovery_ready()`, `.ordinary_ready(user_id)`, `.close()` and context-manager methods expose read-only readiness and owned cleanup. `ProviderReadiness` is a typed profile-bound hook result; absence or mismatch means ordinary false.
+- Configuration and startup evidence: 58 service-independent unit cases cover default-off, canonical two-user trust, direct/from-env malformed types and effective DSN aliases, retained/ordinary-resource rejection, secret-safe representations, half-open pool closure, identity hard failures, transient PG false, and concurrent lazy creation/close. Real tests migrate a newly generated isolated schema, verify exact schema/search path/single migration head/24 relations, and prove two independent API pools plus a Worker pool. Missing relation, extra ledger head, inactive user and missing baseline fail closed.
+- Ordinary proof evidence: 13 real-service cases use a newly created versioned bucket and exact RAG/episode physical collections for two pre-attested accounts. Both users are false without a provider hook and true only with a clearly synthetic exact-profile hook; nonempty History witness and pinned S3 object, full negative-importance episode scroll, final reference/witness/receipt mismatch, SQL Memory ABA, head/snapshot drift and bounded retry are exercised. The synthetic hook is **not** evidence of real provider health or upload admission. S3/Qdrant unavailability leaves PG-only recovery true; PG unavailability returns both readiness values false.
+- Verification commands: the root-reviewed private runner `.runtime/isolated-import-runtime/run-p2-sol-n4.py` invoked `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q` serially with unique `--basetemp=.runtime/pytest-isolated-runtime-p2-<stage>-n4` and `--junitxml=.runtime/isolated-import-runtime/p2-<stage>-n4.xml`. Stage selectors were `tests/test_isolated_import_runtime.py -k 'not real'`, the same file `-k real`, the complete same file unfiltered, then `tests/test_deployment_settings.py tests/integration/test_postgres_auth_sessions.py tests/integration/test_import_memory_publication.py`. The WMI-launched wrapper and runner each saved actual exits, service preflight, before/after source hashes, log and XML digests; completion receipts are `.runtime/isolated-import-runtime/p2-<stage>-n4-completion.json`.
+- Actual n4 results: unit 58 passed, exit 0, 0 failed/error/skipped, XML SHA256 `41b37dc9f44be274e90b2375e86a2ae16b1ea7ef3aeb876e0487540f3b00f306`; real 13 passed, exit 0, 0 failed/error/skipped, XML SHA256 `568f28b8e793becc861bf84640a08c8207a2d70592422e5226ffb22278e84a32`; full 71 passed, exit 0, 0 failed/error/skipped, XML SHA256 `8a367aa8ccbef7e73896a1f4716b381ff3dc762a417c471f6359d062750a2378`; regression 51 passed, exit 0, 0 failed/error/skipped, XML SHA256 `08951cb96fb38168b8bf09d1a7b384de22ed604bc4483a1b68c5befcfd4eefc7`. Unit and real test IDs are disjoint and their union equals the full file's 71 IDs; do not add the full rerun as new coverage. All four source snapshots matched before/after.
+- Real dependency identity: PostgreSQL `1223c178a3381daf0a26616d761150e8ff2287ff5ba3cd27525abf0ade7a4fe7` on `127.0.0.1:59497`, S3 `68a974561f1e456bdb0fae7a5be425301b967777779e920166cc6a508c60cb46` on `:59498`, target Qdrant `6bb7e303df12694d9094ce11398b7f05c811cb58dd70c4ba48f78ce628d4f017` on `:49889`, with expected named volumes. Protected source Qdrant `bb5a56d410d7f2da22a49a853b68dfa907a35e87afd306e886f469866b14f771` remained exited with no published port. The runner checked full IDs, names, mounts, ports and health before each real/full/regression stage; child-only fixture credentials were not logged.
+- Scope confirmation: only the two allowed source/test files were added. All 15 pre-existing dirty source/test/migration paths have identical raw SHA256 values between the n1-unit before and n4-regression after receipts. No forbidden source area was edited by this worker; no commit or push was made.
+- Deviations/history: a pre-implementation absent-module RED was **not** captured because the source file was already written before the first test run; no artificial RED was created. n1 unit passed 17; n1 real stopped before pytest when Docker was unavailable. n2 unit passed 30; n2 real exited 1 with 11 passed and 2 fixture failures before the History helper's caller-owned transaction fix. n3 unit passed 58; n3 real stopped before pytest because the Docker daemon pipe disappeared. These historical receipts remain separate and are not relabeled as accepted n4 evidence. n1/n2/n3 full and regression were not run. The n4 real/full/regression stages used the restored test-only Docker engine and fresh preflight.
+- Residual risks/follow-ups: real embedding-provider health, exact profile engine construction and atomic admission recheck belong to Tasks 03/04. Readiness is a point-in-time read-only result, not durable permission to publish. Retained historical vector provenance, process restart, recovery execution and production acceptance were not tested by Task 02.
+- Final independent review: `.runtime/isolated-import-runtime/p2-final-accepted-astra-n4.md`, SHA256 `1ee8dfa7a3bc225b88b42c6b15bb5f1eab73e0c1d14fe7e11f7d271b3c63cd26`; Spec PASS / Quality PASS, scoped Task02 ACCEPTED. Root receipt `.runtime/isolated-import-runtime/p2-delivery-root-n4.json`, SHA256 `ca043d2c9e40cd1235a7c6fcb92086ce4822543ba07a3916863dd94d89e8c698`, independently verifies 122 unique test IDs, exact source hashes and preserved prior source/dirty bytes. Original WMI launch files have a literal newline suffix; root's `p2-launch-binding-root-n4.json` binds parsed launches to unchanged originals. Complete runner/pytest exit receipts remain valid.
+- Commit: root will commit only the two accepted source/test files and scoped delivery documentation. The following source commit supplies the exact hash; commit/push status is separately recorded in progress and private delivery receipts.
