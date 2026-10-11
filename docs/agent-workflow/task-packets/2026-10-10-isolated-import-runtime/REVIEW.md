@@ -4,7 +4,7 @@
 - Approved design: `docs/superpowers/specs/2026-10-10-isolated-import-runtime-design.md`
 - Reviewed commit: `38bc8bcabd90e23a7518375d7e2087a399f0eec9`
 - Review date: 2026-10-10
-- Verdict: Tasks 01–02 are accepted and done at source commits `d81f0c3494d02bca51fb312c602d215edf6f98a0` and `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`. Task03 exact six-file implementation passed independent Astra final SPEC PASS / QUALITY PASS and is done; root source-commit binding follows. Tasks04–07 remain proposed work, not ready packets.
+- Verdict: Tasks 01–02 are accepted and done at source commits `d81f0c3494d02bca51fb312c602d215edf6f98a0` and `18e1f1b591e767373c9f81e4fd45c5c2f5b882f8`. Task03 exact six-file implementation passed independent Astra final SPEC PASS / QUALITY PASS and is done at `913f7680c3a87691c2dd2d1eff5f2de54839e13f`; root verified raw commit binding and remote delivery. Task04 passed independent Astra n2 ready review; Tasks05–07 remain proposed work, not ready packets.
 
 ## Repository evidence
 
@@ -33,6 +33,8 @@
 ### Blocking
 
 - None for drafting packet 01. Its assignment remains gated on independent Astra review of this packet and any resulting corrections.
+- Task04 passed independent ready review of the four-CREATE-file provider amendment, ready-subset ordinary selector, typed provider-refusal recovery_only composition, private combined-authority coupling and bounded late-work reporting. Root assigns Sol High; runner review/GO precedes pytest and source follows genuine pre-source RED. This is a contract gate, not implementation acceptance.
+- Astra n1 `p4-plan-astra-n1.md` SHA256 `e4c0488fc2ce57935b4b96a70b1dd0a9c5e3c303e47eb58ed68b20e1b15489a6` required R1/R2. Root revised recovery renewal to serial returned-claim adoption without concurrent proof renewal, and specified single retained preflight/recovery/close lanes with observation deadlines, late-claim refusal, probe liveness and one total stop deadline. Clean reports runtime close completion only, not independently proved underlying resource release. Real-PG expiry/renewal/capture and deterministic readiness/late-claim/close barriers were added. Astra n2 p4-plan-astra-n2.md SHA256 380bc17855ed1786a86f9ff9dcf22ba612c3d52bf28dc54a9b5d4942d7b52160 independently closed R1/R2 and judged the complete four-document contract READY. Source/runtime acceptance remains separate.
 
 ### Required revisions
 
@@ -60,7 +62,8 @@
 | `01-tenant-selection.md` | none | no | `app/postgres_import_leases.py`, `app/import_publication_recovery.py`, optional `app/import_tenant_selection.py`, `tests/test_import_tenant_selection.py`, `tests/integration/test_isolated_import_tenant_selection.py` | SQL tenant prefilter for ordinary claim, expiry, and recovery |
 | `02-runtime-readiness.md` | `01-tenant-selection.md` (done) | no | create `app/isolated_import_runtime.py`, `tests/test_isolated_import_runtime.py` | Reviewed explicit isolated configuration, resource ownership, and independent recovery/ordinary readiness |
 | `03-authenticated-facades.md` (done) | `02-runtime-readiness.md` (done) | no | sessions/service/new facade test; narrow runtime/artifact/evidence seams | Shared sessions, atomic admission and no-engine published readback; Astra final SPEC/QUALITY PASS |
-| Tasks 04–07 | serial predecessors per source plan | no | not yet assigned | New packets only after predecessor acceptance and current-code review |
+| `04-independent-worker.md` (ready) | `03-authenticated-facades.md` (done) | no | create provider, Worker, CLI and new Worker test (four files) | Independently ready: real profile/probe, ready-subset ordinary selection, full-trust recovery, retained late-work ownership; Sol High assignment |
+| Tasks 05–07 | serial predecessors per source plan | no | not yet assigned | New packets only after predecessor acceptance and current-code review |
 
 ## Packet readiness audit
 
@@ -69,6 +72,7 @@
 | `01-tenant-selection.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `02-runtime-readiness.md` | yes | yes | yes | yes | yes | yes | yes | yes |
 | `03-authenticated-facades.md` | yes | yes | yes | yes, six files | yes | yes | yes | yes |
+| `04-independent-worker.md` | yes | yes | yes | four CREATE files | yes | yes | yes | yes, Astra n2 |
 
 Task 01 passed its earlier ready gate, was implemented, then independently accepted. The completed packet records final GREEN 28 and regression 194 with actual exits 0; the root's accepted delivery binding is `.runtime/isolated-import-runtime/p1-delivery-root-n3.json`, and Astra's final Spec/Quality PASS report is `p1-final-accepted-astra-n4.md` (SHA256 `d911fcc66e1c920034cf8e57752fe9836e8049fb03dffe846b14286f81004cd5`). Task 02 passed independent plan review: `.runtime/isolated-import-runtime/p2-plan-astra-n2.md`, SHA256 `16130c01e2e8c57a4c4300eb8ed173838ec2cd19a8565af4312077331a686553`, binding the complete pre-bookkeeping packet `a8a89fb5bde13e528b8c32bfb3acd1a94b808e999808cc203327c8d83fd4c791` and source plan `7a05589b77990a8d0940b1b52628af7b52b30f3399e10fedaaae09405e38988c`. Task 02 is now implemented and accepted on the exact source/test bytes: Astra final Spec/Quality PASS report `p2-final-accepted-astra-n4.md` (SHA256 `1ee8dfa7a3bc225b88b42c6b15bb5f1eab73e0c1d14fe7e11f7d271b3c63cd26`) and root `p2-delivery-root-n4.json` verify complete new-file 71 plus regression 51 unique cases, actual exits 0 and zero failures/errors/skips. The earlier reviewed readiness contract remains unchanged; synthetic provider reports do not establish real provider/admission acceptance. Its source base is `d81f0c3`; root's later progress-document commit `181e2d9` is a descendant and changes no source interface. Readiness bookkeeping does not change the independently reviewed contract.
 

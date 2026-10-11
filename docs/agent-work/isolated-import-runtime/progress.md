@@ -77,3 +77,13 @@ full n1 完整新文件实际退出 0，41 passed，236.09 秒；regression n1 �
 Astra 最终 `p3-final-accepted-astra-n4.md` 为 SPEC PASS / QUALITY PASS，SHA256 `75beedac1701b4a03a3a9f2367bb8ca63f65ab7daaad9156dca1afa532733e06`。独立解析原始 XML/日志/pytest 及 wrapper 退出、83 项 before/after 字节与当前源码，确认 41 个完整新文件用例 + 112 个回归用例共 153 个不同用例，全部通过，15 个保护文件未变。S1/S2/T1 问题闭合，精确六文件 Task03 已验收并设 done。根接下来提交/推送授权源码与对应文档；Task04 独立 Worker 仍仅进行只读接口核对，尚无 ready 任务包或实现。
 
 源码提交 `913f7680c3a87691c2dd2d1eff5f2de54839e13f`，父提交 `5646d155176902131db212d2310978cf9e46feb1`，精确包含六个授权源码/测试和四个交付文档。根 `p3-commit-binding-root-n1.json` 实际退出 0，验证六个 Git blob 等于实际测试 raw SHA，15 个保护文件未变。`p3-source-push-root-n1.json` 记录实际推送退出 0（`5646d15..913f768`），随后独立 ls-remote 退出 0，精确匹配该源码提交，`remote_read_verified=true`。交付位于隔离分支，未合并 main 或进行生产切换。
+
+## 2026-10-11：Task04 草案与独立审查修订
+
+Task04 新增四文件边界草案：shared exact-profile provider 工厂、独立 Worker、CLI 和专属 integration test。Sol High 三份只读现实报告确认 canonical SimpleEmbedding384D / SiliconFlow BGE-M3 1024D、真实双 engine probe、ready-subset ordinary / full-trust recovery、同数据库 tenant-bound publication、adapter 的 recovery 参数和 provider-only typed refusal 下的 recovery_only 路径。全部只是接口核对，未实施或运行 provider。
+
+根 preimplementation checker 实际退出0，`p4-baseline-root-n1.json` SHA256 `a24ac842368b35e60479f426b6b7f3b88f081ad3a80c6f781385d6a24d0f5090`，81项既有源码/测试字节匹配接受基线、15项保护改动未变、四个新增源码/测试路径不存在；额外六项 embedding/preparation 输入绑定 `p4-additional-input-binding-root-n1.json` SHA256 `960ca93231c325eab905ff8da4dac3baec3e65eacc009bc972efe8757b5f824f`。这不是测试结果。
+
+Astra High n1 `p4-plan-astra-n1.md` 为 CHANGES REQUIRED，SHA256 `e4c0488fc2ce57935b4b96a70b1dd0a9c5e3c303e47eb58ed68b20e1b15489a6`。R1：recovery.renew改变两项expiry，须采用返回claim，不能与prove_or_hold并发；普通attempt仍保留原身份。R2：readiness、claim、recovery和close均需retained监督，统一stop deadline，晚到claim不得开始nextstage/renew；runtime.close返回只证明close调用完成，因现接口吞底层异常，不证明每资源释放成功。根已修订完整packet/plan/design/REVIEW，补真实PG续租/expiry/capture及阻塞barrier验收，交n2独立复核。当前仍DRAFT，未开始Task04源码或pytest；非daemon迟到线程允许有界报告失败，不能保证实际进程十秒退出。
+
+Astra n2 完整契约复核 READY，R1/R2闭合，无剩余blocking；p4-plan-astra-n2.md SHA256 380bc17855ed1786a86f9ff9dcf22ba612c3d52bf28dc54a9b5d4942d7b52160。根仅更新ready记录并准备Sol High test-only RED分配，pytest仍须runner审核GO；未获得源码/运行验收。

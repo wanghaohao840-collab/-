@@ -50,7 +50,7 @@
 
 ordinary admission 的基线或 provider 拒绝不能阻止受信 schema 中已有 queue 的恢复及状态查询。Worker 在数据库/schema 身份验证成功后仍能运行严格 recovery；不把不完整 terminal/head/witness 作为关闭恢复入口的理由。恢复服务按原协议输出 ack/abandon/manual_hold，不依赖新的 embedding 或外部写入，健康状态分别报告 ordinary-ready 与 recovery-ready。
 
-tenant allowlist 同时约束 HTTP 和数据库任务选择。隔离 schema 必须专用；普通与 recovery 的 `claim_next` 以及普通 `recover_expired` 新增可选 keyword-only `allowed_user_ids: frozenset[str] | None = None`，实际候选 SQL 在锁定/认领/expiry修改前就限制 tenant，不能选中后才过滤。隔离调用强制传非空的配置集合；`None` 保留既有库调用行为，不弱化任何原 lease/gate 检查。三处最小边界改动必须在专属实施 packet 和 Astra 审查中锁定，过滤集合内的公平/锁序保持原协议。配置外账户、任务和 queue 永远不能被本阶段 Worker 认领或由 expiry scanner 修改；不能仅靠启动时查询规避并发插入竞态。
+tenant allowlist 同时约束 HTTP 和数据库任务选择。隔离 schema 必须专用；普通与 recovery 的 `claim_next` 以及普通 `recover_expired` 新增可选 keyword-only `allowed_user_ids: frozenset[str] | None = None`，实际候选 SQL 在锁定/认领/expiry修改前就限制 tenant，不能选中后才过滤。隔离普通 claim 强制传本轮 readiness 通过的受信子集（可为空），expiry/recovery 强制传完整非空受信集合，均不得传 None；`None` 保留既有库调用行为，不弱化任何原 lease/gate 检查。三处最小边界改动必须在专属实施 packet 和 Astra 审查中锁定，过滤集合内的公平/锁序保持原协议。配置外账户、任务和 queue 永远不能被本阶段 Worker 认领或由 expiry scanner 修改；不能仅靠启动时查询规避并发插入竞态。
 
 API 角色只拥有会话、上传与读回服务，零嵌入 Worker/恢复线程。Worker 角色拥有独立数据库 pool 和 vector/object clients，运行有限普通导入循环与公平恢复循环，不提供用户 HTTP 路由。停止接受新任务、停止续租并有界等待；不能把仍在执行的后台线程误记为退出成功。恢复循环与普通任务循环使用不同 authority，任何一方停止不改变已持久化证据。
 
@@ -72,7 +72,7 @@ PG session facade 提供现有路由需要的 `login/get_session/validate_csrf/l
 
 调用链：
 
-1. `PostgresImportLeaseRepository.claim_next(worker_id, allowed_user_ids=trusted_ids)` 获得原 `ImportAttempt`，包含 task/user lease；该过滤参数是本阶段拟新增接口，尚未实现。
+1. `PostgresImportLeaseRepository.claim_next(worker_id, allowed_user_ids=ready_subset)` 获得原 `ImportAttempt`，包含 task/user lease；SQL 过滤参数已由 Task01 实现。Task04 草案细化为：普通 claim 仅选本轮真实 readiness 通过的受信用户子集，选中后再检查该用户；expiry/recovery 仍使用完整 trusted_ids，空普通子集不选择任何任务。这项细化须通过独立审查后实施。
 2. 读取 SQL pinned source 并通过 `read_source_bytes(user_id, task_id)` 校验 S3 version/hash/size。
 3. 从受信配置/PG authority 得到 tenant 的 RAG 与 episode scope，使用匹配 profile 的真实 embedding runtime 调用 `prepare_import_document(...)`；事件文本和事件嵌入规则保持 C 现有契约。
 4. 使用原 service 调 `_issue_live_publication(rag_scope, attempt, points, event_vector=..., event_profile=...)`；只把实际返回的原 handle 交给原 adapter。
@@ -89,7 +89,7 @@ intent 前明确的解析/配置失败可以通过原普通 lease failure 路径
 
 普通 expiry scanner 使用本阶段增加过滤后的 `recover_expired(limit=..., allowed_user_ids=trusted_ids)`。无 evidence 的原租约可以按已有规则恢复；有 evidence 必须保留 gate、reservations 与 queue，不能交回普通旧 attempt。
 
-独立恢复循环调用 `claim_next(worker_id, allowed_user_ids=trusted_ids) → prove_or_hold`，必要时仅通过 recovery `renew` 续其自己的 claim。短队列 capture 先提交，再等 user authority；保留 user-first 锁序和锁后数据库时钟。
+独立恢复循环调用 `claim_next(worker_id, allowed_user_ids=trusted_ids) → prove_or_hold`，必要时仅串行通过 recovery `renew` 续其自己的 claim，采用返回的更新到期时间快照后再 prove_or_hold，证明执行期间不并发续租。短队列 capture 先提交，再等 user authority；保留 user-first 锁序和锁后数据库时钟。
 
 Unknown/held 立即停止普通续租，让两条普通 lease 有限到期。证明 terminal 成功只执行 recovery ack；证明不足按现有协议保持或在合格 preterminal 且双 lease 到期后同时永久撤销两个 UUID，再安排全新的 attempt。瞬时失败的退避/上限/manual_hold 使用已有协议，不另加无限重试循环。进程死在 issuance 返回前，也从原子持久队列发现，不重建 Python capability。
 
