@@ -633,7 +633,7 @@ def require_no_gate_in_transaction(cursor, user_id: str) -> None:
         raise PublicationEvidenceError('READ COMMITTED mutation transaction required')
     if cursor.execute('''select 1 from user_publication_gates
         where user_id=%s and status='unresolved' limit 1''', (user_id,)).fetchone():
-        raise UnresolvedPublicationGate('unresolved_publication_gate')
+        raise UnresolvedPublicationGate('Unresolved import publication gates this user')
 
 
 class PostgresImportPublicationEvidenceRepository:

@@ -25,6 +25,7 @@ from app.import_publication_evidence import (
     AttemptKey, PostgresImportPublicationEvidenceRepository, PublicationEvidenceError,
     encode_intent, _canonical, _validate_stored_slots,
 )
+from app.import_document_publication import ImportDocumentPublicationError
 import app.import_memory_publication as live_module
 from app.import_memory_publication import (
     DurablePublicationUnknown, ImportMemoryPublicationError,
@@ -2272,7 +2273,7 @@ def test_old_repeatable_read_snapshot_cannot_delete_newly_gated_parent(
 
 @pytest.mark.parametrize('dependency',['source','audit'])
 def test_raw_dependency_delete_wins_before_intent_and_issuance_fails(
-        memory_publication, dependency):
+        memory_publication, monkeypatch, dependency):
     service, db, store, _, _, rag_scope, _, profile, user, _ = memory_publication
     attempt = _task(db,store,user)
     key = (user,attempt.task.task_id,attempt.lease_version)
@@ -2281,17 +2282,43 @@ def test_raw_dependency_delete_wins_before_intent_and_issuance_fails(
         if dependency == 'source' else
         ('import_task_attempts','task_id=%s and lease_version=%s',key[1:]))
     with ThreadPoolExecutor(max_workers=1) as workers:
-        with db.transaction() as cursor:
-            cursor.execute(f'delete from {table} where {where}',args)
+        if dependency == 'source':
+            entered = Event()
+            release = Event()
+            original_plan = service.documents._plan_document
+            def plan_after_delete(*args, **kwargs):
+                entered.set()
+                if not release.wait(30):
+                    raise AssertionError('Source-delete planning barrier timed out')
+                return original_plan(*args, **kwargs)
+            monkeypatch.setattr(service.documents, '_plan_document', plan_after_delete)
             issuing = workers.submit(service._issue_live_publication,
                 rag_scope,attempt,
                 [_point(rag_scope,attempt.task.document_id,'racing-delete')],
                 event_vector=[1.,0.,0.,0.],event_profile=profile)
-            time.sleep(.2)
-            assert not issuing.done(), issuing.exception() if issuing.done() else None
-        with pytest.raises((PublicationEvidenceError, ImportMemoryPublicationError,
-                            ImportLeaseLost)):
-            issuing.result(timeout=15)
+            try:
+                assert entered.wait(30), 'Issuer did not reach document planning barrier'
+                assert not issuing.done(), issuing.exception() if issuing.done() else None
+                with db.transaction() as cursor:
+                    cursor.execute(f'delete from {table} where {where}',args)
+                release.set()
+                with pytest.raises(ImportDocumentPublicationError,
+                                   match='^Pinned import source is missing$'):
+                    issuing.result(timeout=15)
+            finally:
+                release.set()
+        else:
+            with db.transaction() as cursor:
+                cursor.execute(f'delete from {table} where {where}',args)
+                issuing = workers.submit(service._issue_live_publication,
+                    rag_scope,attempt,
+                    [_point(rag_scope,attempt.task.document_id,'racing-delete')],
+                    event_vector=[1.,0.,0.,0.],event_profile=profile)
+                time.sleep(.2)
+                assert not issuing.done(), issuing.exception() if issuing.done() else None
+            with pytest.raises((PublicationEvidenceError, ImportMemoryPublicationError,
+                                ImportLeaseLost)):
+                issuing.result(timeout=15)
     with db.transaction() as cursor:
         assert cursor.execute('''select 1 from import_publication_evidence
             where user_id=%s and task_id=%s and task_lease_version=%s''',key).fetchone() is None

@@ -1,11 +1,11 @@
 ---
 id: "2026-10-10-isolated-import-runtime-04"
 title: "Independent bounded import Worker and exact-profile providers"
-status: "ready"
+status: "done"
 parallel-safe: false
 depends-on: ["2026-10-10-isolated-import-runtime-03"]
 base-commit: "51e9a9cac726ec726dfc108be23f6e7dec63bfbb"
-owner: "unassigned"
+owner: "GPT-6 Sol High / runtime_p3_sol_preflight"
 ---
 
 # Task Packet: independent isolated import Worker
@@ -110,17 +110,17 @@ Each retained background operation has bounded observation/join and recorded own
 
 ## Acceptance criteria
 
-- [ ] Genuine pre-source RED; invalid provider/profile/role refuses before engine calls/claims, secret-free errors/repr; actual simple 384D engines produce matching vectors and mock remote transport tests label their limits.
-- [ ] Provider probe performs real engine calls, reports fresh available/unavailable, timeout/busy/close stays bounded with at most one retained probe and no hidden threads.
-- [ ] Real PG/S3/target-Q text and extractable PDF imports for two tenants produce valid exact RAG/episode receipts, immutable source/document refs, History/witness/Memory events and independent exact proof. Original live issuance and adapter each execute exactly once; no second terminal writer.
-- [ ] Ready-subset claim skips unavailable tenant without task/audit mutation; excluded tenant cannot be ordinary/expiry/recovery selected. Actual typed provider construction refusal opens explicit recovery_only mode with zero ordinary readiness/claim/storage calls, while full-trust real expiry/recovery advances. Invalid isolated settings/PG identity remains fatal exit2. Later unavailable probe also preserves recovery.
-- [ ] Missing/bad pinned bytes and deterministic pre-intent parse refusal cannot publish; once issuance starts, ambiguous return/Unknown/schedule uncertainty remains held, renewal stops and recovery observes original queue. No replay after ambiguity.
-- [ ] Heartbeat renews original task/user leases; lost lease/budget/stop blocks subsequent stage. A stale delayed attempt cannot write after original authority expiry/revocation. Success racing heartbeat loss remains proof-authoritative.
-- [ ] Slow provider/adapter work reports active thread and unclean stop within settings.stop_wait_seconds; late result cannot trigger new publication; tests observe eventual thread release without leaked background work.
-- [ ] Recovery exercises real proved_succeeded and qualified abandon (both tokens revoked, fresh attempt identity), retry_later/manual_hold and excluded-row immutability using original protocol.
-- [ ] Real PG renewal then proof adopts returned claim; stale pre-renewal claim refuses; delayed proof spanning expiry/stop does not self-invalidate through concurrent renewal or trigger duplicate recovery. Retained recovery claim/user-lock wait preserves capture-first protocol and bounded stop reporting.
-- [ ] Deterministic barriers cover preclaim readiness, late ordinary claim, live probe after a previously ready tenant, recovery wait/proof and slow close. Assert one operation per lane, no late next stage/renewal, recovery reachable despite ordinary timeout, total stop deadline and unique active-thread accounting. All delayed test work is released in finally; clean means completed close attempts, not verified underlying release.
-- [ ] All required final selections actual exit 0, zero failure/error/skip, same raw source/test bytes; unit union real equals whole file; regression identities counted separately. Independent Astra Spec/Quality PASS before done/commit.
+- [x] Genuine pre-source RED; invalid provider/profile/role refuses before engine calls/claims, secret-free errors/repr; actual simple 384D engines produce matching vectors and mock remote transport tests label their limits.
+- [x] Provider probe performs real engine calls, reports fresh available/unavailable, timeout/busy/close stays bounded with at most one retained probe and no hidden threads.
+- [x] Real PG/S3/target-Q text and extractable PDF imports for two tenants produce valid exact RAG/episode receipts, immutable source/document refs, History/witness/Memory events and independent exact proof. Original live issuance and adapter each execute exactly once; no second terminal writer.
+- [x] Ready-subset claim skips unavailable tenant without task/audit mutation; excluded tenant cannot be ordinary/expiry/recovery selected. Actual typed provider construction refusal opens explicit recovery_only mode with zero ordinary readiness/claim/storage calls, while full-trust real expiry/recovery advances. Invalid isolated settings/PG identity remains fatal exit2. Later unavailable probe also preserves recovery.
+- [x] Missing/bad pinned bytes and deterministic pre-intent parse refusal cannot publish; once issuance starts, ambiguous return/Unknown/schedule uncertainty remains held, renewal stops and recovery observes original queue. No replay after ambiguity.
+- [x] Heartbeat renews original task/user leases; lost lease/budget/stop blocks subsequent stage. A stale delayed attempt cannot write after original authority expiry/revocation. Success racing heartbeat loss remains proof-authoritative.
+- [x] Slow provider/adapter work reports active thread and unclean stop within settings.stop_wait_seconds; late result cannot trigger new publication; tests observe eventual thread release without leaked background work.
+- [x] Recovery exercises real proved_succeeded and qualified abandon (both tokens revoked, fresh attempt identity), retry_later/manual_hold and excluded-row immutability using original protocol.
+- [x] Real PG renewal then proof adopts returned claim; stale pre-renewal claim refuses; delayed proof spanning expiry/stop does not self-invalidate through concurrent renewal or trigger duplicate recovery. Retained recovery claim/user-lock wait preserves capture-first protocol and bounded stop reporting.
+- [x] Deterministic barriers cover preclaim readiness, late ordinary claim, live probe after a previously ready tenant, recovery wait/proof and slow close. Assert one operation per lane, no late next stage/renewal, recovery reachable despite ordinary timeout, total stop deadline and unique active-thread accounting. All delayed test work is released in finally; clean means completed close attempts, not verified underlying release.
+- [x] All required final selections actual exit 0, zero failure/error/skip; unit union real equals whole file; regression identities counted separately. Task04b explicitly supersedes only the existing recovery test input: retained corrected Worker/facade stages keep original snapshots, fresh delete/regression use the amended test, and all other91source inputs match. Governance-document snapshots are reported separately. Independent Astra Spec/Quality PASS before done/commit.
 
 ## Test and verification commands
 
@@ -145,3 +145,13 @@ Sol handoff must list exact four file SHAs, produced signatures, command/exit/co
 ## Independent ready review
 
 Astra n2 p4-plan-astra-n2.md SHA256 380bc17855ed1786a86f9ff9dcf22ba612c3d52bf28dc54a9b5d4942d7b52160 judged the complete reviewed packet 150874d69104af2f35f339ef9876bc51b2124df5df58350ae50921ffc202cdfd READY, closing R1/R2. Status bookkeeping does not change that contract or establish source/runtime acceptance. Root assigns Sol High first to test-only RED preparation; no new source until genuine reviewed RED receipt. Coordinate stage-start/stop under a short lock released before I/O, retain uncertain late-claim reporting, and exclude the cleanup observer from its own borrower waits while counting it in active threads.
+
+## Accepted implementation handoff
+
+- Status: done. Root accepted Task04 together with narrow04a/04b corrections after independent final SPEC PASS / QUALITY PASS, no blocking findings.
+- Delivered: shared real exact-profile providers, independently supervised ordinary/recovery Worker, CLI, and dedicated Worker tests. Source and behavior boundaries remain as reviewed; later API and PID-restart tasks are open.
+- Verification: genuine pre-source RED retained; corrected unit n4 53pass, real n4 19pass, full n2 72pass, facade n1 41pass, compatibility n2 16pass, deletion n2 2pass and six-file regression n4 320pass. All final selections pytest/wrapper0 with zero failure/error/skip. Unit and real are disjoint with union72; focused16/2 are regression subsets. Total433unique including facade41.
+- Exact-byte evidence: p4-delivery-root-n3.json SHA256 b333e71d155a404e945cb3c783ec698bd36312b6426e6833b6a124a2a8564364 binds92inputs, explicit91unchanged+04btest exception, and15protected paths. Historical snapshots remain unchanged; governance updates are separate from source evidence.
+- Sol reconstructed handoff: p4-sol-handoff-n2.md SHA256364d336a539af388e9a99a98356259668aae2eeaee0ce92976875866efc90172. Astra final: p4-final-accepted-astra-n1.md SHA2561c4e731684a14931cee88a18917b41b1b27273ead4202ea772146f7f69dd0b02. Reports are private ignored artifacts, with durable hashes recorded here.
+- Resource evidence:95fixtures/1045ledger rows with created/removed pairing; this is recorded lifecycle evidence, not a new live-absence scan. Real remote embedding service, Task05–07, actual PID restart, main merge and production cutover are unaccepted.
+- Commit: root proceeds with only six authorized source/test paths and governance documents; tested Git-blob binding and remote push verification are separate subsequent receipts.
