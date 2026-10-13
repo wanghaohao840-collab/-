@@ -60,7 +60,7 @@ API 角色只拥有会话、上传与读回服务，零嵌入 Worker/恢复线�
 
 复用现有 schema、cookie/CSRF 语义和 `/api/v1` 路径。仅挂载 login、session、logout，以及导入提交、批次/任务查询和必要的已发布文档只读查询。无公开 register、QA、notes、learning、reports、delete、search 或 Gradio 路由；未挂载的功能不能通过本地服务回退。
 
-PG session facade 提供现有路由需要的 `login/get_session/validate_csrf/logout`。全部 tenant 身份来自服务端 session，不接受 body、query、上传文件或 Worker payload 声称的 user_id。账号须处于 active 且受信范围；CSRF 在读取上传内容或写入存储前完成。
+PG session facade 提供现有路由需要的 `login/get_session/validate_csrf/logout`。全部 tenant 身份来自服务端 session，不接受 body、query、上传文件或 Worker payload 声称的 user_id。账号须处于 active 且受信范围；登录使用凭据。认证后的导入和logout在业务上传流读取、导入PG/S3写入和会话删除前校验CSRF；既有session访问时间/expiry刷新可以先于CSRF比较，框架multipart网络解析/临时spool可以先于handler。这不要求改动既有session持久层。缺少files字段在可用admission下沿用facade400，框架字段错误用脱敏422。
 
 导入 facade 使用 `PostgresImportArtifactService.submit_uploads(user_id, uploads)`，通过 PG repository 获取 list/get batch/task。首阶段不挂载 cancel/retry 写控制路由；未开放的 register/control/其他业务路径必须实际返回404/405，不能整挂现有 router 意外开放。未来开放控制操作时仍需原 gate/lease 和独立验收。
 

@@ -159,23 +159,25 @@ The actual event text is `用户导入了文档：{attempt.task.original_name}` 
 
 **Files:** Create `api/isolated_import_app.py`, `tests/integration/test_isolated_import_api.py`.
 
-**Interfaces:** Produce `create_isolated_import_app(settings: IsolatedImportSettings | None = None) -> FastAPI`. The route table is exactly `/healthz`, `/api/v1/auth/login`, `/api/v1/auth/session`, `/api/v1/auth/logout`, `/api/v1/imports` POST/GET, `/api/v1/imports/{batch_id}` GET as the existing DTO requires, `/api/v1/imports/tasks/{task_id}` GET, and one explicit `/api/v1/documents/{document_id}` GET readback. The future packet must verify existing path shapes before locking them.
+**Interfaces:** Produce `create_isolated_import_app(settings: IsolatedImportSettings | None = None) -> FastAPI`. The route table is exactly `/healthz`, `/api/v1/auth/login`, `/api/v1/auth/session`, `/api/v1/auth/logout`, `/api/v1/imports` POST/GET, `/api/v1/imports/{batch_id}` GET as the existing DTO requires, `/api/v1/imports/tasks/{task_id}` GET, and one explicit `/api/v1/documents/{document_id}` GET readback. Draft packet05 fixes these current shapes, disables default docs/OpenAPI URLs and slash redirects, and requires route-table tests on app.routes. Current-code refresh and independent review precede ready.
 
-- [ ] Write red API tests that enumerate the OpenAPI route table and send register, cancel, retry, QA, notes, learning, reports, delete, search, and `/legacy/` requests. Require 404/405. Test cookie on a second API instance, CSRF before file read, logout invalidation, tenant-bound task/document, 409 gate and 503 baseline/provider errors.
-- [ ] Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/integration/test_isolated_import_api.py --basetemp=.pytest-tmp-isolated-runtime-p5-n1`; expected RED on missing factory.
-- [ ] Build a fresh `FastAPI` lifespan with API-role runtime only; mount each allowlisted endpoint explicitly. Route handler shape:
+- [x] Write red API tests that enumerate the registered route table and send register, cancel, retry, QA, notes, learning, reports, delete, search, disabled docs/OpenAPI and `/legacy/` requests. Require 404/405. Test cookie on a second API instance, CSRF before facade-owned stream read/storage writes (framework multipart parsing precedes handler validation), logout invalidation, tenant-bound task/document, 409 gate and 503 baseline/provider errors.
+- [x] Run `D:\python_self_agent\venv\Scripts\python.exe -m pytest -q tests/integration/test_isolated_import_api.py --basetemp=.pytest-tmp-isolated-runtime-p5-n1`; expected RED on missing factory.
+- [x] Build a fresh `FastAPI` lifespan with API-role runtime only; mount each allowlisted endpoint explicitly. Route handler shape:
 
 ```python
 @router.post('/api/v1/imports', status_code=202)
-def submit(request: Request, files: list[UploadFile] = File(...)):
+def submit(request: Request, files: list[UploadFile] | None = File(None)):
     token, csrf_token = cookie(request), csrf(request)
     sessions.validate_csrf(token, csrf_token)  # SharedSession, server-resolved
-    uploads = [ImportUpload(item.filename or '', item.file) for item in files]
+    uploads = [ImportUpload(item.filename or '', item.file) for item in (files or [])]
     return import_batch_response(imports.submit_uploads(token, csrf_token, uploads))
 ```
 
 Consume `DistributedImportSessions(runtime)` and `DistributedImportService(runtime,sessions)` from the same API-role runtime; session responses use SharedSession and its existing fields. Pass original tokens to every facade call, never a caller-provided user or SharedSession as admission authority. Resolve validation before reading bytes or issuing object writes; the facade repeats cursor-only NOWAIT session and stamp checks before commit and always discards the stamp. Preserve sanitized 401/403/404, exact current gate 409 and uncertainty 503 mappings. Public document responses expose only the safe DTO fields and approved bytes, no physical identity or proof snapshots. Consume Task04's shared `open_isolated_providers` and real probe before enabling ordinary admission, and own provider/runtime lifespan together without a duplicate synthetic provider hook. Public errors omit SQL, source text and credentials. Do not include existing `api.app.create_api_app`, full `auth.router`, or full `imports.router` because they register excluded routes.
-- [ ] Run focused tests, route-table check, and ordinary local API regression; verify `ApplicationServices.create()` still rejects ordinary distributed mode.
+- [x] Run focused tests, route-table check, and ordinary local API regression; verify `ApplicationServices.create()` still rejects ordinary distributed mode.
+
+Task05 draft lifecycle owns retained opener, synchronous-handler-thread request borrowers, live provider probes and exactly one eventual closer within its two-file scope. Every owned operation signals completion in its executing finally after preserving ownership; cleanup excludes itself and observers from its wait set. ASGI-loop observers use nonblocking async waits, never sync wait/join. Firstclosing including startup timeout/cancellation/partial failure sets one absolute stopdeadline. Provider-close failure cannot skip runtime close once real borrowers/probes drain. Startup/stop observation budgets are separate from actual late-thread process termination. Typed provider configuration refusal retains auth/status with probe=None and503 ordinary admission. Health is liveness only; downloads are proof-verified binary bytes with safe attachment headers. CSRF gates import business writes and logout deletion, while existing session access refresh may precede comparison; login uses credentials. Missing files with ready admission follows facade400 import_no_files. Factory has no I/O or embedded Worker/local fallback. These precise draft amendments require independent review before implementation.
 
 ### Task 06: Isolated actual-process acceptance
 
@@ -196,4 +198,4 @@ Consume `DistributedImportSessions(runtime)` and `DistributedImportService(runti
 
 ## Self-review and scope boundary
 
-The plan covers every section of `docs/superpowers/specs/2026-10-10-isolated-import-runtime-design.md`: separate composition/readiness, SQL allowlist, auth/import/readback, one-shot Worker, bounded lease/recovery, attested fixture, real process interruptions and evidence. Tasks01–04 plus narrow04a/04b corrections are accepted; earlier RED/GREEN and draft wording describes historical planning, with exact delivery recorded in completed packets. Task04 final evidence has433unique passed cases, original corrected Worker/facade snapshots and one explicitly superseded recovery test input. Tasks05–07 require fresh packet review and their own acceptance. No production cutover or parent-task completion follows from this plan.
+The plan covers every section of `docs/superpowers/specs/2026-10-10-isolated-import-runtime-design.md`: separate composition/readiness, SQL allowlist, auth/import/readback, one-shot Worker, bounded lease/recovery, attested fixture, real process interruptions and evidence. Tasks01–05 plus narrow04a/04b/05a corrections are accepted; earlier RED/GREEN and draft wording describes historical planning, with exact delivery recorded in completed packets. Task04 final evidence has433unique passed cases, original corrected Worker/facade snapshots and one explicitly superseded recovery test input. Tasks06–07 require fresh packet review and their own acceptance. No production cutover or parent-task completion follows from this plan.
